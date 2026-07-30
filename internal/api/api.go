@@ -1,4 +1,5 @@
-// Package api serves the manual (gated) sync request path (§5.9/FR4):
+// Package api serves the dashboard's read views (unit list, unit detail,
+// sync history) and the manual (gated) sync request path (§5.9/FR4/§5.11):
 // verify the caller's OAuth identity, check RBAC, then hand off to
 // reconcile.Reconciler.ManualSync.
 package api
@@ -32,17 +33,31 @@ func (m StaticUnits) Find(app, project string) (expander.SyncUnit, bool) {
 	return u, ok
 }
 
-// Handler wires auth -> RBAC -> ManualSync for the gated sync endpoint.
+// List implements UnitLister.
+func (m StaticUnits) List() []expander.SyncUnit {
+	out := make([]expander.SyncUnit, 0, len(m))
+	for _, u := range m {
+		out = append(out, u)
+	}
+	return out
+}
+
+// Handler wires auth -> RBAC -> ManualSync for the gated sync endpoint, and
+// auth -> StatusStore for the dashboard's read-only views.
 type Handler struct {
 	Auth       auth.Authenticator
 	RBAC       *rbac.Config
 	Units      UnitLookup
+	Status     StatusStore
 	Reconciler *reconcile.Reconciler
 }
 
 // NewMux registers the API's routes on a fresh http.ServeMux.
 func NewMux(h *Handler) *http.ServeMux {
 	mux := http.NewServeMux()
+	mux.HandleFunc("GET /api/units", h.handleListUnits)
+	mux.HandleFunc("GET /api/units/{project}/{app}", h.handleUnitDetail)
+	mux.HandleFunc("GET /api/units/{project}/{app}/history", h.handleUnitHistory)
 	mux.HandleFunc("POST /api/sync/{project}/{app}", h.handleSync)
 	return mux
 }

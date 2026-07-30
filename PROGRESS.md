@@ -822,6 +822,37 @@ direct Google OAuth token verification as the primary path.
     application-side verification. Setting that up is an infra/deploy step
     for whoever runs this, not code in this repo.
 
+## Phase 4 — Web dashboard (in progress)
+
+- [x] **Backend read APIs** (`internal/api/store.go`, `internal/api/units.go`)
+  — the dashboard needs data no endpoint served before (everything so far
+  was write-only: manual sync). New routes, all read-only and open to any
+  IAP-authenticated caller (§5.9: read has no RBAC gate, only Sync does):
+  - `GET /api/units` — every currently-configured sync unit (from the same
+    live-refreshed `dynamicUnits`/`UnitLister` the sync endpoint already
+    uses) merged with its last-persisted `applications` row, if any. A unit
+    that exists in config but hasn't been reconciled yet reports
+    `status: "Pending"` rather than being silently absent from the list —
+    the `applications` table only gains a row after a unit's first
+    reconcile pass.
+  - `GET /api/units/{project}/{app}` — the same shape as one list entry;
+    doubles as the diff view's data source (`desiredImage` vs `liveImage`
+    is the diff).
+  - `GET /api/units/{project}/{app}/history` — `sync_events` rows for that
+    unit, newest first, capped at 50 (the table is append-only and never
+    pruned, §5.2 — an uncapped query would grow unbounded over a unit's
+    lifetime).
+  - `StatusStore` is a new interface (`PostgresStatusStore` the real impl)
+    — deliberately separate from `reconcile.Reconciler`'s DB access, which
+    only ever writes.
+  - Test: `TestHandleListUnits_RequiresAuth`,
+    `TestHandleListUnits_PendingBeforeAnySync`,
+    `TestHandleListUnits_ReflectsPersistedStateAfterSync`,
+    `TestHandleUnitDetail_UnknownUnitRejected`,
+    `TestHandleUnitHistory_ReturnsSyncEventAfterSync`.
+- [ ] Next.js dashboard app (scaffold, unit list, diff view, history view,
+  gated Sync button, component tests) — not started yet.
+
 ## Infra / delivery
 
 - [x] **Dockerfile** — multi-stage (`golang:1.26-alpine` build →

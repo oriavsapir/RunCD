@@ -167,6 +167,7 @@ func run() error {
 		Auth:       iapAuth,
 		RBAC:       rbacCfg,
 		Units:      dynUnits,
+		Status:     &api.PostgresStatusStore{DB: db},
 		Reconciler: reconciler,
 	}
 	srv := &http.Server{Addr: httpAddr, Handler: api.NewMux(handler), ReadHeaderTimeout: 10 * time.Second}
@@ -345,6 +346,17 @@ func (d *dynamicUnits) Find(app, project string) (expander.SyncUnit, bool) {
 	defer d.mu.RUnlock()
 	u, ok := d.units[app+"/"+project]
 	return u, ok
+}
+
+// List implements api.UnitLister.
+func (d *dynamicUnits) List() []expander.SyncUnit {
+	d.mu.RLock()
+	defer d.mu.RUnlock()
+	out := make([]expander.SyncUnit, 0, len(d.units))
+	for _, u := range d.units {
+		out = append(out, u)
+	}
+	return out
 }
 
 func reconcileLoop(ctx context.Context, interval time.Duration, lc *leadershipContext, gh *githubapp.Client, cs configSource, reconciler *reconcile.Reconciler, units *dynamicUnits) {

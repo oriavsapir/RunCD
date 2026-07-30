@@ -131,8 +131,9 @@ roles:
 			"admin-token":    "admin@company.com",
 			"dev-only-token": "dev-only@company.com",
 		}},
-		RBAC:  rbacCfg,
-		Units: StaticUnits{"widget-api/example-prod-eu": unit},
+		RBAC:   rbacCfg,
+		Units:  StaticUnits{"widget-api/example-prod-eu": unit},
+		Status: &PostgresStatusStore{DB: db},
 		Reconciler: &reconcile.Reconciler{
 			DB:            db,
 			ManagedFields: []string{"image"},
@@ -322,5 +323,141 @@ func TestHandleSync_AuthorizedAdminSyncsSuccessfully(t *testing.T) {
 	}
 	if live.ImageDigest != validDigest {
 		t.Fatalf("expected the deploy to have actually happened, got digest %q", live.ImageDigest)
+	}
+}
+
+// getWithBearer issues a GET request with an optional bearer token,
+// failing the test immediately on any request-construction error.
+func getWithBearer(t *testing.T, url, bearerToken string) *http.Response {
+	t.Helper()
+	req, err := http.NewRequestWithContext(context.Background(), http.MethodGet, url, nil)
+	if err != nil {
+		t.Fatalf("build request: %v", err)
+	}
+	if bearerToken != "" {
+		req.Header.Set("Authorization", "Bearer "+bearerToken)
+	}
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("GET: %v", err)
+	}
+	return resp
+}
+
+func TestHandleListUnits_RequiresAuth(t *testing.T) {
+	h, _ := newTestHandler(t)
+	srv := httptest.NewServer(NewMux(h))
+	defer srv.Close()
+
+	resp := getWithBearer(t, srv.URL+"/api/units", "")
+	defer func() { _ = resp.Body.Close() }()
+	if resp.StatusCode != http.StatusUnauthorized {
+		t.Fatalf("expected 401, got %d", resp.StatusCode)
+	}
+}
+
+// TestHandleListUnits_PendingBeforeAnySync checks that a unit present in
+// config but never reconciled shows up as Pending, not absent — the
+// applications table has no row for it yet.
+func TestHandleListUnits_PendingBeforeAnySync(t *testing.T) {
+	h, _ := newTestHandler(t)
+	srv := httptest.NewServer(NewMux(h))
+	defer srv.Close()
+
+	resp := getWithBearer(t, srv.URL+"/api/units", "admin-token")
+	defer func() { _ = resp.Body.Close() }()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("expected 200, got %d", resp.StatusCode)
+	}
+
+	var units []unitView
+	if err := json.NewDecoder(resp.Body).Decode(&units); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if len(units) != 1 {
+		t.Fatalf("expected 1 unit, got %d: %+v", len(units), units)
+	}
+	if units[0].App != "widget-api" || units[0].Status != pendingStatus {
+		t.Fatalf("expected widget-api with Status=Pending, got %+v", units[0])
+	}
+}
+
+// TestHandleListUnits_ReflectsPersistedStateAfterSync checks that once a
+// unit has been synced, the list (and detail) endpoints reflect its real
+// persisted status/health instead of Pending.
+func TestHandleListUnits_ReflectsPersistedStateAfterSync(t *testing.T) {
+	h, _ := newTestHandler(t)
+	srv := httptest.NewServer(NewMux(h))
+	defer srv.Close()
+
+	syncResp := postSync(t, srv.URL+"/api/sync/example-prod-eu/widget-api", "admin-token")
+	defer func() { _ = syncResp.Body.Close() }()
+	if syncResp.StatusCode != http.StatusOK {
+		t.Fatalf("expected sync to succeed, got %d", syncResp.StatusCode)
+	}
+
+	listResp := getWithBearer(t, srv.URL+"/api/units", "admin-token")
+	defer func() { _ = listResp.Body.Close() }()
+	var units []unitView
+	if err := json.NewDecoder(listResp.Body).Decode(&units); err != nil {
+		t.Fatalf("decode list response: %v", err)
+	}
+	if len(units) != 1 || units[0].Status != "Synced" || units[0].DesiredImage != validDigest {
+		t.Fatalf("expected 1 Synced unit with desiredImage=%s, got %+v", validDigest, units)
+	}
+
+	detailResp := getWithBearer(t, srv.URL+"/api/units/example-prod-eu/widget-api", "admin-token")
+	defer func() { _ = detailResp.Body.Close() }()
+	if detailResp.StatusCode != http.StatusOK {
+		t.Fatalf("expected 200, got %d", detailResp.StatusCode)
+	}
+	var detail unitView
+	if err := json.NewDecoder(detailResp.Body).Decode(&detail); err != nil {
+		t.Fatalf("decode detail response: %v", err)
+	}
+	if detail.Status != "Synced" || detail.LastReconciledAt == nil {
+		t.Fatalf("expected Synced detail with LastReconciledAt set, got %+v", detail)
+	}
+}
+
+func TestHandleUnitDetail_UnknownUnitRejected(t *testing.T) {
+	h, _ := newTestHandler(t)
+	srv := httptest.NewServer(NewMux(h))
+	defer srv.Close()
+
+	resp := getWithBearer(t, srv.URL+"/api/units/example-prod-eu/nonexistent-app", "admin-token")
+	defer func() { _ = resp.Body.Close() }()
+	if resp.StatusCode != http.StatusNotFound {
+		t.Fatalf("expected 404, got %d", resp.StatusCode)
+	}
+}
+
+// TestHandleUnitHistory_ReturnsSyncEventAfterSync checks the history
+// endpoint surfaces the audit trail a manual sync writes to sync_events.
+func TestHandleUnitHistory_ReturnsSyncEventAfterSync(t *testing.T) {
+	h, _ := newTestHandler(t)
+	srv := httptest.NewServer(NewMux(h))
+	defer srv.Close()
+
+	syncResp := postSync(t, srv.URL+"/api/sync/example-prod-eu/widget-api", "admin-token")
+	defer func() { _ = syncResp.Body.Close() }()
+	if syncResp.StatusCode != http.StatusOK {
+		t.Fatalf("expected sync to succeed, got %d", syncResp.StatusCode)
+	}
+
+	histResp := getWithBearer(t, srv.URL+"/api/units/example-prod-eu/widget-api/history", "admin-token")
+	defer func() { _ = histResp.Body.Close() }()
+	if histResp.StatusCode != http.StatusOK {
+		t.Fatalf("expected 200, got %d", histResp.StatusCode)
+	}
+	var events []syncEventView
+	if err := json.NewDecoder(histResp.Body).Decode(&events); err != nil {
+		t.Fatalf("decode history response: %v", err)
+	}
+	if len(events) != 1 {
+		t.Fatalf("expected 1 sync event, got %d: %+v", len(events), events)
+	}
+	if events[0].Trigger != "manual" || events[0].Actor != "admin@company.com" || events[0].Result != "succeeded" {
+		t.Fatalf("unexpected sync event: %+v", events[0])
 	}
 }
