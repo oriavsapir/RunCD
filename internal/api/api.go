@@ -7,7 +7,6 @@ import (
 	"encoding/json"
 	"log"
 	"net/http"
-	"strings"
 
 	"github.com/argorun/argorun/internal/auth"
 	"github.com/argorun/argorun/internal/expander"
@@ -56,12 +55,7 @@ type syncResponse struct {
 }
 
 func (h *Handler) handleSync(w http.ResponseWriter, r *http.Request) {
-	token, ok := bearerToken(r)
-	if !ok {
-		http.Error(w, "missing bearer token", http.StatusUnauthorized)
-		return
-	}
-	email, err := h.Auth.Verify(r.Context(), token)
+	email, err := h.Auth.Verify(r)
 	if err != nil {
 		http.Error(w, "invalid token", http.StatusUnauthorized)
 		return
@@ -116,17 +110,4 @@ func (h *Handler) handleSync(w http.ResponseWriter, r *http.Request) {
 // of verb — it can't see that %q already defeats the injection.
 func logSensitive(app, project, email string, err error) {
 	log.Printf("manual sync %q/%q by %q: %v", app, project, email, err) //nolint:gosec
-}
-
-func bearerToken(r *http.Request) (string, bool) {
-	const prefix = "Bearer "
-	h := r.Header.Get("Authorization")
-	if !strings.HasPrefix(h, prefix) {
-		return "", false
-	}
-	token := strings.TrimPrefix(h, prefix)
-	if token == "" {
-		return "", false
-	}
-	return token, true
 }

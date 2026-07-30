@@ -333,10 +333,11 @@ all three are fixed now, before Phase 2 built more on top of the same path:
   is reachable by the manual-sync API without a restart. RBAC config,
   managedFields, and notify rules are only read once at startup — restart
   to pick up changes there.
-  - Required env: `DATABASE_URL`, `AUTH_AUDIENCE` (OAuth client ID —
-    fails startup if unset, it's a trust boundary), `ARGORUN_CONFIG_REPO`,
-    `ARGORUN_CONFIG_BRANCH`, `ARGORUN_CONFIG_PATH`, `GITHUB_APP_ID`,
-    `GITHUB_APP_PEM`.
+  - Required env: `DATABASE_URL`, `IAP_AUDIENCE` (the expected `aud` claim
+    on Identity-Aware Proxy's signed identity assertion — fails startup if
+    unset, it's a trust boundary; see the IAP section below),
+    `ARGORUN_CONFIG_REPO`, `ARGORUN_CONFIG_BRANCH`, `ARGORUN_CONFIG_PATH`,
+    `GITHUB_APP_ID`, `GITHUB_APP_PEM`.
   - Optional: `RBAC_PATH` (default `rbac.yaml`, same repo/branch as config),
     `HTTP_ADDR` (default `:8080`), `RECONCILE_INTERVAL` (default `30s`).
   - **Not built yet, on purpose:** schema migrations aren't applied by
@@ -778,6 +779,48 @@ on the next review.
     across the test functions), not at `postSync`'s own `http.Client.Do`
     call, so isolating the helper into its own file doesn't shrink what
     has to be excluded.
+
+## Auth switched to Identity-Aware Proxy (IAP)
+
+Decided against both a custom NextAuth.js sign-in flow and Dex (an OIDC
+broker ArgoCD optionally uses for multi-IdP federation — unnecessary here:
+argorun is single-org/single-provider, so brokering buys nothing). Cloud
+Run sits behind an External HTTPS Load Balancer with IAP enabled: IAP
+authenticates the caller (via IAM) before the request ever reaches the
+service, and attaches a signed identity assertion header. This replaces
+direct Google OAuth token verification as the primary path.
+
+- [x] **`auth.Authenticator` interface changed shape** — `Verify` now takes
+  the whole `*http.Request` (was `(ctx, idToken string)`), since different
+  identity sources carry their credential differently: a bearer token in
+  `Authorization` for direct OAuth, a dedicated header for IAP. Both
+  implementations now own their own credential extraction.
+- [x] **`auth.IAPAuthenticator`** (new) — verifies the
+  `X-Goog-IAP-JWT-Assertion` header via `github.com/coreos/go-oidc/v3`
+  against IAP's fixed issuer (`https://cloud.google.com/iap`) and JWKS URL
+  (`https://www.gstatic.com/iap/verify/public_key-jwk`), checking the `aud`
+  claim against `IAP_AUDIENCE`
+  (`/projects/<PROJECT_NUMBER>/global/backendServices/<BACKEND_SERVICE_ID>`
+  for the LB+Serverless-NEG topology — see
+  https://cloud.google.com/iap/docs/signed-headers-howto). This is
+  defense-in-depth, not the primary gate — IAM/IAP itself is what actually
+  decides who can reach the service; verifying the assertion here guards
+  against a request that somehow bypasses IAP and forges the header.
+  `NewIAPAuthenticator` builds the verifier eagerly (not lazily) so it's
+  safe for concurrent use from construction on, and rejects an empty
+  audience up front (same fail-closed posture as `GoogleAuthenticator`).
+- [x] **`auth.GoogleAuthenticator` kept, not wired by default** — still a
+  legitimate option for a self-hoster not running behind IAP; `main.go` now
+  constructs `IAPAuthenticator` instead, but the direct-OAuth path remains
+  in the package.
+- [x] **`main.go`**: `AUTH_AUDIENCE` env var replaced with `IAP_AUDIENCE`.
+  RBAC (`rbac.CanSync`) is unchanged — IAP only answers "is this a real
+  authenticated user", not "can they sync this app/project".
+  - **Not built yet:** the actual IAP-in-front-of-Cloud-Run infrastructure
+    (External HTTPS LB, Serverless NEG, enabling IAP, granting
+    `roles/iap.httpsResourceAccessor`) — this section only covers the
+    application-side verification. Setting that up is an infra/deploy step
+    for whoever runs this, not code in this repo.
 
 ## Infra / delivery
 

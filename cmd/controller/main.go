@@ -64,9 +64,13 @@ func run() error {
 	if err != nil {
 		return err
 	}
-	// AUTH_AUDIENCE is a trust-boundary input (the OAuth client ID every
-	// manual-sync request's ID token must be issued for) — no default.
-	audience, err := requiredEnv("AUTH_AUDIENCE")
+	// IAP_AUDIENCE is a trust-boundary input (the expected aud claim on
+	// Identity-Aware Proxy's signed identity assertion — see
+	// https://cloud.google.com/iap/docs/signed-headers-howto) — no default.
+	// The service is expected to be fronted by IAP, which has already
+	// authenticated the caller; this is defense-in-depth verification of
+	// that assertion, not the primary access gate (IAM is).
+	iapAudience, err := requiredEnv("IAP_AUDIENCE")
 	if err != nil {
 		return err
 	}
@@ -116,6 +120,11 @@ func run() error {
 		return fmt.Errorf("build GitHub App client: %w", err)
 	}
 
+	iapAuth, err := auth.NewIAPAuthenticator(iapAudience)
+	if err != nil {
+		return fmt.Errorf("build IAP authenticator: %w", err)
+	}
+
 	cfgSrc := configSource{repo: configRepo, branch: configBranch, path: configPath, rbacPath: rbacPath}
 	root, units, err := loadUnits(ctx, ghClient, cfgSrc)
 	if err != nil {
@@ -155,7 +164,7 @@ func run() error {
 	dynUnits.set(units)
 
 	handler := &api.Handler{
-		Auth:       &auth.GoogleAuthenticator{Audience: audience},
+		Auth:       iapAuth,
 		RBAC:       rbacCfg,
 		Units:      dynUnits,
 		Reconciler: reconciler,

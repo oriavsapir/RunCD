@@ -39,7 +39,7 @@ not yet wired to run the reconcile loop or serve the API).
 - `health` — assesses Healthy/Degraded per resource type (service/job/workerPool)
 - `reconcile` — the core loop: fetch → diff → precondition-gate → deploy → re-fetch → persist → notify. Writes `sync_events` as an audit trail.
 - `rbac` — role/scope matching (`env:x`, `app:x@project`) for who may trigger a manual sync
-- `auth` — Google ID token verification
+- `auth` — identity verification. `IAPAuthenticator` (default, wired in `main.go`) verifies Identity-Aware Proxy's signed assertion header; `GoogleAuthenticator` (direct Google OAuth token) is kept as an option for non-IAP deployments but not wired by default.
 - `notify` — Slack notifications on sync-failed / health-degraded / stuck-out-of-sync, debounced via Postgres
 - `api` — HTTP handler for manual sync (`POST /api/sync/{project}/{app}`), Go 1.22+ pattern routing
 

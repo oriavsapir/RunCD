@@ -27,12 +27,29 @@ type fakeAuth struct {
 	tokenToEmail map[string]string
 }
 
-func (f *fakeAuth) Verify(_ context.Context, token string) (string, error) {
+func (f *fakeAuth) Verify(r *http.Request) (string, error) {
+	token, ok := fakeBearerToken(r)
+	if !ok {
+		return "", errors.New("missing bearer token")
+	}
 	email, ok := f.tokenToEmail[token]
 	if !ok {
 		return "", errors.New("invalid token")
 	}
 	return email, nil
+}
+
+func fakeBearerToken(r *http.Request) (string, bool) {
+	const prefix = "Bearer "
+	h := r.Header.Get("Authorization")
+	if !strings.HasPrefix(h, prefix) {
+		return "", false
+	}
+	token := strings.TrimPrefix(h, prefix)
+	if token == "" {
+		return "", false
+	}
+	return token, true
 }
 
 type fakeManifests struct{ byApp map[string][]byte }
