@@ -13,7 +13,6 @@ import (
 	"os"
 	"os/signal"
 	"sync"
-	"sync/atomic"
 	"syscall"
 	"time"
 
@@ -163,7 +162,7 @@ func run() error {
 	}
 	srv := &http.Server{Addr: httpAddr, Handler: api.NewMux(handler), ReadHeaderTimeout: 10 * time.Second}
 
-	var isLeader atomic.Bool
+	lc := newLeadershipContext(ctx)
 	lease := leader.New(db, holderID)
 
 	var wg sync.WaitGroup
@@ -182,12 +181,12 @@ func run() error {
 
 	go func() {
 		defer wg.Done()
-		runLeaderElection(ctx, lease, &isLeader, holderID)
+		runLeaderElection(ctx, lease, lc, holderID)
 	}()
 
 	go func() {
 		defer wg.Done()
-		reconcileLoop(ctx, reconcileInterval, &isLeader, ghClient, cfgSrc, reconciler, dynUnits)
+		reconcileLoop(ctx, reconcileInterval, lc, ghClient, cfgSrc, reconciler, dynUnits)
 	}()
 
 	// A bind/serve failure (e.g. the port is already taken) is fatal, not a
@@ -213,14 +212,14 @@ func run() error {
 // the goroutine die silently — a transient DB blip shouldn't permanently
 // strand this replica out of leader election until a manual restart.
 // lease.Run itself already reports leading(false) before returning an
-// error (internal/leader/lease.go), so isLeader is already correctly
-// false by the time this loop retries.
-func runLeaderElection(ctx context.Context, lease *leader.Lease, isLeader *atomic.Bool, holderID string) {
+// error (internal/leader/lease.go), so lc is already correctly reset by
+// the time this loop retries.
+func runLeaderElection(ctx context.Context, lease *leader.Lease, lc *leadershipContext, holderID string) {
 	const maxBackoff = 30 * time.Second
 	backoff := time.Second
 	for {
 		err := lease.Run(ctx, func(leading bool) {
-			isLeader.Store(leading)
+			lc.set(ctx, leading)
 			// holderID is HOSTNAME/os.Hostname(), operator-controlled, not
 			// external input.
 			log.Printf("leadership changed: leading=%v holder=%s", leading, holderID) //nolint:gosec
@@ -238,6 +237,50 @@ func runLeaderElection(ctx context.Context, lease *leader.Lease, isLeader *atomi
 			backoff = maxBackoff
 		}
 	}
+}
+
+// leadershipContext holds a context valid only for the current leadership
+// term, cancelled the instant leadership changes. reconcileLoop runs
+// RunOnce with the context returned by Current() at the start of a pass —
+// if leadership is lost mid-pass, that context is cancelled out from under
+// it, so in-flight Cloud Run/DB calls for that pass abort instead of
+// continuing to deploy after the lease is gone. A plain isLeader.Load()
+// boolean checked once before RunOnce starts can't do this: leadership
+// could be lost seconds into a multi-unit pass with nothing to stop it.
+type leadershipContext struct {
+	mu     sync.Mutex
+	ctx    context.Context
+	cancel context.CancelFunc
+}
+
+// newLeadershipContext starts in the "not leader" state (an
+// already-cancelled context), since this replica hasn't claimed the lease
+// yet.
+func newLeadershipContext(parent context.Context) *leadershipContext {
+	ctx, cancel := context.WithCancel(parent)
+	cancel()
+	return &leadershipContext{ctx: ctx, cancel: cancel}
+}
+
+func (l *leadershipContext) set(parent context.Context, leading bool) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	l.cancel() // end whatever term was active; a no-op if already cancelled
+	if leading {
+		l.ctx, l.cancel = context.WithCancel(parent)
+		return
+	}
+	ctx, cancel := context.WithCancel(parent)
+	cancel()
+	l.ctx, l.cancel = ctx, cancel
+}
+
+// Current returns the context for whatever leadership term is active right
+// now — cancelled already if this replica isn't leader.
+func (l *leadershipContext) Current() context.Context {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return l.ctx
 }
 
 type configSource struct {
@@ -295,7 +338,7 @@ func (d *dynamicUnits) Find(app, project string) (expander.SyncUnit, bool) {
 	return u, ok
 }
 
-func reconcileLoop(ctx context.Context, interval time.Duration, isLeader *atomic.Bool, gh *githubapp.Client, cs configSource, reconciler *reconcile.Reconciler, units *dynamicUnits) {
+func reconcileLoop(ctx context.Context, interval time.Duration, lc *leadershipContext, gh *githubapp.Client, cs configSource, reconciler *reconcile.Reconciler, units *dynamicUnits) {
 	ticker := time.NewTicker(interval)
 	defer ticker.Stop()
 	for {
@@ -310,10 +353,14 @@ func reconcileLoop(ctx context.Context, interval time.Duration, isLeader *atomic
 			}
 			units.set(expanded)
 
-			if !isLeader.Load() {
-				continue
+			// passCtx is this leadership term's context, not the raw ctx —
+			// if leadership is lost partway through RunOnce, passCtx is
+			// cancelled and in-flight work for this pass aborts.
+			passCtx := lc.Current()
+			if passCtx.Err() != nil {
+				continue // not leader
 			}
-			if _, err := reconciler.RunOnce(ctx, expanded); err != nil {
+			if _, err := reconciler.RunOnce(passCtx, expanded); err != nil {
 				log.Printf("reconcile: run once: %v", err)
 			}
 		}

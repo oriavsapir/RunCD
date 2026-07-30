@@ -413,7 +413,11 @@ func (r *Reconciler) upsert(ctx context.Context, res Result) (Result, error) {
 		INSERT INTO applications (name, target_gcp_project, desired_image, live_image, status, health, status_since, health_since, last_reconciled_at)
 		VALUES ($1, $2, $3, $4, $5, $6, now(), now(), now())
 		ON CONFLICT (name, target_gcp_project) DO UPDATE SET
-			desired_image = EXCLUDED.desired_image,
+			-- A transient manifest-fetch failure leaves res.DesiredImage
+			-- empty for that pass (reconcile() never reached the point of
+			-- setting it) — don't let that blank out a previously-recorded
+			-- desired_image; keep the last known-good value instead.
+			desired_image = CASE WHEN EXCLUDED.desired_image = '' THEN applications.desired_image ELSE EXCLUDED.desired_image END,
 			live_image = EXCLUDED.live_image,
 			status = EXCLUDED.status,
 			health = EXCLUDED.health,

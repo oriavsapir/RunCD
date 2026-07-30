@@ -983,6 +983,49 @@ func TestUpsert_StatusSinceResetsOnlyWhenStatusChanges(t *testing.T) {
 	}
 }
 
+// TestUpsert_EmptyDesiredImageDoesNotOverwritePreviousValue
+// regression-tests a data-loss bug: a transient manifest-fetch failure
+// leaves Result.DesiredImage empty for that pass (reconcile() never got as
+// far as setting it), and the upsert used to blindly overwrite the
+// previously-recorded desired_image with that blank value — discarding a
+// perfectly good prior value purely because of an ephemeral fetch error.
+func TestUpsert_EmptyDesiredImageDoesNotOverwritePreviousValue(t *testing.T) {
+	db := testutil.NewPostgres(t)
+	r := &Reconciler{DB: db}
+
+	first, err := r.upsert(context.Background(), Result{
+		Unit:         expander.SyncUnit{App: "widget-api", Project: "example-dev-01"},
+		DesiredImage: validDigest,
+		Status:       "Synced",
+		Health:       "Healthy",
+	})
+	if err != nil {
+		t.Fatalf("first upsert: %v", err)
+	}
+	if first.DesiredImage != validDigest {
+		t.Fatalf("expected DesiredImage=%s after first upsert, got %+v", validDigest, first)
+	}
+
+	// Simulate a pass whose manifest fetch failed: DesiredImage never got set.
+	_, err = r.upsert(context.Background(), Result{
+		Unit:   expander.SyncUnit{App: "widget-api", Project: "example-dev-01"},
+		Status: "Invalid",
+		Health: "Invalid",
+	})
+	if err != nil {
+		t.Fatalf("second upsert: %v", err)
+	}
+
+	var stored string
+	err = db.QueryRowContext(context.Background(), `SELECT desired_image FROM applications WHERE name = 'widget-api' AND target_gcp_project = 'example-dev-01'`).Scan(&stored)
+	if err != nil {
+		t.Fatalf("query desired_image: %v", err)
+	}
+	if stored != validDigest {
+		t.Fatalf("expected desired_image to stay %q despite the empty-DesiredImage upsert, got %q", validDigest, stored)
+	}
+}
+
 type fakeNotifier struct {
 	evaluated []Result
 }

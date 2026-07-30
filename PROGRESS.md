@@ -643,13 +643,84 @@ tradeoffs rather than guessed at.
   - Test: `TestRunOnce_NotifiesEvenWhenUpsertFails`,
     `TestManualSync_NotifiesEvenWhenUpsertFails`
 
-- [ ] **Left as-is, deliberately:**
-  - A precondition-failing unit still makes a live Cloud Run fetch every
-    poll purely to keep `Health` visible for display — real API cost, but
-    an intentional Phase-1 decision (tested by
-    `TestRunOnce_...PreconditionFailureSurvivesUnprovisionedResource`), not
-    an oversight. Revisit only if the API-call volume becomes a real cost
-    concern.
+## Bugs found and fixed in a fifth review pass
+
+- [x] **`DeployJob` wasn't idempotent** (`cloudrun/gcp.go`) — unlike
+  `UpdateService`/`UpdateWorkerPool` (which Cloud Run itself no-ops when
+  nothing changed), `RunJob` always creates a brand-new `Execution`
+  regardless of whether the image changed. That broke `deploySyncUnit`'s
+  own documented invariant ("deploying an already-deployed digest is a
+  no-op", §5.3/NFR6): a poll that reissues a deploy call while still
+  waiting for a prior deploy's convergence would trigger a genuine
+  duplicate job execution. Fixed: `DeployJob` now checks whether the
+  desired digest has already run (or is running) via the same
+  `HasExecutionForDesiredDigest`/`LatestExecutionStatus` logic `GetJob`
+  uses, and skips `RunJob` if so.
+
+- [x] **Leadership wasn't held for a whole reconcile pass**
+  (`cmd/controller/main.go`) — `isLeader.Load()` was checked once before
+  `RunOnce` started; losing the lease seconds into a multi-unit pass didn't
+  stop the in-flight deploys, opening a window where two replicas could
+  both be reconciling. Fixed: replaced the `atomic.Bool` with a
+  `leadershipContext` — a context tied to the *current leadership term*,
+  cancelled the instant leadership changes. `reconcileLoop` now runs
+  `RunOnce` with that term's context, so losing leadership mid-pass cancels
+  the context in-flight work is using, aborting further Cloud Run/DB calls
+  instead of continuing to deploy.
+
+- [x] **Every sync unit refetched its manifest independently, even when
+  many share the identical one** (`gitsource/gitsource.go`) — one app
+  fanning out across N target projects makes N identical GitHub Contents
+  API calls per poll, all for the same file. Fixed: `Source` now coalesces
+  concurrent fetches for the same repo+path via `singleflight` and caches
+  the result for `DefaultCacheTTL` (10s, shorter than any sane poll
+  interval so a manifest change is still picked up within a poll or two).
+  Required changing `Source.Client` from the concrete `*githubapp.Client`
+  to a small `FileFetcher` interface so this could be tested without
+  network access.
+  - Test: `TestGet_ConcurrentUnitsSharingAManifestCoalesce`,
+    `TestGet_DifferentManifestsFetchedSeparately`,
+    `TestGet_RefetchesAfterCacheExpires`
+
+- [x] **A transient manifest-fetch failure blanked out `desired_image`**
+  (`reconcile/reconcile.go`) — `Result.DesiredImage` stays `""` when
+  `reconcile()` never got past the manifest fetch, and `upsert`'s `ON
+  CONFLICT DO UPDATE` unconditionally overwrote the column with that empty
+  value — discarding a perfectly good prior value over an ephemeral
+  GitHub API hiccup. Fixed: the UPDATE now only replaces `desired_image`
+  when the new value is non-empty, otherwise keeps what was already there.
+  - Test: `TestUpsert_EmptyDesiredImageDoesNotOverwritePreviousValue`
+
+- [x] **Slack response body closed without draining** (`notify/slack.go`)
+  — closing before reading to EOF prevents the transport from returning
+  the connection to its keep-alive pool, forcing a fresh TCP+TLS handshake
+  on every send. Fixed: drains the body before closing.
+
+- [ ] **Left as-is, deliberately (larger architectural changes, flagged
+  for a decision rather than done silently):**
+  - **Manual sync races the leader's auto-reconcile loop** (`api/api.go`)
+    — every replica serves `/api/sync/...` with no coordination (advisory
+    lock, in-flight dedupe) against the leader's concurrent `RunOnce` or
+    another manual sync on the same unit. Already documented as a known,
+    accepted limitation in the "Live wiring" section above (single-replica
+    sandbox is unaffected). A real fix (e.g. a Postgres advisory lock
+    keyed per (app, project), held for the duration of a unit's
+    reconcile+deploy) needs a dedicated `*sql.Conn` per lock (advisory
+    locks are session-scoped) — a bigger change to `Reconciler`'s DB
+    dependency shape and every test double that implements it, not a
+    small mechanical fix.
+  - **`GetService`/`DeployService`'s Services-then-WorkerPools fallback
+    doesn't cross-check the manifest's `resourceType`** (`cloudrun/gcp.go`)
+    — if a resource is migrated from one type to the other and the old
+    one hasn't been torn down yet (both exist under the same name
+    momentarily), the fallback-on-`NotFound` logic could silently operate
+    on the wrong one, since `AdminClient.GetService`/`DeployService` don't
+    receive `resourceType` at all. Real, but a proper fix means passing
+    `resourceType` through the `AdminClient` interface — touching every
+    call site in `reconcile.go` and every fake in `api_test.go`/
+    `reconcile_test.go`. Low practical likelihood (Terraform-provisioned,
+    operator-controlled migration window) weighed against that blast
+    radius; flagging rather than doing the interface change unprompted.
   - `rbac.Role` (admin/syncer) is validated at parse time but never
     actually consulted in `CanSync` — the two roles currently grant
     identical access. Not fixed because doing so means inventing what

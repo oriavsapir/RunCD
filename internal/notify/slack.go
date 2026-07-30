@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
 	"time"
 )
@@ -44,7 +45,14 @@ func (s *SlackSink) Send(ctx context.Context, message string) error {
 	if err != nil {
 		return fmt.Errorf("send slack webhook: %w", err)
 	}
-	defer func() { _ = resp.Body.Close() }()
+	defer func() {
+		// Drain before Close: the transport can only put the underlying
+		// connection back in its keep-alive pool if the body was read to
+		// EOF first — closing early forces a fresh connection (and a new
+		// TLS handshake) on every subsequent Send.
+		_, _ = io.Copy(io.Discard, resp.Body)
+		_ = resp.Body.Close()
+	}()
 
 	if resp.StatusCode >= 300 {
 		return fmt.Errorf("slack webhook returned status %d", resp.StatusCode)

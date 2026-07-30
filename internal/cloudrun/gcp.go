@@ -2,6 +2,7 @@ package cloudrun
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"strings"
 	"sync"
@@ -338,8 +339,25 @@ func (c *GCPAdminClient) GetJob(ctx context.Context, project, region, name, desi
 }
 
 // DeployJob implements AdminClient.DeployJob: point the job spec at the
-// desired image, then trigger a new execution.
+// desired image, then trigger a new execution — unless one's already
+// running or has already succeeded for this exact digest. Unlike
+// UpdateService/UpdateWorkerPool (which Cloud Run itself no-ops when
+// nothing actually changed), RunJob always creates a brand new Execution
+// regardless of whether the image changed — so without this check,
+// deploySyncUnit's documented idempotency invariant ("deploying an
+// already-deployed digest is a no-op", §5.3/NFR6) wouldn't hold for jobs:
+// a poll that re-issues a deploy call while still waiting for a prior
+// deploy's convergence would trigger a genuine duplicate job execution.
 func (c *GCPAdminClient) DeployJob(ctx context.Context, project, region, name string, desired ServiceState) error {
+	live, err := c.GetJob(ctx, project, region, name, desired.ImageDigest)
+	if err != nil && !errors.Is(err, ErrNotProvisioned) {
+		return err
+	}
+	if err == nil && live.HasExecutionForDesiredDigest &&
+		(live.LatestExecutionStatus == ExecutionRunning || live.LatestExecutionStatus == ExecutionSucceeded) {
+		return nil
+	}
+
 	jc, err := c.jobsClient(ctx, region)
 	if err != nil {
 		return err
