@@ -828,6 +828,24 @@ direct Google OAuth token verification as the primary path.
     and granting the IAM roles above — that's a deploy step for whoever
     runs this, not code in this repo.
 
+- [x] **`openDB` in `main.go` — added Cloud SQL IAM database
+  authentication as an option, `DATABASE_URL` untouched as the fallback.**
+  Consistent with everything else here being IAM/IAP-gated rather than
+  password-based. Chosen by whether `CLOUDSQL_INSTANCE_CONNECTION_NAME` is
+  set:
+  - Set: dials the named instance via `cloud.google.com/go/cloudsqlconn`
+    with `WithIAMAuthN()` — no DB password anywhere. Also requires
+    `CLOUDSQL_IAM_DB_USER` (a Cloud SQL user mapped to an IAM principal —
+    a human user or service account already granted access via IAM) and
+    `CLOUDSQL_DB_NAME`. The dialer's `Close` is wired into the same
+    deferred cleanup as `db.Close()`.
+  - Unset: `DATABASE_URL`, exactly as before.
+  - **Not built yet:** actually enabling IAM DB auth on a real instance
+    (`gcloud sql instances patch ... --database-flags=cloudsql.iam_authentication=on`)
+    and mapping an IAM principal to a DB user
+    (`gcloud sql users create <IAM_EMAIL> --instance=... --type=cloud_iam_user`
+    or `--type=cloud_iam_service_account`) — deploy steps, not code here.
+
 ## Phase 4 — Web dashboard
 
 - [x] **Backend read APIs** (`internal/api/store.go`, `internal/api/units.go`)

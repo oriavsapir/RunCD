@@ -9,6 +9,7 @@ import (
 	"errors"
 	"fmt"
 	"log"
+	"net"
 	"net/http"
 	"os"
 	"os/signal"
@@ -16,7 +17,9 @@ import (
 	"syscall"
 	"time"
 
-	_ "github.com/jackc/pgx/v5/stdlib"
+	"cloud.google.com/go/cloudsqlconn"
+	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/stdlib"
 
 	"github.com/argorun/argorun/internal/api"
 	"github.com/argorun/argorun/internal/auth"
@@ -56,14 +59,70 @@ func envOrDefault(key, def string) string {
 	return def
 }
 
+// openDB opens the controller's database connection. Two modes, chosen by
+// whether CLOUDSQL_INSTANCE_CONNECTION_NAME is set:
+//
+//   - Set: dial the named Cloud SQL instance via the Cloud SQL Go Connector
+//     with IAM database authentication — no password, no DATABASE_URL. The
+//     connecting user (CLOUDSQL_IAM_DB_USER) must be a Cloud SQL user
+//     mapped to an IAM principal (a human user or service account already
+//     granted access via IAM), and IAM auth must be enabled on the
+//     instance. This is the preferred path: no DB password to manage or
+//     leak, consistent with everything else here being IAM/IAP-gated.
+//   - Unset: DATABASE_URL, a plain connection string — unchanged fallback
+//     for anyone not using Cloud SQL IAM auth.
+//
+// The returned close func releases the Cloud SQL dialer's background
+// token-refresh goroutines (a no-op in DATABASE_URL mode); callers must
+// call it in addition to db.Close().
+func openDB(ctx context.Context) (*sql.DB, func() error, error) {
+	instanceConnName := os.Getenv("CLOUDSQL_INSTANCE_CONNECTION_NAME")
+	if instanceConnName == "" {
+		dsn, err := requiredEnv("DATABASE_URL")
+		if err != nil {
+			return nil, nil, err
+		}
+		db, err := sql.Open("pgx", dsn)
+		if err != nil {
+			return nil, nil, fmt.Errorf("open database: %w", err)
+		}
+		return db, func() error { return nil }, nil
+	}
+
+	dbUser, err := requiredEnv("CLOUDSQL_IAM_DB_USER")
+	if err != nil {
+		return nil, nil, err
+	}
+	dbName, err := requiredEnv("CLOUDSQL_DB_NAME")
+	if err != nil {
+		return nil, nil, err
+	}
+
+	dialer, err := cloudsqlconn.NewDialer(ctx, cloudsqlconn.WithIAMAuthN())
+	if err != nil {
+		return nil, nil, fmt.Errorf("create Cloud SQL dialer: %w", err)
+	}
+
+	// sslmode=disable: the connector itself establishes an authenticated,
+	// encrypted connection via DialFunc below — there's no plaintext TCP
+	// hop for pgx's own TLS negotiation to secure.
+	connConfig, err := pgx.ParseConfig(fmt.Sprintf("user=%s dbname=%s sslmode=disable", dbUser, dbName))
+	if err != nil {
+		_ = dialer.Close()
+		return nil, nil, fmt.Errorf("parse Cloud SQL connection config: %w", err)
+	}
+	connConfig.DialFunc = func(ctx context.Context, _, _ string) (net.Conn, error) {
+		return dialer.Dial(ctx, instanceConnName)
+	}
+
+	db := stdlib.OpenDB(*connConfig)
+	return db, dialer.Close, nil
+}
+
 // run does the actual work so its defers (closing db/clients, stopping
 // signal notification, shutting down the HTTP server) always execute before
 // main reports an error and exits.
 func run() error {
-	dsn, err := requiredEnv("DATABASE_URL")
-	if err != nil {
-		return err
-	}
 	// IAP_AUDIENCE is a trust-boundary input (the expected aud claim on
 	// Identity-Aware Proxy's signed identity assertion — see
 	// https://cloud.google.com/iap/docs/signed-headers-howto) — no default.
@@ -106,14 +165,14 @@ func run() error {
 		holderID, _ = os.Hostname()
 	}
 
-	db, err := sql.Open("pgx", dsn)
-	if err != nil {
-		return fmt.Errorf("open database: %w", err)
-	}
-	defer func() { _ = db.Close() }()
-
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
+
+	db, closeDB, err := openDB(ctx)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = closeDB() }()
 
 	ghClient, err := githubapp.NewClient(githubAppID, []byte(githubAppPEM))
 	if err != nil {
