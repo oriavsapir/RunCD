@@ -14,6 +14,13 @@ const (
 	TTL = 30 * time.Second
 	// RenewInterval is how often the holder renews, well inside TTL.
 	RenewInterval = 10 * time.Second
+	// queryTimeout bounds a single Claim call — well under RenewInterval
+	// and TTL, so a wedged connection (network partition, half-dead TCP)
+	// surfaces as an error (triggering leading(false)) instead of blocking
+	// forever while Postgres lets the lease expire and another replica
+	// claims it, leaving this replica's in-memory state stuck believing
+	// it's still leader.
+	queryTimeout = 5 * time.Second
 )
 
 // db is the subset of *sql.DB Lease needs — kept as an interface so tests
@@ -37,6 +44,9 @@ func New(db *sql.DB, holderID string) *Lease {
 // holds a live lease, or if this holder already does (renewal). Returns
 // whether this replica is leader after the attempt.
 func (l *Lease) Claim(ctx context.Context) (bool, error) {
+	ctx, cancel := context.WithTimeout(ctx, queryTimeout)
+	defer cancel()
+
 	// $2 is a numeric second count multiplied by a literal 1-second
 	// interval, not l.ttl.String() cast to ::interval — Go's
 	// time.Duration.String() only happens to produce Postgres-parseable

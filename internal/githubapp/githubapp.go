@@ -164,15 +164,19 @@ func (c *Client) installationToken(ctx context.Context, owner, repo string) (str
 		}
 		c.mu.Unlock()
 
+		// context.WithoutCancel: this mint is shared via singleflight
+		// across every concurrent caller for this owner/repo — see the
+		// identical note in gitsource.go.
+		mintCtx := context.WithoutCancel(ctx)
 		jwt, err := c.appJWT()
 		if err != nil {
 			return "", err
 		}
-		installationID, err := c.cachedInstallationID(ctx, jwt, owner, repo)
+		installationID, err := c.cachedInstallationID(mintCtx, jwt, owner, repo)
 		if err != nil {
 			return "", err
 		}
-		tok, expiresAt, err := c.mintToken(ctx, jwt, installationID)
+		tok, expiresAt, err := c.mintToken(mintCtx, jwt, installationID)
 		if err != nil {
 			return "", err
 		}

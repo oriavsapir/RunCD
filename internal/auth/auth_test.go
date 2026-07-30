@@ -62,7 +62,7 @@ func TestNewIAPAuthenticator_RejectsEmptyAudience(t *testing.T) {
 // rejection path only — there's no way to test the happy path without a
 // live IAP-signed assertion.
 func TestIAPAuthenticator_MissingAssertionHeaderRejected(t *testing.T) {
-	a, err := NewIAPAuthenticator("/projects/123/global/backendServices/456")
+	a, err := NewIAPAuthenticator("/projects/123/locations/us-central1/services/argorun")
 	if err != nil {
 		t.Fatalf("NewIAPAuthenticator: %v", err)
 	}
@@ -73,7 +73,7 @@ func TestIAPAuthenticator_MissingAssertionHeaderRejected(t *testing.T) {
 }
 
 func TestIAPAuthenticator_MalformedAssertionRejected(t *testing.T) {
-	a, err := NewIAPAuthenticator("/projects/123/global/backendServices/456")
+	a, err := NewIAPAuthenticator("/projects/123/locations/us-central1/services/argorun")
 	if err != nil {
 		t.Fatalf("NewIAPAuthenticator: %v", err)
 	}

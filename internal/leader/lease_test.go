@@ -27,6 +27,33 @@ func (f *failAfterN) ExecContext(ctx context.Context, query string, args ...any)
 	return f.real.ExecContext(ctx, query, args...)
 }
 
+// hangingDB simulates a wedged connection (network partition, half-dead
+// TCP): ExecContext never returns on its own, only when its ctx is
+// cancelled — used to prove Claim imposes its own timeout rather than
+// blocking forever on a caller's context that may have no deadline of its
+// own.
+type hangingDB struct{}
+
+func (hangingDB) ExecContext(ctx context.Context, _ string, _ ...any) (sql.Result, error) {
+	<-ctx.Done()
+	return nil, ctx.Err()
+}
+
+func TestClaim_TimesOutOnAWedgedConnectionInsteadOfBlockingForever(t *testing.T) {
+	l := &Lease{db: hangingDB{}, holderID: "replica-a", ttl: TTL}
+
+	start := time.Now()
+	_, err := l.Claim(context.Background()) // deliberately no deadline of its own
+	elapsed := time.Since(start)
+
+	if err == nil {
+		t.Fatal("expected Claim to return an error once its own timeout elapses")
+	}
+	if elapsed > queryTimeout+2*time.Second {
+		t.Fatalf("expected Claim to return within ~%s (its own timeout), took %s", queryTimeout, elapsed)
+	}
+}
+
 func TestClaim_FirstReplicaWins(t *testing.T) {
 	db := testutil.NewPostgres(t)
 	l := New(db, "replica-a")

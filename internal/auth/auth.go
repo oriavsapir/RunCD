@@ -104,11 +104,13 @@ type IAPAuthenticator struct {
 // constructed (not lazily, which would race across concurrent requests) —
 // safe for concurrent use across every request from construction on.
 //
-// audience is the expected aud claim. For Cloud Run fronted by an External
-// HTTPS Load Balancer with a Serverless NEG backend, this is
+// audience is the expected aud claim. For IAP enabled directly on Cloud Run
+// (no load balancer — the topology this deployment uses), this is
+// "/projects/<PROJECT_NUMBER>/locations/<REGION>/services/<SERVICE_NAME>".
+// (A fronting External HTTPS Load Balancer + Serverless NEG is a different,
+// unused-here topology with its own format,
 // "/projects/<PROJECT_NUMBER>/global/backendServices/<BACKEND_SERVICE_ID>" —
-// see https://cloud.google.com/iap/docs/signed-headers-howto for the exact
-// format for your topology.
+// see https://cloud.google.com/iap/docs/signed-headers-howto.)
 func NewIAPAuthenticator(audience string) (*IAPAuthenticator, error) {
 	if audience == "" {
 		return nil, errors.New("IAP audience is empty — refusing to skip audience validation")

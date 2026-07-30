@@ -225,9 +225,20 @@ func run() error {
 // error (internal/leader/lease.go), so lc is already correctly reset by
 // the time this loop retries.
 func runLeaderElection(ctx context.Context, lease *leader.Lease, lc *leadershipContext, holderID string) {
-	const maxBackoff = 30 * time.Second
-	backoff := time.Second
+	const (
+		initialBackoff = time.Second
+		maxBackoff     = 30 * time.Second
+		// resetBackoffAfter: a run that lasted at least this long is
+		// evidence the connection was healthy, not just barely surviving —
+		// without this, backoff only ever grows for the life of the
+		// process, so a couple of unrelated blips separated by hours of
+		// stable leadership would still pin every later blip's retry at
+		// the full 30s cap.
+		resetBackoffAfter = 2 * time.Minute
+	)
+	backoff := initialBackoff
 	for {
+		start := time.Now()
 		err := lease.Run(ctx, func(leading bool) {
 			lc.set(ctx, leading)
 			// holderID is HOSTNAME/os.Hostname(), operator-controlled, not
@@ -236,6 +247,9 @@ func runLeaderElection(ctx context.Context, lease *leader.Lease, lc *leadershipC
 		})
 		if ctx.Err() != nil {
 			return
+		}
+		if time.Since(start) >= resetBackoffAfter {
+			backoff = initialBackoff
 		}
 		log.Printf("leader election stopped, retrying in %s: %v", backoff, err)
 		select {

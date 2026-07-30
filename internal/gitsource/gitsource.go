@@ -62,7 +62,13 @@ func (s *Source) Get(ctx context.Context, unit expander.SyncUnit) ([]byte, error
 		if data, ok := s.cached(key, ttl); ok {
 			return data, nil
 		}
-		data, err := s.Client.GetFile(ctx, unit.SourceRepo, "", unit.SourcePath)
+		// context.WithoutCancel: this fetch is shared via singleflight
+		// across every concurrent caller for this repo+path, not just the
+		// one that triggered it — using that one caller's ctx directly
+		// would fail every other waiter's fetch too if that caller's
+		// context is cancelled (e.g. an HTTP request disconnecting) while
+		// the shared fetch is still in flight.
+		data, err := s.Client.GetFile(context.WithoutCancel(ctx), unit.SourceRepo, "", unit.SourcePath)
 		if err != nil {
 			return nil, err
 		}
