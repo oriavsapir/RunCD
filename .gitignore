@@ -27,6 +27,16 @@ go.work.sum
 # env file
 .env
 
+# Local, non-shareable project context (real project IDs, service names, etc.)
+.local/
+
 # Editor/IDE
 # .idea/
 # .vscode/
+
+# Terraform local state/plugin cache
+.terraform/
+*.tfstate
+*.tfstate.*
+crash.log
+

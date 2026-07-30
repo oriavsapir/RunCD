@@ -1,0 +1,29 @@
+version: "2"
+
+linters:
+  enable:
+    # defaults: errcheck, govet, ineffassign, staticcheck, unused
+    - bodyclose # unclosed HTTP response bodies
+    - sqlclosecheck # unclosed sql.Rows/Stmt — relevant, this repo is database/sql-heavy
+    - rowserrcheck # missing rows.Err() checks after a *sql.Rows loop
+    - gosec # common security mistakes
+    - errorlint # error-wrapping mistakes (errors.Is/As, %w)
+    - unconvert # unnecessary type conversions
+    - unparam # unused function parameters
+    - misspell
+    - revive
+    - noctx # missing context.Context propagation on outbound calls
+    - copyloopvar # loop-variable capture bugs (pre-Go-1.22 footgun, still worth catching)
+    - gocritic
+  settings:
+    revive:
+      rules:
+        # "exported" (godoc-comment-on-every-export) is deliberately off —
+        # this project only writes comments for non-obvious WHY, not
+        # boilerplate on every exported identifier.
+        - name: exported
+          disabled: true
+
+formatters:
+  enable:
+    - gofmt
