@@ -6,13 +6,21 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"time"
 )
 
 // SlackSink posts a message to a Slack incoming webhook (§5.8, v1's one sink).
 type SlackSink struct {
 	WebhookURL string
-	HTTPClient *http.Client // nil means http.DefaultClient
+	HTTPClient *http.Client // nil means a client with defaultHTTPTimeout
 }
+
+// defaultHTTPTimeout guards against a hung webhook host blocking a
+// reconcile worker or the debounce transaction's held row lock (see
+// maybeNotify) indefinitely — http.DefaultClient has no timeout at all.
+const defaultHTTPTimeout = 10 * time.Second
+
+var defaultHTTPClient = &http.Client{Timeout: defaultHTTPTimeout}
 
 func (s *SlackSink) Send(ctx context.Context, message string) error {
 	body, err := json.Marshal(struct {
@@ -30,7 +38,7 @@ func (s *SlackSink) Send(ctx context.Context, message string) error {
 
 	client := s.HTTPClient
 	if client == nil {
-		client = http.DefaultClient
+		client = defaultHTTPClient
 	}
 	resp, err := client.Do(req)
 	if err != nil {

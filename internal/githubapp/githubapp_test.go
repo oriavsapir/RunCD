@@ -49,6 +49,27 @@ func TestNewClient_RejectsGarbagePEM(t *testing.T) {
 	}
 }
 
+// TestNewClient_NormalizesLiteralNewlineEscapes regression-tests a common
+// deployment footgun: a PEM passed through a Cloud Run secret-as-env-var
+// can arrive with literal `\n` two-character sequences instead of real
+// newlines (e.g. from a naive single-line copy-paste), which pem.Decode
+// otherwise silently fails to parse.
+func TestNewClient_NormalizesLiteralNewlineEscapes(t *testing.T) {
+	key, err := rsa.GenerateKey(rand.Reader, 2048)
+	if err != nil {
+		t.Fatalf("generate test key: %v", err)
+	}
+	realPEM := pem.EncodeToMemory(&pem.Block{
+		Type:  "RSA PRIVATE KEY",
+		Bytes: x509.MarshalPKCS1PrivateKey(key),
+	})
+	mangled := []byte(strings.ReplaceAll(string(realPEM), "\n", `\n`))
+
+	if _, err := NewClient("123456", mangled); err != nil {
+		t.Fatalf("expected literal \\n escapes to be normalized, got error: %v", err)
+	}
+}
+
 func TestAppJWT_IsWellFormedAndSignedWithConfiguredKey(t *testing.T) {
 	key, err := rsa.GenerateKey(rand.Reader, 2048)
 	if err != nil {

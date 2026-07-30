@@ -4,6 +4,7 @@
 package githubapp
 
 import (
+	"bytes"
 	"context"
 	"crypto"
 	"crypto/rand"
@@ -33,6 +34,10 @@ type Client struct {
 
 	mu     sync.Mutex
 	tokens map[string]cachedToken // keyed "owner/repo"
+	// installationIDs caches the (effectively permanent) installation ID
+	// per owner/repo so a token remint only has to hit GitHub's
+	// access_tokens endpoint, not also re-discover the installation.
+	installationIDs map[string]int64
 	// minting is a singleflight group keyed "owner/repo" so concurrent
 	// cache misses for the same repo coalesce into one JWT + token-mint
 	// round-trip instead of each independently hitting GitHub's API.
@@ -49,6 +54,13 @@ type cachedToken struct {
 func NewClient(appID string, pemBytes []byte) (*Client, error) {
 	block, _ := pem.Decode(pemBytes)
 	if block == nil {
+		// Common deployment footgun: a multi-line PEM passed through a
+		// Cloud Run secret-as-env-var sometimes arrives with literal `\n`
+		// two-character sequences instead of real newlines. Retry once
+		// with those normalized before giving up.
+		block, _ = pem.Decode(bytes.ReplaceAll(pemBytes, []byte(`\n`), []byte("\n")))
+	}
+	if block == nil {
 		return nil, fmt.Errorf("no PEM block found in GitHub App private key")
 	}
 	key, err := x509.ParsePKCS1PrivateKey(block.Bytes)
@@ -63,7 +75,12 @@ func NewClient(appID string, pemBytes []byte) (*Client, error) {
 		}
 		key = rsaKey
 	}
-	return &Client{AppID: appID, PrivateKey: key, tokens: make(map[string]cachedToken)}, nil
+	return &Client{
+		AppID:           appID,
+		PrivateKey:      key,
+		tokens:          make(map[string]cachedToken),
+		installationIDs: make(map[string]int64),
+	}, nil
 }
 
 // defaultHTTPTimeout guards against a hung connection blocking a caller's
@@ -151,7 +168,7 @@ func (c *Client) installationToken(ctx context.Context, owner, repo string) (str
 		if err != nil {
 			return "", err
 		}
-		installationID, err := c.installationID(ctx, jwt, owner, repo)
+		installationID, err := c.cachedInstallationID(ctx, jwt, owner, repo)
 		if err != nil {
 			return "", err
 		}
@@ -170,6 +187,31 @@ func (c *Client) installationToken(ctx context.Context, owner, repo string) (str
 		return "", err
 	}
 	return v.(string), nil
+}
+
+// cachedInstallationID avoids re-discovering the installation on every
+// token remint — a GitHub App's installation on a given repo is
+// effectively permanent (it only changes if the app is uninstalled and
+// reinstalled), so one lookup per owner/repo for the process lifetime is
+// enough.
+func (c *Client) cachedInstallationID(ctx context.Context, jwt, owner, repo string) (int64, error) {
+	key := owner + "/" + repo
+	c.mu.Lock()
+	if id, ok := c.installationIDs[key]; ok {
+		c.mu.Unlock()
+		return id, nil
+	}
+	c.mu.Unlock()
+
+	id, err := c.installationID(ctx, jwt, owner, repo)
+	if err != nil {
+		return 0, err
+	}
+
+	c.mu.Lock()
+	c.installationIDs[key] = id
+	c.mu.Unlock()
+	return id, nil
 }
 
 type installationResponse struct {

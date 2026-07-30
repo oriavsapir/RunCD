@@ -2,6 +2,7 @@ package notify
 
 import (
 	"context"
+	"errors"
 	"testing"
 	"time"
 
@@ -16,6 +17,22 @@ type fakeSink struct {
 }
 
 func (f *fakeSink) Send(_ context.Context, message string) error {
+	f.messages = append(f.messages, message)
+	return nil
+}
+
+// failNTimesSink fails its first N sends, then succeeds — for testing that
+// a failed send doesn't consume the debounce window.
+type failNTimesSink struct {
+	failures int
+	messages []string
+}
+
+func (f *failNTimesSink) Send(_ context.Context, message string) error {
+	if f.failures > 0 {
+		f.failures--
+		return errors.New("simulated webhook failure")
+	}
 	f.messages = append(f.messages, message)
 	return nil
 }
@@ -260,5 +277,39 @@ func TestEvaluate_SameRuleTypeDifferentThresholdsDebounceIndependently(t *testin
 	}
 	if len(sink.messages) != 2 {
 		t.Fatalf("expected both the 5m and 60m healthDegraded rules to fire independently, got %d: %v", len(sink.messages), sink.messages)
+	}
+}
+
+// TestEvaluate_FailedSendDoesNotConsumeDebounceWindow regression-tests a
+// bug where last_notified_at was committed before Sink.Send ran: a
+// failed/unreachable webhook would silently blackhole alerts for the full
+// debounce window even though nothing was ever actually delivered. The fix
+// only commits the debounce claim after Send succeeds, so a failed attempt
+// can be retried on the very next Evaluate call.
+func TestEvaluate_FailedSendDoesNotConsumeDebounceWindow(t *testing.T) {
+	db := testutil.NewPostgres(t)
+	sink := &failNTimesSink{failures: 1}
+	e := &Evaluator{DB: db, Sink: sink, Rules: []config.NotifyRule{{On: "syncFailed"}}}
+
+	res := reconcile.Result{
+		Unit:           expander.SyncUnit{App: "widget-api", Project: "example-prod-us"},
+		DeployFailed:   true,
+		FailureMessage: "boom",
+	}
+
+	if err := e.Evaluate(context.Background(), res); err == nil {
+		t.Fatal("expected Evaluate to report the simulated send failure")
+	}
+	if len(sink.messages) != 0 {
+		t.Fatalf("expected no message delivered on the failed attempt, got %v", sink.messages)
+	}
+
+	// Retry immediately (no waiting out a debounce window) — must succeed,
+	// proving the failed attempt above never claimed the debounce row.
+	if err := e.Evaluate(context.Background(), res); err != nil {
+		t.Fatalf("retry Evaluate: %v", err)
+	}
+	if len(sink.messages) != 1 {
+		t.Fatalf("expected exactly 1 message after the retry succeeded, got %d: %v", len(sink.messages), sink.messages)
 	}
 }

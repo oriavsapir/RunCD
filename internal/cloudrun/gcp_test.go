@@ -9,14 +9,23 @@ import (
 )
 
 func TestValidatedPercent_FullCutoverAccepted(t *testing.T) {
-	for _, p := range []int{0, 100} {
-		got, err := validatedPercent(p)
-		if err != nil {
-			t.Fatalf("percent=%d: unexpected error: %v", p, err)
-		}
-		if int(got) != p {
-			t.Fatalf("percent=%d: got %d", p, got)
-		}
+	got, err := validatedPercent(100)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if got != 100 {
+		t.Fatalf("got %d", got)
+	}
+}
+
+// TestValidatedPercent_ZeroRejected regression-tests a bug where 0 was
+// accepted as a "full cutover" alongside 100, but a single TrafficTarget at
+// 0% doesn't sum to the 100% Cloud Run requires — it's just as invalid as
+// any other partial percent, for the same reason (no way to say where the
+// rest of the traffic goes).
+func TestValidatedPercent_ZeroRejected(t *testing.T) {
+	if _, err := validatedPercent(0); err == nil {
+		t.Fatal("expected error for percent=0 — a lone 0% target doesn't sum to 100")
 	}
 }
 
@@ -25,6 +34,37 @@ func TestValidatedPercent_PartialRejected(t *testing.T) {
 		if _, err := validatedPercent(p); err == nil {
 			t.Fatalf("percent=%d: expected error — v1 only supports a full cutover", p)
 		}
+	}
+}
+
+// TestDigestSuffix_ExtractsFromFullImageReference regression-tests the
+// bare-digest-vs-full-image-reference bug: manifest digests are always
+// bare (sha256:...), but a real Cloud Run container's Image field is a
+// full reference (repo@sha256:...) — comparing them directly never
+// matches, so ServiceState.ImageDigest must always hold just the suffix.
+func TestDigestSuffix_ExtractsFromFullImageReference(t *testing.T) {
+	full := "us-docker.pkg.dev/proj/repo/svc@sha256:3f8a1c0000000000000000000000000000000000000000000000000000000000"
+	got := digestSuffix(full)
+	want := "sha256:3f8a1c0000000000000000000000000000000000000000000000000000000000"
+	if got != want {
+		t.Fatalf("got %q, want %q", got, want)
+	}
+}
+
+func TestDigestSuffix_BareDigestPassesThrough(t *testing.T) {
+	bare := "sha256:3f8a1c0000000000000000000000000000000000000000000000000000000000"
+	if got := digestSuffix(bare); got != bare {
+		t.Fatalf("got %q, want %q", got, bare)
+	}
+}
+
+func TestWithDigest_PreservesRepoPrefix(t *testing.T) {
+	existing := "us-docker.pkg.dev/proj/repo/svc@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+	newDigest := "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+	got := withDigest(existing, newDigest)
+	want := "us-docker.pkg.dev/proj/repo/svc@sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+	if got != want {
+		t.Fatalf("got %q, want %q", got, want)
 	}
 }
 

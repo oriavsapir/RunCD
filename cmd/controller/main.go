@@ -169,24 +169,20 @@ func run() error {
 	var wg sync.WaitGroup
 	wg.Add(3)
 
+	// Buffered so the goroutine can send and exit even if nothing is
+	// receiving yet (e.g. the process is already tearing down for another
+	// reason).
+	serverErrCh := make(chan error, 1)
 	go func() {
 		defer wg.Done()
 		if err := srv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
-			log.Printf("http server error: %v", err)
+			serverErrCh <- err
 		}
 	}()
 
 	go func() {
 		defer wg.Done()
-		err := lease.Run(ctx, func(leading bool) {
-			isLeader.Store(leading)
-			// holderID is HOSTNAME/os.Hostname(), operator-controlled, not
-			// external input.
-			log.Printf("leadership changed: leading=%v holder=%s", leading, holderID) //nolint:gosec
-		})
-		if err != nil && ctx.Err() == nil {
-			log.Printf("leader election stopped: %v", err)
-		}
+		runLeaderElection(ctx, lease, &isLeader, holderID)
 	}()
 
 	go func() {
@@ -194,12 +190,54 @@ func run() error {
 		reconcileLoop(ctx, reconcileInterval, &isLeader, ghClient, cfgSrc, reconciler, dynUnits)
 	}()
 
-	<-ctx.Done()
+	// A bind/serve failure (e.g. the port is already taken) is fatal, not a
+	// log line to ignore: it means the manual-sync API never came up at
+	// all, with no signal for the surrounding orchestrator (Cloud Run,
+	// k8s) that anything's wrong. Cancel everything else and report it.
+	var runErr error
+	select {
+	case <-ctx.Done():
+	case err := <-serverErrCh:
+		runErr = fmt.Errorf("http server: %w", err)
+		stop()
+	}
+
 	shutdownCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 	_ = srv.Shutdown(shutdownCtx)
 	wg.Wait()
-	return nil
+	return runErr
+}
+
+// runLeaderElection restarts lease.Run after any error instead of letting
+// the goroutine die silently — a transient DB blip shouldn't permanently
+// strand this replica out of leader election until a manual restart.
+// lease.Run itself already reports leading(false) before returning an
+// error (internal/leader/lease.go), so isLeader is already correctly
+// false by the time this loop retries.
+func runLeaderElection(ctx context.Context, lease *leader.Lease, isLeader *atomic.Bool, holderID string) {
+	const maxBackoff = 30 * time.Second
+	backoff := time.Second
+	for {
+		err := lease.Run(ctx, func(leading bool) {
+			isLeader.Store(leading)
+			// holderID is HOSTNAME/os.Hostname(), operator-controlled, not
+			// external input.
+			log.Printf("leadership changed: leading=%v holder=%s", leading, holderID) //nolint:gosec
+		})
+		if ctx.Err() != nil {
+			return
+		}
+		log.Printf("leader election stopped, retrying in %s: %v", backoff, err)
+		select {
+		case <-ctx.Done():
+			return
+		case <-time.After(backoff):
+		}
+		if backoff *= 2; backoff > maxBackoff {
+			backoff = maxBackoff
+		}
+	}
 }
 
 type configSource struct {

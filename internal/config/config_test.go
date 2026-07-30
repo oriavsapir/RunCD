@@ -159,3 +159,56 @@ defaults:
 		t.Fatal("expected error for a project listed twice in one environment")
 	}
 }
+
+func TestParse_DuplicateAppNameRejected(t *testing.T) {
+	yaml := []byte(`
+environments:
+  prd:
+    projects: [example-prod-us]
+defaults:
+  region: us-central1
+apps:
+  - name: widget-api
+    env: prd
+    source: { repo: git@github.com:org/deployment.git, path: services/widget-api/ }
+  - name: widget-api
+    env: prd
+    source: { repo: git@github.com:org/deployment.git, path: services/widget-api-v2/ }
+`)
+	if _, err := Parse(yaml); err == nil {
+		t.Fatal("expected error for two apps sharing the same name")
+	}
+}
+
+func TestParse_NotifyRulesRequireWebhookURL(t *testing.T) {
+	yaml := []byte(`
+environments:
+  prd:
+    projects: [example-prod-us]
+defaults:
+  region: us-central1
+notify:
+  rules:
+    - on: syncFailed
+`)
+	if _, err := Parse(yaml); err == nil {
+		t.Fatal("expected error for notify.rules with no slackWebhookUrl")
+	}
+}
+
+func TestParse_NotifyRulesRejectMalformedWebhookURL(t *testing.T) {
+	yaml := []byte(`
+environments:
+  prd:
+    projects: [example-prod-us]
+defaults:
+  region: us-central1
+notify:
+  slackWebhookUrl: "not a url"
+  rules:
+    - on: syncFailed
+`)
+	if _, err := Parse(yaml); err == nil {
+		t.Fatal("expected error for a malformed slackWebhookUrl")
+	}
+}

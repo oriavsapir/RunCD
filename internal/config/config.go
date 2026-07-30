@@ -4,6 +4,7 @@ package config
 
 import (
 	"fmt"
+	"net/url"
 
 	"gopkg.in/yaml.v3"
 )
@@ -110,6 +111,13 @@ func Parse(data []byte) (*Root, error) {
 			return nil, fmt.Errorf("app %q references unknown environment %q", app.Name, app.Env)
 		}
 	}
+	seenApps := make(map[string]bool, len(root.Apps))
+	for _, app := range root.Apps {
+		if seenApps[app.Name] {
+			return nil, fmt.Errorf("app %q is listed more than once — sync units key on (app, project), so two apps sharing a name can clobber each other's applications row", app.Name)
+		}
+		seenApps[app.Name] = true
+	}
 	for envName, env := range root.Environments {
 		seen := make(map[string]bool, len(env.Projects))
 		for _, p := range env.Projects {
@@ -139,5 +147,25 @@ func Parse(data []byte) (*Root, error) {
 			return nil, fmt.Errorf("notify.rules: %q is not a known rule (syncFailed, healthDegraded, outOfSyncGated)", rule.On)
 		}
 	}
+	if len(root.Notify.Rules) > 0 {
+		if err := validateWebhookURL(root.Notify.SlackWebhookURL); err != nil {
+			return nil, fmt.Errorf("notify.slackWebhookUrl: %w", err)
+		}
+	}
 	return &root, nil
+}
+
+// validateWebhookURL rejects an empty or malformed webhook URL at config
+// load time — otherwise notify.rules silently never fires (empty URL) or
+// every send fails at runtime (malformed URL) instead of failing loudly
+// where the operator can actually see it.
+func validateWebhookURL(raw string) error {
+	if raw == "" {
+		return fmt.Errorf("required when notify.rules is non-empty")
+	}
+	u, err := url.Parse(raw)
+	if err != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Host == "" {
+		return fmt.Errorf("%q is not a valid http(s) URL", raw)
+	}
+	return nil
 }

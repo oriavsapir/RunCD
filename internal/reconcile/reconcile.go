@@ -115,6 +115,15 @@ func (r *Reconciler) RunOnce(ctx context.Context, units []expander.SyncUnit) ([]
 		g.Go(func() error {
 			res := r.reconcileOne(ctx, unit)
 			res, err := r.upsert(ctx, res)
+			if err != nil && res.Err == nil {
+				// The aggregate error g.Wait() returns below is just the
+				// first of possibly several concurrent upsert failures,
+				// with no unit attribution — attach it to this specific
+				// Result so a caller inspecting results[i] can tell which
+				// unit(s) actually failed to persist, not just that RunOnce
+				// as a whole returned an error.
+				res.Err = fmt.Errorf("upsert: %w", err)
+			}
 			results[i] = res
 			if err != nil {
 				return err

@@ -3,6 +3,7 @@ package cloudrun
 import (
 	"context"
 	"fmt"
+	"strings"
 	"sync"
 
 	run "cloud.google.com/go/run/apiv2"
@@ -252,7 +253,7 @@ func (c *GCPAdminClient) DeployService(ctx context.Context, project, region, nam
 	if len(svc.GetTemplate().GetContainers()) == 0 {
 		return fmt.Errorf("service %s has no containers in its revision template", name)
 	}
-	svc.Template.Containers[0].Image = desired.ImageDigest
+	svc.Template.Containers[0].Image = withDigest(svc.Template.Containers[0].Image, desired.ImageDigest)
 	if desired.TrafficLatestRevisionPercent != nil {
 		percent, err := validatedPercent(*desired.TrafficLatestRevisionPercent)
 		if err != nil {
@@ -284,7 +285,7 @@ func (c *GCPAdminClient) deployWorkerPool(ctx context.Context, project, region, 
 	if len(wp.GetTemplate().GetContainers()) == 0 {
 		return fmt.Errorf("workerPool %s has no containers in its revision template", name)
 	}
-	wp.Template.Containers[0].Image = desired.ImageDigest
+	wp.Template.Containers[0].Image = withDigest(wp.Template.Containers[0].Image, desired.ImageDigest)
 	if _, err := wc.UpdateWorkerPool(ctx, &runpb.UpdateWorkerPoolRequest{WorkerPool: wp}); err != nil {
 		return fmt.Errorf("update workerPool %s: %w", name, err)
 	}
@@ -325,10 +326,10 @@ func (c *GCPAdminClient) GetJob(ctx context.Context, project, region, name, desi
 		return nil, fmt.Errorf("get execution %s: %w", ref.GetName(), err)
 	}
 
-	image := containerImage(exec.GetTemplate().GetContainers())
+	digest := digestSuffix(containerImage(exec.GetTemplate().GetContainers()))
 	return &LiveJob{
-		ServiceState:                 ServiceState{ImageDigest: image},
-		HasExecutionForDesiredDigest: image == desiredDigest,
+		ServiceState:                 ServiceState{ImageDigest: digest},
+		HasExecutionForDesiredDigest: digest == desiredDigest,
 		LatestExecutionStatus:        executionStatus(exec),
 	}, nil
 }
@@ -351,7 +352,7 @@ func (c *GCPAdminClient) DeployJob(ctx context.Context, project, region, name st
 	if len(containers) == 0 {
 		return fmt.Errorf("job %s has no containers in its task template", name)
 	}
-	containers[0].Image = desired.ImageDigest
+	containers[0].Image = withDigest(containers[0].Image, desired.ImageDigest)
 	if _, err := jc.UpdateJob(ctx, &runpb.UpdateJobRequest{Job: job}); err != nil {
 		return fmt.Errorf("update job %s: %w", name, err)
 	}
@@ -361,15 +362,16 @@ func (c *GCPAdminClient) DeployJob(ctx context.Context, project, region, name st
 	return nil
 }
 
-// validatedPercent rejects anything other than a full cutover (0 or 100).
-// argorun's traffic model (manifest.Traffic.LatestRevisionPercent) has no
-// way to say where the remaining traffic should go, so a partial percent
-// (e.g. 50) would produce a Cloud Run TrafficTarget list that doesn't sum
-// to 100 — an invalid spec that would otherwise fail deep inside the API
-// call instead of here, with a clear reason.
+// validatedPercent rejects anything other than a full cutover to the
+// latest revision (100). argorun's traffic model
+// (manifest.Traffic.LatestRevisionPercent) has no way to say where the
+// remaining traffic should go, so any other value — including 0, which
+// would still produce a single TrafficTarget summing to 0% rather than the
+// required 100% — would build a Cloud Run traffic spec the API rejects,
+// deep inside the call instead of here with a clear reason.
 func validatedPercent(p int) (int32, error) {
-	if p != 0 && p != 100 {
-		return 0, fmt.Errorf("traffic.latestRevisionPercent %d is not supported — v1 only manages a full cutover (0 or 100), since it has no way to express where the remaining traffic should go", p)
+	if p != 100 {
+		return 0, fmt.Errorf("traffic.latestRevisionPercent %d is not supported — v1 only manages a full cutover to the latest revision (100), since it has no way to express where the remaining traffic should go", p)
 	}
 	return int32(p), nil
 }
@@ -379,6 +381,33 @@ func containerImage(containers []*runpb.Container) string {
 		return ""
 	}
 	return containers[0].GetImage()
+}
+
+// digestSuffix extracts the "sha256:..." portion of a full image reference
+// like "us-docker.pkg.dev/proj/repo/svc@sha256:...". manifest.Image.Digest
+// is always validated as a bare digest with no registry/repo prefix
+// (manifest/service.go), so ServiceState.ImageDigest must be bare too, or
+// it can never equal the manifest's desired digest and the diff engine
+// would report every resource as perpetually out of sync.
+func digestSuffix(image string) string {
+	if i := strings.LastIndex(image, "@"); i >= 0 {
+		return image[i+1:]
+	}
+	return image
+}
+
+// withDigest rebuilds a full image reference from an existing live image
+// (to recover its registry/repo prefix — the manifest never carries one)
+// and the desired bare digest. Deploying a resource that's never had any
+// image set (no "@" to anchor on, e.g. a Terraform-provisioned shell with a
+// placeholder image) isn't supported — §5.5 assumes Terraform provisions
+// the shell already pointed at the right repo.
+func withDigest(existingImage, digest string) string {
+	repo := existingImage
+	if i := strings.LastIndex(existingImage, "@"); i >= 0 {
+		repo = existingImage[:i]
+	}
+	return repo + "@" + digest
 }
 
 func latestRevisionPercent(targets []*runpb.TrafficTarget) int {
@@ -424,26 +453,26 @@ func executionStatus(exec *runpb.Execution) ExecutionStatus {
 }
 
 func liveServiceFromService(svc *runpb.Service, desiredDigest string) *LiveService {
-	image := containerImage(svc.GetTemplate().GetContainers())
+	digest := digestSuffix(containerImage(svc.GetTemplate().GetContainers()))
 	percent := latestRevisionPercent(svc.GetTraffic())
 	ready, creating := conditionState(svc.GetTerminalCondition(), svc.GetReconciling())
 	return &LiveService{
 		ServiceState: ServiceState{
-			ImageDigest:                  image,
+			ImageDigest:                  digest,
 			TrafficLatestRevisionPercent: &percent,
 		},
-		HasRevisionForDesiredDigest: image == desiredDigest,
+		HasRevisionForDesiredDigest: digest == desiredDigest,
 		LatestRevisionReady:         ready,
 		LatestRevisionCreating:      creating,
 	}
 }
 
 func liveServiceFromWorkerPool(wp *runpb.WorkerPool, desiredDigest string) *LiveService {
-	image := containerImage(wp.GetTemplate().GetContainers())
+	digest := digestSuffix(containerImage(wp.GetTemplate().GetContainers()))
 	ready, creating := conditionState(wp.GetTerminalCondition(), wp.GetReconciling())
 	return &LiveService{
-		ServiceState:                ServiceState{ImageDigest: image},
-		HasRevisionForDesiredDigest: image == desiredDigest,
+		ServiceState:                ServiceState{ImageDigest: digest},
+		HasRevisionForDesiredDigest: digest == desiredDigest,
 		LatestRevisionReady:         ready,
 		LatestRevisionCreating:      creating,
 	}

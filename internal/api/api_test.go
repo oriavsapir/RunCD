@@ -232,6 +232,55 @@ func TestHandleSync_InfraErrorReturns500WithoutLeakingDetail(t *testing.T) {
 	}
 }
 
+type failingPreconditions struct{}
+
+func (failingPreconditions) TopicExists(context.Context, string, string) (bool, error) {
+	return false, nil
+}
+func (failingPreconditions) SubscriptionExists(context.Context, string, string) (bool, error) {
+	return false, nil
+}
+
+// TestHandleSync_BusinessLevelErrorNotLeakedInSuccessfulResponse
+// regression-tests a second information-exposure path distinct from the
+// 500 case above: a ManualSync call can succeed (err == nil) while its
+// Result carries a non-nil res.Err — including, in other code paths, raw
+// wrapped infra errors from a failed live-state fetch or deploy. The 200
+// response must never echo res.Err text, only the categorical
+// status/health.
+func TestHandleSync_BusinessLevelErrorNotLeakedInSuccessfulResponse(t *testing.T) {
+	h, _ := newTestHandler(t)
+	h.Reconciler.Preconditions = failingPreconditions{}
+	h.Reconciler.Manifests = &fakeManifests{byApp: map[string][]byte{
+		"widget-api": []byte(fmt.Sprintf("image:\n  digest: %s\nrequires:\n  - type: pubsubTopic\n    name: some-topic\n", validDigest)),
+	}}
+
+	srv := httptest.NewServer(NewMux(h))
+	defer srv.Close()
+
+	resp := postSync(t, srv.URL+"/api/sync/example-prod-eu/widget-api", "admin-token")
+	defer func() { _ = resp.Body.Close() }()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("expected 200 (sync attempted, just blocked), got %d", resp.StatusCode)
+	}
+
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		t.Fatalf("read body: %v", err)
+	}
+	if strings.Contains(string(body), "precondition") || strings.Contains(string(body), "some-topic") {
+		t.Fatalf("response body leaked business-level error detail: %s", body)
+	}
+
+	var parsed syncResponse
+	if err := json.Unmarshal(body, &parsed); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if parsed.Status != "Invalid" {
+		t.Fatalf("expected Status=Invalid, got %+v", parsed)
+	}
+}
+
 func TestHandleSync_AuthorizedAdminSyncsSuccessfully(t *testing.T) {
 	h, cr := newTestHandler(t)
 	srv := httptest.NewServer(NewMux(h))

@@ -37,11 +37,16 @@ func New(db *sql.DB, holderID string) *Lease {
 // holds a live lease, or if this holder already does (renewal). Returns
 // whether this replica is leader after the attempt.
 func (l *Lease) Claim(ctx context.Context) (bool, error) {
+	// $2 is a numeric second count multiplied by a literal 1-second
+	// interval, not l.ttl.String() cast to ::interval — Go's
+	// time.Duration.String() only happens to produce Postgres-parseable
+	// text for whole-second/millisecond values; a sub-millisecond TTL would
+	// format with a unit ("µs", "ns") Postgres's interval parser rejects.
 	res, err := l.db.ExecContext(ctx, `
 		UPDATE leader_lease
-		SET holder_id = $1, expires_at = now() + $2::interval
+		SET holder_id = $1, expires_at = now() + ($2 * interval '1 second')
 		WHERE id = 1 AND (holder_id = $1 OR expires_at < now())`,
-		l.holderID, l.ttl.String())
+		l.holderID, l.ttl.Seconds())
 	if err != nil {
 		return false, err
 	}

@@ -56,6 +56,9 @@ func Parse(data []byte) (*Config, error) {
 // posture); a group listed in rbac.yaml only matches if it's passed in
 // directly as subject, not by resolving its members.
 func CanSync(cfg *Config, subject string, unit expander.SyncUnit) bool {
+	if cfg == nil {
+		return false // fail closed: no config means no grants, not a panic
+	}
 	for _, rule := range cfg.Roles {
 		if rule.Subject != subject {
 			continue

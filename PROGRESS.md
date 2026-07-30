@@ -470,6 +470,130 @@ tradeoffs rather than guessed at.
   clear error at config-load time. Fixed: rejects any extra segment.
   - Test: `TestParseOwnerRepo_ExtraSegmentRejected`
 
+## Bugs found and fixed in a third review pass
+
+- [x] **Bare digest vs. full image reference broke real Cloud Run deploys**
+  (`cloudrun/gcp.go`) — the highest-severity fix of this pass. Manifests
+  only ever carry a bare digest (`sha256:...`, enforced at parse time), but
+  `DeployService`/`deployWorkerPool`/`DeployJob` wrote that bare digest
+  directly into the container's `Image` field, discarding the real
+  registry/repo prefix — Cloud Run would reject the update or deploy
+  garbage. Separately, `HasRevisionForDesiredDigest`/
+  `HasExecutionForDesiredDigest` compared the bare digest against the
+  live container's *full* `repo@sha256:...` string, which can never match
+  — every resource would report as perpetually Missing and get redeployed
+  every poll, forever. Fixed: `digestSuffix` extracts just the digest
+  portion for all live-state comparisons (`ServiceState.ImageDigest` is
+  now always bare, matching the manifest); `withDigest` reconstructs a
+  full reference by combining the *existing* live image's repo prefix with
+  the new desired digest for deploys — the manifest never carries a
+  registry/repo, so the assumption is that it's fixed at Terraform
+  provisioning time and only the digest ever changes.
+  - Test: `TestDigestSuffix_ExtractsFromFullImageReference`,
+    `TestDigestSuffix_BareDigestPassesThrough`,
+    `TestWithDigest_PreservesRepoPrefix`
+
+- [x] **API 200 path also leaked raw infra errors** (`api/api.go`) — a
+  second information-exposure path distinct from the 500 case fixed in the
+  prior pass: `res.Err` mixes business-level outcomes (a failed
+  precondition) with genuine infra errors (raw wrapped GCP/DB errors from a
+  failed live-state fetch or deploy — reconcile.go's `applyLiveState`), and
+  a *successful* `ManualSync` call (infra error `nil`) with a non-nil
+  `res.Err` still echoed that raw text into a 200 response body. Fixed: the
+  `error` field is no longer surfaced in the API response at all — logged
+  server-side instead. The client already gets `status`/`health`
+  (Invalid/Missing/etc.), which is what a syncer needs to know something's
+  wrong; the specific reason lives in `sync_events` and the server log.
+  - Test: `TestHandleSync_BusinessLevelErrorNotLeakedInSuccessfulResponse`
+
+- [x] **Leader-election goroutine died silently on a transient error**
+  (`cmd/controller/main.go`) — `lease.Run` returning an error (any
+  transient DB blip) permanently ended that goroutine with no retry;
+  reconciliation stayed disabled on that replica until a manual restart,
+  invisibly. Fixed: `runLeaderElection` wraps `lease.Run` in a retry loop
+  with exponential backoff (capped at 30s), restarting after logging,
+  until ctx is cancelled.
+
+- [x] **HTTP bind failure only logged, not fatal** (`main.go`) — a port
+  collision at startup left the process running with the manual-sync API
+  silently absent forever, with no crash/restart signal for the
+  surrounding orchestrator. Fixed: a bind/serve error now cancels the root
+  context (stopping leader election and the reconcile loop too) and `run()`
+  returns the error, so `main()` calls `log.Fatal`.
+
+- [x] **Notify debounce window consumed before delivery succeeds**
+  (`notify/notify.go`) — `last_notified_at` was committed in the same
+  statement that claimed the debounce row, *before* `Sink.Send` even ran;
+  a failed/unreachable Slack webhook silently blackholed alerts for the
+  full debounce window (default 1h) with the error discarded by
+  reconcile.go's best-effort `_ = r.Notifier.Evaluate(...)`. Fixed:
+  `maybeNotify` now claims the debounce row inside a transaction and only
+  commits it after `Sink.Send` succeeds — a failed send rolls back,
+  leaving `last_notified_at` untouched so the very next poll can retry.
+  - Test: `TestEvaluate_FailedSendDoesNotConsumeDebounceWindow`
+
+- [x] **No timeout on the Slack webhook call** (`notify/slack.go`) — same
+  category as the `githubapp` fix from the prior pass: falling back to
+  `http.DefaultClient` (no timeout) could block a reconcile worker
+  indefinitely on a hung webhook host — now doubly relevant since the
+  debounce fix above holds a Postgres row lock for the duration of `Send`.
+  Fixed: falls back to a 10s-timeout client instead.
+
+- [x] **`validatedPercent` accepted 0 but still built an invalid traffic
+  spec** (`cloudrun/gcp.go`) — a lone `TrafficTarget` at 0% doesn't sum to
+  the 100% Cloud Run requires, exactly as invalid as any other partial
+  percent, for the same underlying reason (no way to say where the rest of
+  the traffic goes). Fixed: only 100 is accepted now.
+  - Test: `TestValidatedPercent_ZeroRejected`
+
+- [x] **Notify config not validated** (`config/config.go`) — `notify.rules`
+  could be configured with an empty or malformed `slackWebhookUrl`, so
+  notifications either silently never fired or every send failed at
+  runtime instead of failing loudly at config load. Fixed: `Parse` now
+  requires a valid `http`/`https` URL whenever `notify.rules` is non-empty.
+  - Test: `TestParse_NotifyRulesRequireWebhookURL`,
+    `TestParse_NotifyRulesRejectMalformedWebhookURL`
+
+- [x] **Duplicate `apps[].name` not rejected** (`config/config.go`) — two
+  app entries sharing a name (even across different envs, if they ever
+  expand to the same project) would clobber each other's `applications`
+  row, since `SyncUnit`s key on `(app, project)`. Fixed: `Parse` now
+  rejects a repeated app name.
+  - Test: `TestParse_DuplicateAppNameRejected`
+
+- [x] **Leader lease TTL passed as `Duration.String()` into `::interval`**
+  (`leader/lease.go`) — worked only by coincidence for whole-second/
+  millisecond values; a sub-millisecond TTL would format with a unit
+  (`µs`, `ns`) Postgres's interval parser doesn't understand. Fixed: passes
+  the TTL as a numeric second count multiplied by a literal
+  `interval '1 second'` instead of relying on Go's duration string format.
+
+- [x] **GitHub installation ID re-fetched on every token remint**
+  (`githubapp/githubapp.go`) — an installation's ID is effectively
+  permanent for a given repo, but every hourly token refresh re-discovered
+  it from scratch, doubling GitHub API calls. Fixed: cached per owner/repo
+  for the process lifetime.
+  - Test: `TestInstallationToken_ReusesCachedInstallationIDAcrossRemints`
+
+- [x] **`RunOnce` dropped per-unit error detail on upsert failure**
+  (`reconcile/reconcile.go`) — `RunOnce`'s aggregate `error` return is just
+  the first of possibly several concurrent write failures, with no
+  attribution to which unit(s) failed; the per-unit `Result.Err` wasn't
+  populated with the upsert error at all. Fixed: a failed upsert now
+  attaches its error to that unit's own `Result.Err`.
+  - Test: extended `TestRunOnce_OneUnitWriteFailureDoesNotDiscardSiblingResults`
+
+- [x] **`rbac.CanSync` panicked on a nil `*Config`** — fixed to fail closed
+  (deny) instead, a cheap robustness improvement even though `main.go`
+  never actually passes nil today.
+
+- [x] **`GITHUB_APP_PEM` literal `\n` deployment footgun** — a PEM pasted
+  into a single-line Cloud Run secret/env var often arrives with literal
+  `\n` two-character sequences instead of real newlines, which
+  `pem.Decode` silently fails on. Fixed: `NewClient` retries once with
+  those normalized to real newlines before giving up.
+  - Test: `TestNewClient_NormalizesLiteralNewlineEscapes`
+
 - [ ] **Left as-is, deliberately:**
   - A precondition-failing unit still makes a live Cloud Run fetch every
     poll purely to keep `Health` visible for display — real API cost, but
@@ -482,6 +606,28 @@ tradeoffs rather than guessed at.
     identical access. Not fixed because doing so means inventing what
     "admin" should additionally grant, which isn't specified anywhere yet
     — a product decision, not a mechanical bug.
+  - **Precondition check-failure conflated with genuinely-missing**
+    (`precondition/precondition.go`) — `Check` returns the same error
+    shape whether a precondition doesn't exist or the check itself errored
+    (e.g. a transient Pub/Sub API outage), so a transient GCP hiccup flips
+    every gated unit fleet-wide to `Invalid` indistinguishably from a real
+    missing dependency. Self-heals automatically next poll (not persisted
+    as a stuck state) and arguably the correct fail-closed default (don't
+    deploy when a precondition can't be confirmed) — but does add
+    misleading noise during an outage. Left alone pending a decision on
+    whether that noise is worth a bigger change (e.g. a distinct sentinel
+    error type so reconcile.go can treat "check errored" differently from
+    "doesn't exist").
+  - **API 404-before-403 ordering** (`api/api.go`) — an unknown app/project
+    returns 404 before RBAC is checked, letting an authenticated-but-
+    unauthorized caller distinguish "doesn't exist" from "exists but I lack
+    access" by probing arbitrary names. Low real-world risk (this is an
+    internal, authenticated-only tool; app names aren't secret in most
+    orgs) and not straightforward to fix well: RBAC's env/app-scoped rules
+    need the unit's `Env`, which is only known *after* the `Find()` lookup
+    that determines 404 — so checking RBAC first would only work for the
+    wildcard `"*"` scope, not a real fix. Left alone; flag if this becomes
+    an actual concern.
   - `internal/api/api_test.go`'s nilaway exclusion couldn't be narrowed to
     just the `postSync` helper — verified by trying it: nilaway reports at
     the dereference site (every call site's `.StatusCode`/`.Body` access

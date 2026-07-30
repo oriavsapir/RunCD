@@ -26,9 +26,12 @@ type Sink interface {
 }
 
 // db is the subset of *sql.DB the evaluator needs — an interface so tests
-// can use a real Postgres without pulling in *sql.DB directly.
+// can use a real Postgres without pulling in *sql.DB directly. BeginTx
+// lets maybeNotify hold the debounce row's claim open across the actual
+// Sink.Send call, committing the claim only on success.
 type db interface {
 	QueryRowContext(ctx context.Context, query string, args ...any) *sql.Row
+	BeginTx(ctx context.Context, opts *sql.TxOptions) (*sql.Tx, error)
 }
 
 // Evaluator implements reconcile.Notifier: evaluated once per reconcile
@@ -96,18 +99,28 @@ func autoSyncEnabled(sync config.SyncPolicy) bool {
 	return sync.Auto != nil && *sync.Auto
 }
 
-// maybeNotify atomically checks-and-updates the debounce row in one
-// statement: the conditional DO UPDATE only applies (and only then does
+// maybeNotify atomically checks-and-claims the debounce row inside a
+// transaction: the conditional DO UPDATE only applies (and only then does
 // RETURNING produce a row) if the last notification for this (unit, rule)
 // was outside the debounce window, so concurrent callers can't double-send.
+// The claim is only committed after Sink.Send succeeds — a failed/hung
+// webhook rolls back, leaving last_notified_at untouched so the next poll
+// can retry, instead of silently burning the whole debounce window on a
+// notification nobody received.
 func (e *Evaluator) maybeNotify(ctx context.Context, res reconcile.Result, rule, message string) error {
 	interval := e.DebounceInterval
 	if interval <= 0 {
 		interval = DefaultDebounceInterval
 	}
 
+	tx, err := e.DB.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("begin debounce claim for %s/%s/%s: %w", res.Unit.App, res.Unit.Project, rule, err)
+	}
+	defer func() { _ = tx.Rollback() }() // no-op once committed
+
 	var fired bool
-	err := e.DB.QueryRowContext(ctx, `
+	err = tx.QueryRowContext(ctx, `
 		INSERT INTO notification_debounce (application, target_gcp_project, rule, last_notified_at)
 		VALUES ($1, $2, $3, now())
 		ON CONFLICT (application, target_gcp_project, rule) DO UPDATE SET last_notified_at = now()
@@ -122,5 +135,11 @@ func (e *Evaluator) maybeNotify(ctx context.Context, res reconcile.Result, rule,
 		return fmt.Errorf("debounce check for %s/%s/%s: %w", res.Unit.App, res.Unit.Project, rule, err)
 	}
 
-	return e.Sink.Send(ctx, message)
+	if err := e.Sink.Send(ctx, message); err != nil {
+		return fmt.Errorf("send notification for %s/%s/%s: %w", res.Unit.App, res.Unit.Project, rule, err)
+	}
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("commit debounce claim for %s/%s/%s: %w", res.Unit.App, res.Unit.Project, rule, err)
+	}
+	return nil
 }

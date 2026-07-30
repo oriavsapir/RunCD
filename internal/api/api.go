@@ -53,7 +53,6 @@ type syncResponse struct {
 	Project string `json:"project"`
 	Status  string `json:"status"`
 	Health  string `json:"health"`
-	Error   string `json:"error,omitempty"`
 }
 
 func (h *Handler) handleSync(w http.ResponseWriter, r *http.Request) {
@@ -86,31 +85,37 @@ func (h *Handler) handleSync(w http.ResponseWriter, r *http.Request) {
 
 	res, err := h.Reconciler.ManualSync(r.Context(), unit, email)
 	if err != nil {
-		// This is an infra-level failure (e.g. the applications-table
-		// write itself failed) — distinct from res.Err, which is a
-		// business-level outcome (precondition failure, etc.) that's
-		// already deliberately surfaced in the response body below. Log
-		// the real error server-side; don't echo it to the caller, who
-		// only needed RBAC scope to reach this far, not visibility into
-		// internal error text (DB errors, GCP error detail).
-		// %q (not %s) on the request-controlled fields: app/project come
-		// from the URL path and email from a verified ID token, but none
-		// of the three are sanitized against CRLF, so %q neutralizes a
-		// log-injection attempt by escaping control characters into a
-		// literal "\n" rather than an actual newline byte. gosec's taint
-		// check flags any tainted value reaching Printf regardless of verb
-		// — it can't see that %q already defeats the injection.
-		log.Printf("manual sync %q/%q by %q: %v", app, project, email, err) //nolint:gosec
+		// The applications-table write itself failed — an infra error, not
+		// business-level. Log it server-side; don't echo it to the caller.
+		logSensitive(app, project, email, err)
 		http.Error(w, "sync failed", http.StatusInternalServerError)
 		return
 	}
+	if res.Err != nil {
+		// res.Err mixes business-level outcomes (a failed precondition,
+		// say) with genuine infra errors (a raw wrapped GCP/DB error from a
+		// failed live-state fetch or deploy, see reconcile.go) — there's no
+		// reliable way to tell which from here, so none of it goes in the
+		// response body. res.Status/res.Health already tell the caller
+		// something's wrong (Invalid/Missing); the specific reason lives in
+		// sync_events and the server log, not the HTTP response.
+		logSensitive(app, project, email, res.Err)
+	}
 
 	resp := syncResponse{App: app, Project: project, Status: res.Status, Health: res.Health}
-	if res.Err != nil {
-		resp.Error = res.Err.Error()
-	}
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(resp)
+}
+
+// logSensitive logs a manual-sync failure server-side only. %q (not %s) on
+// the request-controlled fields — app/project come from the URL path and
+// email from a verified ID token, but none of the three are sanitized
+// against CRLF — neutralizes a log-injection attempt by escaping control
+// characters into a literal "\n" rather than an actual newline byte.
+// gosec's taint check flags any tainted value reaching Printf regardless
+// of verb — it can't see that %q already defeats the injection.
+func logSensitive(app, project, email string, err error) {
+	log.Printf("manual sync %q/%q by %q: %v", app, project, email, err) //nolint:gosec
 }
 
 func bearerToken(r *http.Request) (string, bool) {

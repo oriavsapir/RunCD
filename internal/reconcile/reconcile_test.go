@@ -500,6 +500,13 @@ func TestRunOnce_OneUnitWriteFailureDoesNotDiscardSiblingResults(t *testing.T) {
 		if res.Status != "Synced" {
 			t.Fatalf("every unit should have computed Synced (fake Cloud Run always matches), got %+v", res)
 		}
+		if res.Unit.App == "bad-app" {
+			if res.Err == nil {
+				t.Fatalf("expected bad-app's Result to carry its own upsert error, not just RunOnce's aggregate one, got %+v", res)
+			}
+		} else if res.Err != nil {
+			t.Fatalf("expected %s's Result to have no error, got %v", res.Unit.App, res.Err)
+		}
 	}
 
 	var count int
