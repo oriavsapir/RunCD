@@ -2,7 +2,6 @@ package cloudrun
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"strings"
 	"sync"
@@ -296,6 +295,21 @@ func (c *GCPAdminClient) deployWorkerPool(ctx context.Context, project, region, 
 	return nil
 }
 
+// fetchJob fetches the raw Job proto via jc, translating NotFound into
+// ErrNotProvisioned. Shared by GetJob and DeployJob so a deploy doesn't
+// have to fetch the same job twice — once to decide idempotency, again to
+// build the update payload.
+func (c *GCPAdminClient) fetchJob(ctx context.Context, jc *run.JobsClient, project, region, name string) (*runpb.Job, error) {
+	job, err := jc.GetJob(ctx, &runpb.GetJobRequest{Name: jobName(project, region, name)})
+	if err != nil {
+		if status.Code(err) == codes.NotFound {
+			return nil, ErrNotProvisioned
+		}
+		return nil, fmt.Errorf("get job %s: %w", name, err)
+	}
+	return job, nil
+}
+
 // GetJob implements AdminClient.GetJob. Right after a deploy, the job's
 // spec template already reflects the new desired image but
 // LatestCreatedExecution can still be the *previous* execution — comparing
@@ -308,12 +322,9 @@ func (c *GCPAdminClient) GetJob(ctx context.Context, project, region, name, desi
 	if err != nil {
 		return nil, err
 	}
-	job, err := jc.GetJob(ctx, &runpb.GetJobRequest{Name: jobName(project, region, name)})
+	job, err := c.fetchJob(ctx, jc, project, region, name)
 	if err != nil {
-		if status.Code(err) == codes.NotFound {
-			return nil, ErrNotProvisioned
-		}
-		return nil, fmt.Errorf("get job %s: %w", name, err)
+		return nil, err
 	}
 
 	ref := job.GetLatestCreatedExecution()
@@ -321,6 +332,19 @@ func (c *GCPAdminClient) GetJob(ctx context.Context, project, region, name, desi
 		return &LiveJob{}, nil
 	}
 
+	exec, err := c.getExecution(ctx, region, ref)
+	if err != nil {
+		return nil, err
+	}
+	digest := digestSuffix(containerImage(exec.GetTemplate().GetContainers()))
+	return &LiveJob{
+		ServiceState:                 ServiceState{ImageDigest: digest},
+		HasExecutionForDesiredDigest: digest == desiredDigest,
+		LatestExecutionStatus:        executionStatus(exec),
+	}, nil
+}
+
+func (c *GCPAdminClient) getExecution(ctx context.Context, region string, ref *runpb.ExecutionReference) (*runpb.Execution, error) {
 	ec, err := c.executionsClient(ctx, region)
 	if err != nil {
 		return nil, err
@@ -329,13 +353,7 @@ func (c *GCPAdminClient) GetJob(ctx context.Context, project, region, name, desi
 	if err != nil {
 		return nil, fmt.Errorf("get execution %s: %w", ref.GetName(), err)
 	}
-
-	digest := digestSuffix(containerImage(exec.GetTemplate().GetContainers()))
-	return &LiveJob{
-		ServiceState:                 ServiceState{ImageDigest: digest},
-		HasExecutionForDesiredDigest: digest == desiredDigest,
-		LatestExecutionStatus:        executionStatus(exec),
-	}, nil
+	return exec, nil
 }
 
 // DeployJob implements AdminClient.DeployJob: point the job spec at the
@@ -349,26 +367,27 @@ func (c *GCPAdminClient) GetJob(ctx context.Context, project, region, name, desi
 // a poll that re-issues a deploy call while still waiting for a prior
 // deploy's convergence would trigger a genuine duplicate job execution.
 func (c *GCPAdminClient) DeployJob(ctx context.Context, project, region, name string, desired ServiceState) error {
-	live, err := c.GetJob(ctx, project, region, name, desired.ImageDigest)
-	if err != nil && !errors.Is(err, ErrNotProvisioned) {
-		return err
-	}
-	if err == nil && live.HasExecutionForDesiredDigest &&
-		(live.LatestExecutionStatus == ExecutionRunning || live.LatestExecutionStatus == ExecutionSucceeded) {
-		return nil
-	}
-
 	jc, err := c.jobsClient(ctx, region)
 	if err != nil {
 		return err
 	}
-	job, err := jc.GetJob(ctx, &runpb.GetJobRequest{Name: jobName(project, region, name)})
+	job, err := c.fetchJob(ctx, jc, project, region, name)
 	if err != nil {
-		if status.Code(err) == codes.NotFound {
-			return ErrNotProvisioned
-		}
-		return fmt.Errorf("get job %s: %w", name, err)
+		return err
 	}
+
+	if ref := job.GetLatestCreatedExecution(); ref != nil {
+		exec, err := c.getExecution(ctx, region, ref)
+		if err != nil {
+			return err
+		}
+		digest := digestSuffix(containerImage(exec.GetTemplate().GetContainers()))
+		execStatus := executionStatus(exec)
+		if digest == desired.ImageDigest && (execStatus == ExecutionRunning || execStatus == ExecutionSucceeded) {
+			return nil
+		}
+	}
+
 	containers := job.GetTemplate().GetTemplate().GetContainers()
 	if len(containers) == 0 {
 		return fmt.Errorf("job %s has no containers in its task template", name)

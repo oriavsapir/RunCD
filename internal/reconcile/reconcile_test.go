@@ -1026,6 +1026,51 @@ func TestUpsert_EmptyDesiredImageDoesNotOverwritePreviousValue(t *testing.T) {
 	}
 }
 
+// TestUpsert_EmptyLiveImageDoesNotOverwritePreviousValue is
+// live_image's counterpart to the desired_image test above — same
+// exposure, same fix: a transient live-state fetch failure leaves
+// res.LiveImage empty, and nullIfEmpty("") turns that into SQL NULL, which
+// must not clobber a previously-observed live_image.
+func TestUpsert_EmptyLiveImageDoesNotOverwritePreviousValue(t *testing.T) {
+	db := testutil.NewPostgres(t)
+	r := &Reconciler{DB: db}
+
+	first, err := r.upsert(context.Background(), Result{
+		Unit:         expander.SyncUnit{App: "widget-api", Project: "example-dev-01"},
+		DesiredImage: validDigest,
+		LiveImage:    validDigest,
+		Status:       "Synced",
+		Health:       "Healthy",
+	})
+	if err != nil {
+		t.Fatalf("first upsert: %v", err)
+	}
+	if first.DesiredImage != validDigest {
+		t.Fatalf("expected DesiredImage=%s after first upsert, got %+v", validDigest, first)
+	}
+
+	// Simulate a pass whose live-state fetch transiently failed: LiveImage
+	// never got set (applyLiveState returns before reaching that line).
+	_, err = r.upsert(context.Background(), Result{
+		Unit:         expander.SyncUnit{App: "widget-api", Project: "example-dev-01"},
+		DesiredImage: validDigest,
+		Status:       "Invalid",
+		Health:       "Invalid",
+	})
+	if err != nil {
+		t.Fatalf("second upsert: %v", err)
+	}
+
+	var stored string
+	err = db.QueryRowContext(context.Background(), `SELECT live_image FROM applications WHERE name = 'widget-api' AND target_gcp_project = 'example-dev-01'`).Scan(&stored)
+	if err != nil {
+		t.Fatalf("query live_image: %v", err)
+	}
+	if stored != validDigest {
+		t.Fatalf("expected live_image to stay %q despite the empty-LiveImage upsert, got %q", validDigest, stored)
+	}
+}
+
 type fakeNotifier struct {
 	evaluated []Result
 }

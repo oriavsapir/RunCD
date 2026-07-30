@@ -418,7 +418,11 @@ func (r *Reconciler) upsert(ctx context.Context, res Result) (Result, error) {
 			-- setting it) — don't let that blank out a previously-recorded
 			-- desired_image; keep the last known-good value instead.
 			desired_image = CASE WHEN EXCLUDED.desired_image = '' THEN applications.desired_image ELSE EXCLUDED.desired_image END,
-			live_image = EXCLUDED.live_image,
+			-- Same exposure as desired_image above: a transient live-state
+			-- fetch failure leaves res.LiveImage empty (nullIfEmpty turns
+			-- that into NULL) for that pass — don't let that blank out a
+			-- previously-observed live_image.
+			live_image = CASE WHEN EXCLUDED.live_image IS NULL THEN applications.live_image ELSE EXCLUDED.live_image END,
 			status = EXCLUDED.status,
 			health = EXCLUDED.health,
 			status_since = CASE WHEN applications.status = EXCLUDED.status THEN applications.status_since ELSE now() END,

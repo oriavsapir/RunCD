@@ -696,6 +696,30 @@ tradeoffs rather than guessed at.
   the connection to its keep-alive pool, forcing a fresh TCP+TLS handshake
   on every send. Fixed: drains the body before closing.
 
+## Bugs found and fixed in a sixth review pass
+
+Both findings were in code from the fifth pass above, caught immediately
+on the next review.
+
+- [x] **`live_image` had the exact same data-loss exposure as
+  `desired_image`** (`reconcile/reconcile.go`) — the fifth pass fixed
+  `desired_image` being blanked by a transient manifest-fetch failure but
+  missed that `live_image` has the identical exposure: a transient
+  `GetService`/`GetJob`/`GetWorkerPool` failure leaves `res.LiveImage`
+  empty, `nullIfEmpty("")` turns that into SQL `NULL`, and the `ON
+  CONFLICT DO UPDATE` wrote that `NULL` over a previously-observed value
+  unconditionally. Fixed with the same `CASE WHEN` pattern.
+  - Test: `TestUpsert_EmptyLiveImageDoesNotOverwritePreviousValue`
+
+- [x] **`DeployJob`'s new idempotency check fetched the job twice**
+  (`cloudrun/gcp.go`) — the fifth pass's fix called the public `GetJob`
+  wrapper (itself a `GetJob` + possibly `GetExecution` RPC) purely to
+  decide whether to skip, then immediately re-fetched the same job via a
+  second raw `GetJob` call to get a mutable proto for the update. Fixed:
+  extracted `fetchJob`/`getExecution` helpers shared by `GetJob` and
+  `DeployJob`, so a real deploy now fetches the job once and reuses it —
+  down from 5 RPCs to 4 for a job with execution history.
+
 - [ ] **Left as-is, deliberately (larger architectural changes, flagged
   for a decision rather than done silently):**
   - **Manual sync races the leader's auto-reconcile loop** (`api/api.go`)
