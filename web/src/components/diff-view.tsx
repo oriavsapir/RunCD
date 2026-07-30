@@ -1,0 +1,77 @@
+import { ArrowRight, GitCompare } from "lucide-react";
+import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
+import { StatusBadge } from "@/components/status-badge";
+import type { Unit } from "@/lib/types";
+
+function ImageValue({ digest }: { digest?: string }) {
+  if (!digest) {
+    return <span className="text-muted-foreground italic">not yet observed</span>;
+  }
+  return <code className="text-xs break-all">{digest}</code>;
+}
+
+// Per-unit diff view: desired vs live state, per §5.11.
+export function DiffView({ unit }: { unit: Unit }) {
+  const inSync =
+    !!unit.desiredImage && unit.desiredImage === unit.liveImage;
+
+  return (
+    <Card>
+      <CardHeader>
+        <CardTitle className="flex items-center gap-2">
+          <GitCompare className="text-muted-foreground size-4" />
+          Desired vs Live
+        </CardTitle>
+      </CardHeader>
+      <CardContent className="flex flex-col gap-4">
+        <div className="flex items-center gap-3">
+          <StatusBadge value={unit.status} />
+          <StatusBadge value={unit.health} />
+          {inSync && (
+            <span className="text-muted-foreground text-xs">
+              image digests match
+            </span>
+          )}
+        </div>
+
+        <dl className="grid grid-cols-[auto_1fr] items-center gap-x-4 gap-y-3 text-sm">
+          <dt className="text-muted-foreground">Desired image</dt>
+          <dd>
+            <ImageValue digest={unit.desiredImage} />
+          </dd>
+
+          <dt className="text-muted-foreground">Live image</dt>
+          <dd>
+            <ImageValue digest={unit.liveImage} />
+          </dd>
+
+          {!inSync && unit.desiredImage && unit.liveImage && (
+            <>
+              <dt className="text-muted-foreground">Transition</dt>
+              <dd className="flex items-center gap-2">
+                <code className="text-xs break-all">{unit.liveImage}</code>
+                <ArrowRight className="text-muted-foreground size-3.5 shrink-0" />
+                <code className="text-xs break-all">{unit.desiredImage}</code>
+              </dd>
+            </>
+          )}
+
+          <dt className="text-muted-foreground">Region</dt>
+          <dd>{unit.region}</dd>
+
+          <dt className="text-muted-foreground">Auto-sync</dt>
+          <dd>{unit.auto ? "enabled" : "gated (manual only)"}</dd>
+
+          <dt className="text-muted-foreground">Last reconciled</dt>
+          <dd>
+            {unit.lastReconciledAt ? (
+              new Date(unit.lastReconciledAt).toLocaleString()
+            ) : (
+              <span className="text-muted-foreground italic">never</span>
+            )}
+          </dd>
+        </dl>
+      </CardContent>
+    </Card>
+  );
+}

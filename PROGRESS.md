@@ -799,16 +799,24 @@ direct Google OAuth token verification as the primary path.
   `X-Goog-IAP-JWT-Assertion` header via `github.com/coreos/go-oidc/v3`
   against IAP's fixed issuer (`https://cloud.google.com/iap`) and JWKS URL
   (`https://www.gstatic.com/iap/verify/public_key-jwk`), checking the `aud`
-  claim against `IAP_AUDIENCE`
-  (`/projects/<PROJECT_NUMBER>/global/backendServices/<BACKEND_SERVICE_ID>`
-  for the LB+Serverless-NEG topology — see
-  https://cloud.google.com/iap/docs/signed-headers-howto). This is
-  defense-in-depth, not the primary gate — IAM/IAP itself is what actually
-  decides who can reach the service; verifying the assertion here guards
-  against a request that somehow bypasses IAP and forges the header.
-  `NewIAPAuthenticator` builds the verifier eagerly (not lazily) so it's
-  safe for concurrent use from construction on, and rejects an empty
-  audience up front (same fail-closed posture as `GoogleAuthenticator`).
+  claim against `IAP_AUDIENCE`. This is defense-in-depth, not the primary
+  gate — IAM/IAP itself is what actually decides who can reach the
+  service; verifying the assertion here guards against a request that
+  somehow bypasses IAP and forges the header. `NewIAPAuthenticator` builds
+  the verifier eagerly (not lazily) so it's safe for concurrent use from
+  construction on, and rejects an empty audience up front (same
+  fail-closed posture as `GoogleAuthenticator`).
+  - **Topology: IAP enabled directly on Cloud Run, no load balancer**
+    (confirmed via Google's docs — this is GA/preview-supported, header/
+    issuer/JWKS are identical to the LB case, only the audience format
+    differs). `IAP_AUDIENCE` is
+    `/projects/<PROJECT_NUMBER>/locations/<REGION>/services/<SERVICE_NAME>`.
+    Enable with `gcloud run services update SERVICE --region=REGION --iap`,
+    then grant IAP's own service agent invoker on the service
+    (`gcloud run services add-iam-policy-binding ... --member=serviceAccount:service-PROJECT_NUMBER@gcp-sa-iap.iam.gserviceaccount.com --role=roles/run.invoker`),
+    then grant real users `roles/iap.httpsResourceAccessor` via
+    `gcloud iap web add-iam-policy-binding --resource-type=cloud-run --service=SERVICE --region=REGION`.
+    See https://cloud.google.com/run/docs/securing/identity-aware-proxy-cloud-run.
 - [x] **`auth.GoogleAuthenticator` kept, not wired by default** — still a
   legitimate option for a self-hoster not running behind IAP; `main.go` now
   constructs `IAPAuthenticator` instead, but the direct-OAuth path remains
@@ -816,13 +824,11 @@ direct Google OAuth token verification as the primary path.
 - [x] **`main.go`**: `AUTH_AUDIENCE` env var replaced with `IAP_AUDIENCE`.
   RBAC (`rbac.CanSync`) is unchanged — IAP only answers "is this a real
   authenticated user", not "can they sync this app/project".
-  - **Not built yet:** the actual IAP-in-front-of-Cloud-Run infrastructure
-    (External HTTPS LB, Serverless NEG, enabling IAP, granting
-    `roles/iap.httpsResourceAccessor`) — this section only covers the
-    application-side verification. Setting that up is an infra/deploy step
-    for whoever runs this, not code in this repo.
+  - **Not built yet:** actually enabling IAP on the real Cloud Run service
+    and granting the IAM roles above — that's a deploy step for whoever
+    runs this, not code in this repo.
 
-## Phase 4 — Web dashboard (in progress)
+## Phase 4 — Web dashboard
 
 - [x] **Backend read APIs** (`internal/api/store.go`, `internal/api/units.go`)
   — the dashboard needs data no endpoint served before (everything so far
@@ -845,13 +851,61 @@ direct Google OAuth token verification as the primary path.
   - `StatusStore` is a new interface (`PostgresStatusStore` the real impl)
     — deliberately separate from `reconcile.Reconciler`'s DB access, which
     only ever writes.
+  - `canSync` on every unit, computed server-side from the caller's own
+    RBAC scope — the dashboard has no way to evaluate `rbac.CanSync`
+    itself, so it needs this to disable the Sync button per unit, not
+    just gate the sync request when clicked.
   - Test: `TestHandleListUnits_RequiresAuth`,
     `TestHandleListUnits_PendingBeforeAnySync`,
     `TestHandleListUnits_ReflectsPersistedStateAfterSync`,
+    `TestHandleListUnits_CanSyncReflectsCallersOwnRBACScope`,
     `TestHandleUnitDetail_UnknownUnitRejected`,
     `TestHandleUnitHistory_ReturnsSyncEventAfterSync`.
-- [ ] Next.js dashboard app (scaffold, unit list, diff view, history view,
-  gated Sync button, component tests) — not started yet.
+
+- [x] **Next.js dashboard** (`web/`) — App Router, TypeScript, Tailwind
+  CSS v4, shadcn/ui (`base-nova` style) + lucide-react icons, per the
+  established UI guidance (no emoji, icon library only, prefer libraries
+  over custom code). `create-next-app`'s scaffold carries 12 high-severity
+  *dev-tooling* advisories (eslint/postcss/sharp transitive chain, not
+  runtime code) — `npm audit fix --force` would downgrade Next.js to v9,
+  the wrong direction; left as-is.
+  - `src/lib/api.ts` — typed client. Calls are same-origin
+    (`credentials: "include"`, no bearer-token handling in the frontend at
+    all) on the assumption the dashboard sits behind the same
+    IAP-protected perimeter as the argorun API (one Cloud Run service, or
+    two behind one load balancer with path routing) — the browser's
+    existing IAP session cookie authenticates API calls automatically.
+    `NEXT_PUBLIC_API_BASE_URL` overrides this if the API is genuinely on a
+    different origin. **Known gap:** no local-dev auth bypass — running
+    `next dev` against a real IAP-fronted backend requires either a live
+    IAP session or a temporary dev stub; not built.
+  - `src/components/status-badge.tsx` — maps every `Status`/`Health` enum
+    value (plus the dashboard-only `"Pending"` sentinel) to an icon +
+    color, with a safe fallback for an unrecognized value.
+  - `src/app/page.tsx` + `src/components/unit-table.tsx` — sync-unit list
+    grouped by environment (§5.11).
+  - `src/app/units/[project]/[app]/page.tsx` + `src/components/diff-view.tsx`
+    — per-unit diff view (desired vs live image, with a from→to
+    transition shown only when they differ).
+  - `src/components/history-table.tsx` — sync-history view backed by
+    `GET .../history` (`sync_events`).
+  - `src/components/sync-button.tsx` — gated Sync button: `disabled`
+    (not just erroring on click) when the unit's `canSync` is false,
+    shared between the list and detail views.
+  - Data fetching uses a `refreshKey`-bumping `useEffect` pattern (fetch
+    inline in the effect body, `cancelled` flag in the cleanup) rather
+    than calling a separately-defined `load()` callback from inside the
+    effect — the latter trips `eslint-plugin-react-hooks`'s
+    `set-state-in-effect` rule in this Next.js/eslint version.
+  - Component tests (Vitest + React Testing Library, no E2E suite per
+    §8): `status-badge.test.tsx`, `diff-view.test.tsx`,
+    `history-table.test.tsx`, `sync-button.test.tsx` (gating +
+    success/error paths), `unit-table.test.tsx` (env grouping). 23 tests,
+    run via `npm test` (`web/`).
+  - Verified: `npm run build` and `npm run lint` both clean; a local
+    `next dev` boot serves both `/` and `/units/{project}/{app}` with
+    status 200 (data fetches themselves aren't exercised locally without
+    a live, IAP-fronted backend — see the known gap above).
 
 ## Infra / delivery
 

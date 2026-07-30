@@ -420,6 +420,37 @@ func TestHandleListUnits_ReflectsPersistedStateAfterSync(t *testing.T) {
 	}
 }
 
+// TestHandleListUnits_CanSyncReflectsCallersOwnRBACScope regression-tests
+// the gated Sync button's data source: the dashboard can't evaluate
+// rbac.CanSync itself, so canSync must be computed per the caller's own
+// identity, not a fixed value — an admin (scope "*") sees canSync=true for
+// the prd unit; a syncer scoped to "env:dev" sees canSync=false for it.
+func TestHandleListUnits_CanSyncReflectsCallersOwnRBACScope(t *testing.T) {
+	h, _ := newTestHandler(t)
+	srv := httptest.NewServer(NewMux(h))
+	defer srv.Close()
+
+	adminResp := getWithBearer(t, srv.URL+"/api/units", "admin-token")
+	defer func() { _ = adminResp.Body.Close() }()
+	var adminUnits []unitView
+	if err := json.NewDecoder(adminResp.Body).Decode(&adminUnits); err != nil {
+		t.Fatalf("decode admin response: %v", err)
+	}
+	if len(adminUnits) != 1 || !adminUnits[0].CanSync {
+		t.Fatalf("expected admin to see canSync=true, got %+v", adminUnits)
+	}
+
+	devResp := getWithBearer(t, srv.URL+"/api/units", "dev-only-token")
+	defer func() { _ = devResp.Body.Close() }()
+	var devUnits []unitView
+	if err := json.NewDecoder(devResp.Body).Decode(&devUnits); err != nil {
+		t.Fatalf("decode dev-only response: %v", err)
+	}
+	if len(devUnits) != 1 || devUnits[0].CanSync {
+		t.Fatalf("expected dev-only (scoped to env:dev) to see canSync=false for the prd unit, got %+v", devUnits)
+	}
+}
+
 func TestHandleUnitDetail_UnknownUnitRejected(t *testing.T) {
 	h, _ := newTestHandler(t)
 	srv := httptest.NewServer(NewMux(h))

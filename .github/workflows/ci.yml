@@ -13,8 +13,8 @@ jobs:
   fmt:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v6
-      - uses: actions/setup-go@v6
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v7
         with:
           go-version-file: go.mod
       - name: gofmt
@@ -29,8 +29,8 @@ jobs:
   vet:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v6
-      - uses: actions/setup-go@v6
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v7
         with:
           go-version-file: go.mod
       - run: go vet ./...
@@ -38,8 +38,8 @@ jobs:
   lint:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v6
-      - uses: actions/setup-go@v6
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v7
         with:
           go-version-file: go.mod
       - uses: golangci/golangci-lint-action@v9
@@ -49,8 +49,8 @@ jobs:
   vulncheck:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v6
-      - uses: actions/setup-go@v6
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v7
         with:
           go-version-file: go.mod
       - run: go install golang.org/x/vuln/cmd/govulncheck@latest
@@ -59,8 +59,8 @@ jobs:
   nilaway:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v6
-      - uses: actions/setup-go@v6
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v7
         with:
           go-version-file: go.mod
       - run: go install go.uber.org/nilaway/cmd/nilaway@latest
@@ -73,14 +73,20 @@ jobs:
       # StatusCode/.Body access across the test functions), not at
       # postSync's own http.Client.Do call, so isolating that one helper
       # into its own file doesn't shrink what has to be excluded — verified
-      # by trying it.
-      - run: nilaway -exclude-errors-in-files internal/notify/slack.go,internal/api/api_test.go,internal/cloudrun/gcp.go,internal/githubapp/githubapp.go ./...
+      # by trying it. internal/leader/lease.go is the same story: its test
+      # fake (hangingDB, simulating a wedged connection) returns
+      # (nil, ctx.Err()), and nilaway can't prove ctx.Err() is non-nil after
+      # <-ctx.Done() — flagged at lease.go's real (and correctly
+      # err-guarded) res.RowsAffected() call, not at the test file.
+      # web/node_modules is a stray vendored example .go file from an npm
+      # package, nothing to do with this repo.
+      - run: nilaway -exclude-errors-in-files internal/notify/slack.go,internal/api/api_test.go,internal/cloudrun/gcp.go,internal/githubapp/githubapp.go,internal/leader/lease.go,web/node_modules ./...
 
   test:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v6
-      - uses: actions/setup-go@v6
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v7
         with:
           go-version-file: go.mod
       - run: go build ./...
@@ -89,7 +95,7 @@ jobs:
   terraform:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
       - uses: hashicorp/setup-terraform@v4
         with:
           terraform_wrapper: false
@@ -104,9 +110,26 @@ jobs:
   docker:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
       - uses: docker/setup-buildx-action@v4
       - uses: docker/build-push-action@v7
         with:
           context: .
           push: false
+
+  web:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: web
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 24
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+      - run: npm ci
+      - run: npm run lint
+      - run: npm test
+      - run: npm run build

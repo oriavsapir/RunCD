@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/argorun/argorun/internal/expander"
+	"github.com/argorun/argorun/internal/rbac"
 )
 
 // UnitLister exposes every currently-configured sync unit, not just ones
@@ -30,6 +31,11 @@ type unitView struct {
 	Status           string     `json:"status"`
 	Health           string     `json:"health"`
 	LastReconciledAt *time.Time `json:"lastReconciledAt,omitempty"`
+	// CanSync is computed server-side from the caller's own RBAC scope
+	// (§5.9) — the dashboard has no way to evaluate rbac.CanSync itself,
+	// so it needs this to decide whether the Sync button is enabled for
+	// *this* unit, not just whether the unit exists.
+	CanSync bool `json:"canSync"`
 }
 
 // pendingStatus/pendingHealth mark a unit that's in the current config but
@@ -41,7 +47,7 @@ const (
 	pendingHealth = "Pending"
 )
 
-func unitViewFrom(u expander.SyncUnit) unitView {
+func unitViewFrom(u expander.SyncUnit, rbacCfg *rbac.Config, email string) unitView {
 	return unitView{
 		App:     u.App,
 		Project: u.Project,
@@ -50,6 +56,7 @@ func unitViewFrom(u expander.SyncUnit) unitView {
 		Auto:    u.Sync.Auto != nil && *u.Sync.Auto,
 		Status:  pendingStatus,
 		Health:  pendingHealth,
+		CanSync: rbac.CanSync(rbacCfg, email, u),
 	}
 }
 
@@ -66,7 +73,8 @@ func applyRow(v *unitView, row ApplicationRow) {
 // last-known status/health, open to any authenticated caller — read
 // visibility has no RBAC gate (§5.9); only Sync itself does.
 func (h *Handler) handleListUnits(w http.ResponseWriter, r *http.Request) {
-	if _, err := h.Auth.Verify(r); err != nil {
+	email, err := h.Auth.Verify(r)
+	if err != nil {
 		http.Error(w, "invalid token", http.StatusUnauthorized)
 		return
 	}
@@ -91,7 +99,7 @@ func (h *Handler) handleListUnits(w http.ResponseWriter, r *http.Request) {
 
 	views := make([]unitView, 0, len(units))
 	for _, u := range units {
-		v := unitViewFrom(u)
+		v := unitViewFrom(u, h.RBAC, email)
 		if row, ok := byKey[u.App+"/"+u.Project]; ok {
 			applyRow(&v, row)
 		}
@@ -105,7 +113,8 @@ func (h *Handler) handleListUnits(w http.ResponseWriter, r *http.Request) {
 // handleUnitDetail serves one sync unit's full state — the same fields as
 // the list view, used by the dashboard's diff view (desired vs live).
 func (h *Handler) handleUnitDetail(w http.ResponseWriter, r *http.Request) {
-	if _, err := h.Auth.Verify(r); err != nil {
+	email, err := h.Auth.Verify(r)
+	if err != nil {
 		http.Error(w, "invalid token", http.StatusUnauthorized)
 		return
 	}
@@ -118,7 +127,7 @@ func (h *Handler) handleUnitDetail(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	v := unitViewFrom(unit)
+	v := unitViewFrom(unit, h.RBAC, email)
 	row, found, err := h.Status.GetApplication(r.Context(), app, project)
 	if err != nil {
 		// %q escapes control characters, defeating log injection from

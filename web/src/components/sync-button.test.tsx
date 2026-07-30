@@ -1,0 +1,54 @@
+import { describe, expect, it, vi } from "vitest";
+import { render, screen, waitFor } from "@testing-library/react";
+import userEvent from "@testing-library/user-event";
+import { SyncButton } from "./sync-button";
+import * as api from "@/lib/api";
+
+describe("SyncButton", () => {
+  it("is disabled when canSync is false — the RBAC gate (§5.11)", () => {
+    render(
+      <SyncButton unit={{ app: "widget-api", project: "example-prod-eu", canSync: false }} />,
+    );
+    expect(screen.getByRole("button", { name: /sync/i })).toBeDisabled();
+  });
+
+  it("is enabled and calls syncUnit when canSync is true", async () => {
+    const spy = vi.spyOn(api, "syncUnit").mockResolvedValue({
+      app: "widget-api",
+      project: "example-prod-eu",
+      status: "Synced",
+      health: "Healthy",
+    });
+    const onSynced = vi.fn();
+    render(
+      <SyncButton
+        unit={{ app: "widget-api", project: "example-prod-eu", canSync: true }}
+        onSynced={onSynced}
+      />,
+    );
+
+    const button = screen.getByRole("button", { name: /sync/i });
+    expect(button).toBeEnabled();
+    await userEvent.click(button);
+
+    await waitFor(() => expect(onSynced).toHaveBeenCalledTimes(1));
+    expect(spy).toHaveBeenCalledWith("example-prod-eu", "widget-api");
+  });
+
+  it("shows the server error inline instead of silently failing", async () => {
+    vi.spyOn(api, "syncUnit").mockRejectedValue(
+      new api.ApiError("forbidden: no role grants sync access", 403),
+    );
+    render(
+      <SyncButton unit={{ app: "widget-api", project: "example-prod-eu", canSync: true }} />,
+    );
+
+    await userEvent.click(screen.getByRole("button", { name: /sync/i }));
+
+    await waitFor(() =>
+      expect(
+        screen.getByText(/forbidden: no role grants sync access/i),
+      ).toBeInTheDocument(),
+    );
+  });
+});
