@@ -1,6 +1,9 @@
 package manifest
 
-import "testing"
+import (
+	"strconv"
+	"testing"
+)
 
 const validDigest = "sha256:3f8a1c0000000000000000000000000000000000000000000000000000000000"
 
@@ -120,5 +123,35 @@ image:
 		if string(sd.ResourceType) != rt {
 			t.Fatalf("resourceType=%s: got %q", rt, sd.ResourceType)
 		}
+	}
+}
+
+func TestParse_TrafficPercentOutOfRangeRejected(t *testing.T) {
+	for _, percent := range []int{-1, 101, 500} {
+		yaml := []byte(`
+image:
+  digest: ` + validDigest + `
+traffic:
+  latestRevisionPercent: ` + strconv.Itoa(percent) + `
+`)
+		if _, err := Parse(yaml); err == nil {
+			t.Fatalf("percent=%d: expected error for an out-of-range traffic percent", percent)
+		}
+	}
+}
+
+func TestParse_TrafficPercentInRangeIsValid(t *testing.T) {
+	yaml := []byte(`
+image:
+  digest: ` + validDigest + `
+traffic:
+  latestRevisionPercent: 100
+`)
+	sd, err := Parse(yaml)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if sd.Traffic == nil || sd.Traffic.LatestRevisionPercent == nil || *sd.Traffic.LatestRevisionPercent != 100 {
+		t.Fatalf("traffic not parsed: %+v", sd.Traffic)
 	}
 }

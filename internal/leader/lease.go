@@ -16,9 +16,15 @@ const (
 	RenewInterval = 10 * time.Second
 )
 
+// db is the subset of *sql.DB Lease needs — kept as an interface so tests
+// can inject a wrapper that fails on demand for one specific call.
+type db interface {
+	ExecContext(ctx context.Context, query string, args ...any) (sql.Result, error)
+}
+
 // Lease claims and renews the single-row leader_lease table.
 type Lease struct {
-	db       *sql.DB
+	db       db
 	holderID string
 	ttl      time.Duration
 }
@@ -61,6 +67,14 @@ func (l *Lease) runWithInterval(ctx context.Context, interval time.Duration, lea
 	attempt := func() error {
 		ok, err := l.Claim(ctx)
 		if err != nil {
+			// A failed claim/renewal means this replica can no longer
+			// vouch for its own leadership — a caller that keeps deploying
+			// on the last-known leading(true) after this point risks
+			// running concurrently with whoever claims the lease next.
+			if wasLeader {
+				wasLeader = false
+				leading(false)
+			}
 			return err
 		}
 		if ok != wasLeader {

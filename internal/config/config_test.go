@@ -54,6 +54,74 @@ apps:
 	}
 }
 
+func TestParse_NotifyRules(t *testing.T) {
+	yaml := []byte(`
+environments:
+  dev:
+    projects: [example-dev-01]
+notify:
+  slackWebhookUrl: https://hooks.slack.com/services/x
+  rules:
+    - on: syncFailed
+    - on: healthDegraded
+      forMinutes: 10
+    - on: outOfSyncGated
+      forHours: 4
+`)
+	root, err := Parse(yaml)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(root.Notify.Rules) != 3 {
+		t.Fatalf("expected 3 notify rules, got %d", len(root.Notify.Rules))
+	}
+	if root.Notify.Rules[1].ForMinutes == nil || *root.Notify.Rules[1].ForMinutes != 10 {
+		t.Fatalf("expected healthDegraded forMinutes=10, got %+v", root.Notify.Rules[1])
+	}
+}
+
+func TestParse_NotifyUnknownRuleRejected(t *testing.T) {
+	yaml := []byte(`
+environments:
+  dev:
+    projects: [example-dev-01]
+notify:
+  rules:
+    - on: somethingElse
+`)
+	if _, err := Parse(yaml); err == nil {
+		t.Fatal("expected error for an unknown notify rule")
+	}
+}
+
+func TestParse_HealthDegradedRequiresForMinutes(t *testing.T) {
+	yaml := []byte(`
+environments:
+  dev:
+    projects: [example-dev-01]
+notify:
+  rules:
+    - on: healthDegraded
+`)
+	if _, err := Parse(yaml); err == nil {
+		t.Fatal("expected error for healthDegraded missing forMinutes")
+	}
+}
+
+func TestParse_OutOfSyncGatedRequiresForHours(t *testing.T) {
+	yaml := []byte(`
+environments:
+  dev:
+    projects: [example-dev-01]
+notify:
+  rules:
+    - on: outOfSyncGated
+`)
+	if _, err := Parse(yaml); err == nil {
+		t.Fatal("expected error for outOfSyncGated missing forHours")
+	}
+}
+
 func TestSyncPolicy_Merge(t *testing.T) {
 	trueVal, falseVal := true, false
 	three00 := 300
@@ -76,5 +144,18 @@ func TestSyncPolicy_Merge(t *testing.T) {
 	}
 	if merged.Retry == nil || merged.Retry.Limit != 5 {
 		t.Fatalf("expected inherited retry from defaults, got %+v", merged.Retry)
+	}
+}
+
+func TestParse_DuplicateProjectInEnvironmentRejected(t *testing.T) {
+	yaml := []byte(`
+environments:
+  prd:
+    projects: [example-prod-us, example-prod-us]
+defaults:
+  region: us-central1
+`)
+	if _, err := Parse(yaml); err == nil {
+		t.Fatal("expected error for a project listed twice in one environment")
 	}
 }

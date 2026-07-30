@@ -1,0 +1,450 @@
+package cloudrun
+
+import (
+	"context"
+	"fmt"
+	"sync"
+
+	run "cloud.google.com/go/run/apiv2"
+	"cloud.google.com/go/run/apiv2/runpb"
+	"golang.org/x/sync/singleflight"
+	"google.golang.org/api/option"
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/status"
+)
+
+// GCPAdminClient is the real Cloud Run Admin API v2 implementation of
+// AdminClient. Clients are regional (Cloud Run has no global endpoint), so
+// one is lazily created per region and cached. Construction is coalesced
+// per region via singleflight — the map mutex itself is only ever held for
+// a plain lookup/insert, never across the network/credential-resolution
+// call that creating a client can make, so a cold-start dial for one
+// region can't stall lookups for every other region in the reconcile
+// worker pool.
+type GCPAdminClient struct {
+	mu          sync.Mutex
+	services    map[string]*run.ServicesClient
+	workerPools map[string]*run.WorkerPoolsClient
+	jobs        map[string]*run.JobsClient
+	executions  map[string]*run.ExecutionsClient
+
+	servicesGroup    singleflight.Group
+	workerPoolsGroup singleflight.Group
+	jobsGroup        singleflight.Group
+	executionsGroup  singleflight.Group
+}
+
+func NewGCPAdminClient() *GCPAdminClient {
+	return &GCPAdminClient{
+		services:    make(map[string]*run.ServicesClient),
+		workerPools: make(map[string]*run.WorkerPoolsClient),
+		jobs:        make(map[string]*run.JobsClient),
+		executions:  make(map[string]*run.ExecutionsClient),
+	}
+}
+
+// Close releases every regional client created so far.
+func (c *GCPAdminClient) Close() error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	for _, sc := range c.services {
+		_ = sc.Close()
+	}
+	for _, wc := range c.workerPools {
+		_ = wc.Close()
+	}
+	for _, jc := range c.jobs {
+		_ = jc.Close()
+	}
+	for _, ec := range c.executions {
+		_ = ec.Close()
+	}
+	return nil
+}
+
+func regionalEndpoint(region string) option.ClientOption {
+	return option.WithEndpoint(fmt.Sprintf("%s-run.googleapis.com:443", region))
+}
+
+func (c *GCPAdminClient) servicesClient(ctx context.Context, region string) (*run.ServicesClient, error) {
+	c.mu.Lock()
+	if sc, ok := c.services[region]; ok {
+		c.mu.Unlock()
+		return sc, nil
+	}
+	c.mu.Unlock()
+
+	v, err, _ := c.servicesGroup.Do(region, func() (any, error) {
+		c.mu.Lock()
+		if sc, ok := c.services[region]; ok {
+			c.mu.Unlock()
+			return sc, nil
+		}
+		c.mu.Unlock()
+
+		sc, err := run.NewServicesClient(ctx, regionalEndpoint(region))
+		if err != nil {
+			return nil, fmt.Errorf("create Cloud Run services client for %s: %w", region, err)
+		}
+		c.mu.Lock()
+		c.services[region] = sc
+		c.mu.Unlock()
+		return sc, nil
+	})
+	if err != nil {
+		return nil, err
+	}
+	return v.(*run.ServicesClient), nil
+}
+
+func (c *GCPAdminClient) workerPoolsClient(ctx context.Context, region string) (*run.WorkerPoolsClient, error) {
+	c.mu.Lock()
+	if wc, ok := c.workerPools[region]; ok {
+		c.mu.Unlock()
+		return wc, nil
+	}
+	c.mu.Unlock()
+
+	v, err, _ := c.workerPoolsGroup.Do(region, func() (any, error) {
+		c.mu.Lock()
+		if wc, ok := c.workerPools[region]; ok {
+			c.mu.Unlock()
+			return wc, nil
+		}
+		c.mu.Unlock()
+
+		wc, err := run.NewWorkerPoolsClient(ctx, regionalEndpoint(region))
+		if err != nil {
+			return nil, fmt.Errorf("create Cloud Run workerPools client for %s: %w", region, err)
+		}
+		c.mu.Lock()
+		c.workerPools[region] = wc
+		c.mu.Unlock()
+		return wc, nil
+	})
+	if err != nil {
+		return nil, err
+	}
+	return v.(*run.WorkerPoolsClient), nil
+}
+
+func (c *GCPAdminClient) jobsClient(ctx context.Context, region string) (*run.JobsClient, error) {
+	c.mu.Lock()
+	if jc, ok := c.jobs[region]; ok {
+		c.mu.Unlock()
+		return jc, nil
+	}
+	c.mu.Unlock()
+
+	v, err, _ := c.jobsGroup.Do(region, func() (any, error) {
+		c.mu.Lock()
+		if jc, ok := c.jobs[region]; ok {
+			c.mu.Unlock()
+			return jc, nil
+		}
+		c.mu.Unlock()
+
+		jc, err := run.NewJobsClient(ctx, regionalEndpoint(region))
+		if err != nil {
+			return nil, fmt.Errorf("create Cloud Run jobs client for %s: %w", region, err)
+		}
+		c.mu.Lock()
+		c.jobs[region] = jc
+		c.mu.Unlock()
+		return jc, nil
+	})
+	if err != nil {
+		return nil, err
+	}
+	return v.(*run.JobsClient), nil
+}
+
+func (c *GCPAdminClient) executionsClient(ctx context.Context, region string) (*run.ExecutionsClient, error) {
+	c.mu.Lock()
+	if ec, ok := c.executions[region]; ok {
+		c.mu.Unlock()
+		return ec, nil
+	}
+	c.mu.Unlock()
+
+	v, err, _ := c.executionsGroup.Do(region, func() (any, error) {
+		c.mu.Lock()
+		if ec, ok := c.executions[region]; ok {
+			c.mu.Unlock()
+			return ec, nil
+		}
+		c.mu.Unlock()
+
+		ec, err := run.NewExecutionsClient(ctx, regionalEndpoint(region))
+		if err != nil {
+			return nil, fmt.Errorf("create Cloud Run executions client for %s: %w", region, err)
+		}
+		c.mu.Lock()
+		c.executions[region] = ec
+		c.mu.Unlock()
+		return ec, nil
+	})
+	if err != nil {
+		return nil, err
+	}
+	return v.(*run.ExecutionsClient), nil
+}
+
+func serviceName(project, region, name string) string {
+	return fmt.Sprintf("projects/%s/locations/%s/services/%s", project, region, name)
+}
+
+func workerPoolName(project, region, name string) string {
+	return fmt.Sprintf("projects/%s/locations/%s/workerPools/%s", project, region, name)
+}
+
+func jobName(project, region, name string) string {
+	return fmt.Sprintf("projects/%s/locations/%s/jobs/%s", project, region, name)
+}
+
+// GetService implements AdminClient.GetService. The interface doesn't carry
+// resourceType (it covers both service and workerPool, §5.7), so this tries
+// the Services API first and falls back to WorkerPools on NotFound —
+// ponytail: one extra round-trip for workerPool units, add resourceType to
+// the interface if that cost ever matters.
+func (c *GCPAdminClient) GetService(ctx context.Context, project, region, name, desiredDigest string) (*LiveService, error) {
+	sc, err := c.servicesClient(ctx, region)
+	if err != nil {
+		return nil, err
+	}
+	svc, err := sc.GetService(ctx, &runpb.GetServiceRequest{Name: serviceName(project, region, name)})
+	if err == nil {
+		return liveServiceFromService(svc, desiredDigest), nil
+	}
+	if status.Code(err) != codes.NotFound {
+		return nil, fmt.Errorf("get service %s: %w", name, err)
+	}
+
+	wc, err := c.workerPoolsClient(ctx, region)
+	if err != nil {
+		return nil, err
+	}
+	wp, err := wc.GetWorkerPool(ctx, &runpb.GetWorkerPoolRequest{Name: workerPoolName(project, region, name)})
+	if err != nil {
+		if status.Code(err) == codes.NotFound {
+			return nil, ErrNotProvisioned
+		}
+		return nil, fmt.Errorf("get workerPool %s: %w", name, err)
+	}
+	return liveServiceFromWorkerPool(wp, desiredDigest), nil
+}
+
+// DeployService implements AdminClient.DeployService, with the same
+// service-then-workerPool fallback as GetService.
+func (c *GCPAdminClient) DeployService(ctx context.Context, project, region, name string, desired ServiceState) error {
+	sc, err := c.servicesClient(ctx, region)
+	if err != nil {
+		return err
+	}
+	svc, err := sc.GetService(ctx, &runpb.GetServiceRequest{Name: serviceName(project, region, name)})
+	if err != nil {
+		if status.Code(err) != codes.NotFound {
+			return fmt.Errorf("get service %s: %w", name, err)
+		}
+		return c.deployWorkerPool(ctx, project, region, name, desired)
+	}
+
+	if len(svc.GetTemplate().GetContainers()) == 0 {
+		return fmt.Errorf("service %s has no containers in its revision template", name)
+	}
+	svc.Template.Containers[0].Image = desired.ImageDigest
+	if desired.TrafficLatestRevisionPercent != nil {
+		percent, err := validatedPercent(*desired.TrafficLatestRevisionPercent)
+		if err != nil {
+			return fmt.Errorf("service %s: %w", name, err)
+		}
+		svc.Traffic = []*runpb.TrafficTarget{{
+			Type:    runpb.TrafficTargetAllocationType_TRAFFIC_TARGET_ALLOCATION_TYPE_LATEST,
+			Percent: percent,
+		}}
+	}
+	if _, err := sc.UpdateService(ctx, &runpb.UpdateServiceRequest{Service: svc}); err != nil {
+		return fmt.Errorf("update service %s: %w", name, err)
+	}
+	return nil
+}
+
+func (c *GCPAdminClient) deployWorkerPool(ctx context.Context, project, region, name string, desired ServiceState) error {
+	wc, err := c.workerPoolsClient(ctx, region)
+	if err != nil {
+		return err
+	}
+	wp, err := wc.GetWorkerPool(ctx, &runpb.GetWorkerPoolRequest{Name: workerPoolName(project, region, name)})
+	if err != nil {
+		if status.Code(err) == codes.NotFound {
+			return ErrNotProvisioned
+		}
+		return fmt.Errorf("get workerPool %s: %w", name, err)
+	}
+	if len(wp.GetTemplate().GetContainers()) == 0 {
+		return fmt.Errorf("workerPool %s has no containers in its revision template", name)
+	}
+	wp.Template.Containers[0].Image = desired.ImageDigest
+	if _, err := wc.UpdateWorkerPool(ctx, &runpb.UpdateWorkerPoolRequest{WorkerPool: wp}); err != nil {
+		return fmt.Errorf("update workerPool %s: %w", name, err)
+	}
+	return nil
+}
+
+// GetJob implements AdminClient.GetJob. Right after a deploy, the job's
+// spec template already reflects the new desired image but
+// LatestCreatedExecution can still be the *previous* execution — comparing
+// against the spec template (or trusting ExecutionReference's own
+// completion status) would report an unrelated execution's outcome for the
+// digest that hasn't actually run yet. Fetching the real Execution and
+// reading its own container image avoids that conflation.
+func (c *GCPAdminClient) GetJob(ctx context.Context, project, region, name, desiredDigest string) (*LiveJob, error) {
+	jc, err := c.jobsClient(ctx, region)
+	if err != nil {
+		return nil, err
+	}
+	job, err := jc.GetJob(ctx, &runpb.GetJobRequest{Name: jobName(project, region, name)})
+	if err != nil {
+		if status.Code(err) == codes.NotFound {
+			return nil, ErrNotProvisioned
+		}
+		return nil, fmt.Errorf("get job %s: %w", name, err)
+	}
+
+	ref := job.GetLatestCreatedExecution()
+	if ref == nil {
+		return &LiveJob{}, nil
+	}
+
+	ec, err := c.executionsClient(ctx, region)
+	if err != nil {
+		return nil, err
+	}
+	exec, err := ec.GetExecution(ctx, &runpb.GetExecutionRequest{Name: ref.GetName()})
+	if err != nil {
+		return nil, fmt.Errorf("get execution %s: %w", ref.GetName(), err)
+	}
+
+	image := containerImage(exec.GetTemplate().GetContainers())
+	return &LiveJob{
+		ServiceState:                 ServiceState{ImageDigest: image},
+		HasExecutionForDesiredDigest: image == desiredDigest,
+		LatestExecutionStatus:        executionStatus(exec),
+	}, nil
+}
+
+// DeployJob implements AdminClient.DeployJob: point the job spec at the
+// desired image, then trigger a new execution.
+func (c *GCPAdminClient) DeployJob(ctx context.Context, project, region, name string, desired ServiceState) error {
+	jc, err := c.jobsClient(ctx, region)
+	if err != nil {
+		return err
+	}
+	job, err := jc.GetJob(ctx, &runpb.GetJobRequest{Name: jobName(project, region, name)})
+	if err != nil {
+		if status.Code(err) == codes.NotFound {
+			return ErrNotProvisioned
+		}
+		return fmt.Errorf("get job %s: %w", name, err)
+	}
+	containers := job.GetTemplate().GetTemplate().GetContainers()
+	if len(containers) == 0 {
+		return fmt.Errorf("job %s has no containers in its task template", name)
+	}
+	containers[0].Image = desired.ImageDigest
+	if _, err := jc.UpdateJob(ctx, &runpb.UpdateJobRequest{Job: job}); err != nil {
+		return fmt.Errorf("update job %s: %w", name, err)
+	}
+	if _, err := jc.RunJob(ctx, &runpb.RunJobRequest{Name: job.GetName()}); err != nil {
+		return fmt.Errorf("run job %s: %w", name, err)
+	}
+	return nil
+}
+
+// validatedPercent rejects anything other than a full cutover (0 or 100).
+// argorun's traffic model (manifest.Traffic.LatestRevisionPercent) has no
+// way to say where the remaining traffic should go, so a partial percent
+// (e.g. 50) would produce a Cloud Run TrafficTarget list that doesn't sum
+// to 100 — an invalid spec that would otherwise fail deep inside the API
+// call instead of here, with a clear reason.
+func validatedPercent(p int) (int32, error) {
+	if p != 0 && p != 100 {
+		return 0, fmt.Errorf("traffic.latestRevisionPercent %d is not supported — v1 only manages a full cutover (0 or 100), since it has no way to express where the remaining traffic should go", p)
+	}
+	return int32(p), nil
+}
+
+func containerImage(containers []*runpb.Container) string {
+	if len(containers) == 0 {
+		return ""
+	}
+	return containers[0].GetImage()
+}
+
+func latestRevisionPercent(targets []*runpb.TrafficTarget) int {
+	total := 0
+	for _, t := range targets {
+		if t.GetType() == runpb.TrafficTargetAllocationType_TRAFFIC_TARGET_ALLOCATION_TYPE_LATEST {
+			total += int(t.GetPercent())
+		}
+	}
+	return total
+}
+
+// conditionState maps a resource's terminal condition (plus its top-level
+// reconciling flag, which flips true before a terminal condition even
+// exists) to service/workerPool health per §5.7: ready, or still creating.
+// Anything else (FAILED, unspecified) is neither — health.AssessService
+// reports that as Degraded.
+func conditionState(cond *runpb.Condition, reconciling bool) (ready, creating bool) {
+	if reconciling {
+		return false, true
+	}
+	switch cond.GetState() {
+	case runpb.Condition_CONDITION_SUCCEEDED:
+		return true, false
+	case runpb.Condition_CONDITION_RECONCILING, runpb.Condition_CONDITION_PENDING:
+		return false, true
+	default:
+		return false, false
+	}
+}
+
+// executionStatus classifies a fetched Execution by its own completion
+// state — not by trusting the parent Job's ExecutionReference, which only
+// carries a completion status snapshot that can lag the actual Execution.
+func executionStatus(exec *runpb.Execution) ExecutionStatus {
+	if exec.GetCompletionTime() == nil {
+		return ExecutionRunning
+	}
+	if exec.GetFailedCount() > 0 {
+		return ExecutionFailed
+	}
+	return ExecutionSucceeded
+}
+
+func liveServiceFromService(svc *runpb.Service, desiredDigest string) *LiveService {
+	image := containerImage(svc.GetTemplate().GetContainers())
+	percent := latestRevisionPercent(svc.GetTraffic())
+	ready, creating := conditionState(svc.GetTerminalCondition(), svc.GetReconciling())
+	return &LiveService{
+		ServiceState: ServiceState{
+			ImageDigest:                  image,
+			TrafficLatestRevisionPercent: &percent,
+		},
+		HasRevisionForDesiredDigest: image == desiredDigest,
+		LatestRevisionReady:         ready,
+		LatestRevisionCreating:      creating,
+	}
+}
+
+func liveServiceFromWorkerPool(wp *runpb.WorkerPool, desiredDigest string) *LiveService {
+	image := containerImage(wp.GetTemplate().GetContainers())
+	ready, creating := conditionState(wp.GetTerminalCondition(), wp.GetReconciling())
+	return &LiveService{
+		ServiceState:                ServiceState{ImageDigest: image},
+		HasRevisionForDesiredDigest: image == desiredDigest,
+		LatestRevisionReady:         ready,
+		LatestRevisionCreating:      creating,
+	}
+}

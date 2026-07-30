@@ -65,6 +65,9 @@ func TestExpand_FanOutWithOverridesAndExclude(t *testing.T) {
 	if us.Region != "us-central1" {
 		t.Fatalf("expected widget-api@example-prod-us to inherit environment region, got %q", us.Region)
 	}
+	if us.Env != "prd" {
+		t.Fatalf("expected Env=prd, got %q", us.Env)
+	}
 	if us.Sync.Auto == nil || *us.Sync.Auto != false {
 		t.Fatalf("expected prd auto=false, got %+v", us.Sync)
 	}
@@ -140,5 +143,23 @@ environments:
 	}
 	if len(units) != 0 {
 		t.Fatalf("expected no sync units, got %+v", units)
+	}
+}
+
+func TestExpand_NoResolvedRegionIsRejected(t *testing.T) {
+	root, err := config.Parse([]byte(`
+environments:
+  dev:
+    projects: [example-dev-01]
+apps:
+  - name: widget-api
+    env: dev
+    source: { repo: git@github.com:org/deployment.git, path: services/widget-api/ }
+`))
+	if err != nil {
+		t.Fatalf("fixture parse: %v", err)
+	}
+	if _, err := Expand(root); err == nil {
+		t.Fatal("expected error when neither defaults.region, environment.region, nor an override sets a region")
 	}
 }

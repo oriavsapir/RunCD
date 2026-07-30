@@ -1,0 +1,264 @@
+package notify
+
+import (
+	"context"
+	"testing"
+	"time"
+
+	"github.com/argorun/argorun/internal/config"
+	"github.com/argorun/argorun/internal/expander"
+	"github.com/argorun/argorun/internal/reconcile"
+	"github.com/argorun/argorun/internal/testutil"
+)
+
+type fakeSink struct {
+	messages []string
+}
+
+func (f *fakeSink) Send(_ context.Context, message string) error {
+	f.messages = append(f.messages, message)
+	return nil
+}
+
+func intPtr(v int) *int { return &v }
+
+func TestEvaluate_SyncFailedFiresImmediately(t *testing.T) {
+	db := testutil.NewPostgres(t)
+	sink := &fakeSink{}
+	e := &Evaluator{DB: db, Sink: sink, Rules: []config.NotifyRule{{On: "syncFailed"}}}
+
+	res := reconcile.Result{
+		Unit:           expander.SyncUnit{App: "widget-api", Project: "example-prod-us"},
+		DeployFailed:   true,
+		FailureMessage: "quota exceeded",
+	}
+	if err := e.Evaluate(context.Background(), res); err != nil {
+		t.Fatalf("Evaluate: %v", err)
+	}
+	if len(sink.messages) != 1 {
+		t.Fatalf("expected 1 message, got %d: %v", len(sink.messages), sink.messages)
+	}
+}
+
+func TestEvaluate_SyncFailedDebouncedOnRepeat(t *testing.T) {
+	db := testutil.NewPostgres(t)
+	sink := &fakeSink{}
+	e := &Evaluator{DB: db, Sink: sink, Rules: []config.NotifyRule{{On: "syncFailed"}}, DebounceInterval: time.Hour}
+
+	res := reconcile.Result{
+		Unit:           expander.SyncUnit{App: "widget-api", Project: "example-prod-us"},
+		DeployFailed:   true,
+		FailureMessage: "quota exceeded",
+	}
+	for i := 0; i < 3; i++ {
+		if err := e.Evaluate(context.Background(), res); err != nil {
+			t.Fatalf("Evaluate #%d: %v", i, err)
+		}
+	}
+	if len(sink.messages) != 1 {
+		t.Fatalf("expected exactly 1 message despite 3 failures within the debounce window, got %d", len(sink.messages))
+	}
+}
+
+func TestEvaluate_SyncFailedFiresAgainAfterDebounceWindow(t *testing.T) {
+	db := testutil.NewPostgres(t)
+	sink := &fakeSink{}
+	e := &Evaluator{DB: db, Sink: sink, Rules: []config.NotifyRule{{On: "syncFailed"}}, DebounceInterval: 50 * time.Millisecond}
+
+	res := reconcile.Result{
+		Unit:           expander.SyncUnit{App: "widget-api", Project: "example-prod-us"},
+		DeployFailed:   true,
+		FailureMessage: "quota exceeded",
+	}
+	if err := e.Evaluate(context.Background(), res); err != nil {
+		t.Fatalf("first Evaluate: %v", err)
+	}
+	time.Sleep(100 * time.Millisecond)
+	if err := e.Evaluate(context.Background(), res); err != nil {
+		t.Fatalf("second Evaluate: %v", err)
+	}
+	if len(sink.messages) != 2 {
+		t.Fatalf("expected 2 messages once the debounce window passed, got %d", len(sink.messages))
+	}
+}
+
+func TestEvaluate_NoSyncFailedRuleMeansNoNotification(t *testing.T) {
+	db := testutil.NewPostgres(t)
+	sink := &fakeSink{}
+	e := &Evaluator{DB: db, Sink: sink, Rules: nil}
+
+	res := reconcile.Result{
+		Unit:           expander.SyncUnit{App: "widget-api", Project: "example-prod-us"},
+		DeployFailed:   true,
+		FailureMessage: "quota exceeded",
+	}
+	if err := e.Evaluate(context.Background(), res); err != nil {
+		t.Fatalf("Evaluate: %v", err)
+	}
+	if len(sink.messages) != 0 {
+		t.Fatalf("expected no messages with no configured rules, got %v", sink.messages)
+	}
+}
+
+func TestEvaluate_HealthDegradedFiresPastThreshold(t *testing.T) {
+	db := testutil.NewPostgres(t)
+	sink := &fakeSink{}
+	e := &Evaluator{DB: db, Sink: sink, Rules: []config.NotifyRule{{On: "healthDegraded", ForMinutes: intPtr(10)}}}
+
+	res := reconcile.Result{
+		Unit:        expander.SyncUnit{App: "widget-api", Project: "example-prod-us"},
+		Health:      "Degraded",
+		HealthSince: time.Now().Add(-15 * time.Minute),
+	}
+	if err := e.Evaluate(context.Background(), res); err != nil {
+		t.Fatalf("Evaluate: %v", err)
+	}
+	if len(sink.messages) != 1 {
+		t.Fatalf("expected 1 message, got %d", len(sink.messages))
+	}
+}
+
+func TestEvaluate_HealthDegradedNotYetPastThreshold(t *testing.T) {
+	db := testutil.NewPostgres(t)
+	sink := &fakeSink{}
+	e := &Evaluator{DB: db, Sink: sink, Rules: []config.NotifyRule{{On: "healthDegraded", ForMinutes: intPtr(10)}}}
+
+	res := reconcile.Result{
+		Unit:        expander.SyncUnit{App: "widget-api", Project: "example-prod-us"},
+		Health:      "Degraded",
+		HealthSince: time.Now().Add(-2 * time.Minute),
+	}
+	if err := e.Evaluate(context.Background(), res); err != nil {
+		t.Fatalf("Evaluate: %v", err)
+	}
+	if len(sink.messages) != 0 {
+		t.Fatalf("expected no message before the threshold, got %v", sink.messages)
+	}
+}
+
+func TestEvaluate_HealthyNeverFiresHealthDegraded(t *testing.T) {
+	db := testutil.NewPostgres(t)
+	sink := &fakeSink{}
+	e := &Evaluator{DB: db, Sink: sink, Rules: []config.NotifyRule{{On: "healthDegraded", ForMinutes: intPtr(10)}}}
+
+	res := reconcile.Result{
+		Unit:        expander.SyncUnit{App: "widget-api", Project: "example-prod-us"},
+		Health:      "Healthy",
+		HealthSince: time.Now().Add(-time.Hour),
+	}
+	if err := e.Evaluate(context.Background(), res); err != nil {
+		t.Fatalf("Evaluate: %v", err)
+	}
+	if len(sink.messages) != 0 {
+		t.Fatalf("expected no message for Healthy, got %v", sink.messages)
+	}
+}
+
+func TestEvaluate_OutOfSyncGatedFiresForGatedUnitPastThreshold(t *testing.T) {
+	db := testutil.NewPostgres(t)
+	sink := &fakeSink{}
+	e := &Evaluator{DB: db, Sink: sink, Rules: []config.NotifyRule{{On: "outOfSyncGated", ForHours: intPtr(4)}}}
+
+	falseVal := false
+	res := reconcile.Result{
+		Unit:        expander.SyncUnit{App: "widget-api", Project: "example-prod-eu", Sync: config.SyncPolicy{Auto: &falseVal}},
+		Status:      "OutOfSync",
+		StatusSince: time.Now().Add(-5 * time.Hour),
+	}
+	if err := e.Evaluate(context.Background(), res); err != nil {
+		t.Fatalf("Evaluate: %v", err)
+	}
+	if len(sink.messages) != 1 {
+		t.Fatalf("expected 1 message, got %d", len(sink.messages))
+	}
+}
+
+func TestEvaluate_OutOfSyncGatedNeverFiresForAutoSyncUnit(t *testing.T) {
+	db := testutil.NewPostgres(t)
+	sink := &fakeSink{}
+	e := &Evaluator{DB: db, Sink: sink, Rules: []config.NotifyRule{{On: "outOfSyncGated", ForHours: intPtr(4)}}}
+
+	trueVal := true
+	res := reconcile.Result{
+		// auto=true means this unit isn't "gated" — this rule is
+		// specifically about targets waiting on a human (§5.8).
+		Unit:        expander.SyncUnit{App: "widget-api", Project: "example-dev-01", Sync: config.SyncPolicy{Auto: &trueVal}},
+		Status:      "OutOfSync",
+		StatusSince: time.Now().Add(-24 * time.Hour),
+	}
+	if err := e.Evaluate(context.Background(), res); err != nil {
+		t.Fatalf("Evaluate: %v", err)
+	}
+	if len(sink.messages) != 0 {
+		t.Fatalf("expected no message for an auto-sync unit, got %v", sink.messages)
+	}
+}
+
+func TestEvaluate_OutOfSyncGatedNotYetPastThreshold(t *testing.T) {
+	db := testutil.NewPostgres(t)
+	sink := &fakeSink{}
+	e := &Evaluator{DB: db, Sink: sink, Rules: []config.NotifyRule{{On: "outOfSyncGated", ForHours: intPtr(4)}}}
+
+	falseVal := false
+	res := reconcile.Result{
+		Unit:        expander.SyncUnit{App: "widget-api", Project: "example-prod-eu", Sync: config.SyncPolicy{Auto: &falseVal}},
+		Status:      "OutOfSync",
+		StatusSince: time.Now().Add(-1 * time.Hour),
+	}
+	if err := e.Evaluate(context.Background(), res); err != nil {
+		t.Fatalf("Evaluate: %v", err)
+	}
+	if len(sink.messages) != 0 {
+		t.Fatalf("expected no message before the threshold, got %v", sink.messages)
+	}
+}
+
+func TestEvaluate_DifferentRulesDebouncedIndependently(t *testing.T) {
+	db := testutil.NewPostgres(t)
+	sink := &fakeSink{}
+	e := &Evaluator{DB: db, Sink: sink, Rules: []config.NotifyRule{
+		{On: "syncFailed"},
+		{On: "healthDegraded", ForMinutes: intPtr(1)},
+	}}
+
+	res := reconcile.Result{
+		Unit:           expander.SyncUnit{App: "widget-api", Project: "example-prod-us"},
+		DeployFailed:   true,
+		FailureMessage: "boom",
+		Health:         "Degraded",
+		HealthSince:    time.Now().Add(-5 * time.Minute),
+	}
+	if err := e.Evaluate(context.Background(), res); err != nil {
+		t.Fatalf("Evaluate: %v", err)
+	}
+	if len(sink.messages) != 2 {
+		t.Fatalf("expected both rules to fire independently, got %d: %v", len(sink.messages), sink.messages)
+	}
+}
+
+// TestEvaluate_SameRuleTypeDifferentThresholdsDebounceIndependently
+// regression-tests a debounce-key collision: an early-warning rule and an
+// escalation rule of the same type (e.g. healthDegraded at 5 minutes and
+// again at 60 minutes) must not share one debounce row — otherwise
+// whichever fires first silently swallows the other until the full
+// debounce interval elapses.
+func TestEvaluate_SameRuleTypeDifferentThresholdsDebounceIndependently(t *testing.T) {
+	db := testutil.NewPostgres(t)
+	sink := &fakeSink{}
+	e := &Evaluator{DB: db, Sink: sink, Rules: []config.NotifyRule{
+		{On: "healthDegraded", ForMinutes: intPtr(5)},
+		{On: "healthDegraded", ForMinutes: intPtr(60)},
+	}}
+
+	res := reconcile.Result{
+		Unit:        expander.SyncUnit{App: "widget-api", Project: "example-prod-us"},
+		Health:      "Degraded",
+		HealthSince: time.Now().Add(-90 * time.Minute), // past both thresholds
+	}
+	if err := e.Evaluate(context.Background(), res); err != nil {
+		t.Fatalf("Evaluate: %v", err)
+	}
+	if len(sink.messages) != 2 {
+		t.Fatalf("expected both the 5m and 60m healthDegraded rules to fire independently, got %d: %v", len(sink.messages), sink.messages)
+	}
+}

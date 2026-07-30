@@ -69,8 +69,21 @@ func Parse(data []byte) (*ServiceDefinition, error) {
 	if err := validateImage(sd.Image); err != nil {
 		return nil, err
 	}
+	if err := validateTraffic(sd.Traffic); err != nil {
+		return nil, err
+	}
 
 	return &sd, nil
+}
+
+func validateTraffic(t *Traffic) error {
+	if t == nil || t.LatestRevisionPercent == nil {
+		return nil
+	}
+	if p := *t.LatestRevisionPercent; p < 0 || p > 100 {
+		return fmt.Errorf("traffic.latestRevisionPercent %d must be between 0 and 100", p)
+	}
+	return nil
 }
 
 func validateImage(img Image) error {

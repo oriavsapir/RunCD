@@ -6,8 +6,10 @@ CREATE TABLE applications (
   target_gcp_project text NOT NULL,
   desired_image    text NOT NULL,
   live_image       text,
-  status           text NOT NULL,   -- Synced | OutOfSync | Progressing | Degraded | Missing | Invalid
-  health           text NOT NULL,
+  status           text NOT NULL
+    CHECK (status IN ('Synced', 'OutOfSync', 'Progressing', 'Degraded', 'Missing', 'Invalid')),
+  health           text NOT NULL
+    CHECK (health IN ('Healthy', 'Progressing', 'Degraded', 'Missing', 'Invalid')),
   last_reconciled_at timestamptz NOT NULL,
   PRIMARY KEY (name, target_gcp_project)
 );
@@ -16,16 +18,21 @@ CREATE TABLE sync_events (
   id            bigserial PRIMARY KEY,
   application   text NOT NULL,
   target_gcp_project text NOT NULL,
-  trigger       text NOT NULL,      -- auto | manual
+  trigger       text NOT NULL CHECK (trigger IN ('auto', 'manual')),
   actor         text,               -- OAuth email for manual; 'argorun-controller' for auto
   from_image    text,
   to_image      text NOT NULL,
   started_at    timestamptz NOT NULL,
   finished_at   timestamptz,
-  result        text NOT NULL,      -- in_progress | succeeded | failed
+  result        text NOT NULL CHECK (result IN ('in_progress', 'succeeded', 'failed')),
   error         text,
   FOREIGN KEY (application, target_gcp_project) REFERENCES applications(name, target_gcp_project)
 );
+
+-- sync history is looked up per (application, target_gcp_project) — the
+-- FK columns aren't automatically indexed on the referencing side in
+-- Postgres, and this table is append-only/never deleted (§5.2).
+CREATE INDEX sync_events_application_project_idx ON sync_events (application, target_gcp_project, started_at DESC);
 
 -- single-row-per-lease leader election (NFR3) — no external coordination service required
 CREATE TABLE leader_lease (

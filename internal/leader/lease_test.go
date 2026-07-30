@@ -2,11 +2,30 @@ package leader
 
 import (
 	"context"
+	"database/sql"
+	"errors"
 	"testing"
 	"time"
 
 	"github.com/argorun/argorun/internal/testutil"
 )
+
+// failAfterN wraps a real *sql.DB and fails every ExecContext call once
+// calls exceeds n — used to simulate a transient DB error hitting the
+// renewal path specifically (as opposed to the initial claim).
+type failAfterN struct {
+	real  *sql.DB
+	n     int
+	calls int
+}
+
+func (f *failAfterN) ExecContext(ctx context.Context, query string, args ...any) (sql.Result, error) {
+	f.calls++
+	if f.calls > f.n {
+		return nil, errors.New("simulated transient db failure")
+	}
+	return f.real.ExecContext(ctx, query, args...)
+}
 
 func TestClaim_FirstReplicaWins(t *testing.T) {
 	db := testutil.NewPostgres(t)
@@ -130,6 +149,51 @@ func TestRun_ClaimsThenRenewsUntilCancelled(t *testing.T) {
 	cancel()
 	if err := <-done; err == nil {
 		t.Fatal("expected Run to return context.Canceled")
+	}
+}
+
+// TestRun_ErrorDuringRenewalSignalsLeadershipLoss regression-tests a
+// split-brain bug: a transient DB error mid-renewal used to kill the
+// goroutine without ever calling leading(false), so a caller tracking
+// leadership via that callback (e.g. an atomic.Bool gating a reconcile
+// loop) would keep believing it was leader forever — even as another
+// replica correctly claimed the now-unrenewed lease.
+func TestRun_ErrorDuringRenewalSignalsLeadershipLoss(t *testing.T) {
+	realDB := testutil.NewPostgres(t)
+	fdb := &failAfterN{real: realDB, n: 1} // first Claim (the initial one) succeeds, every one after fails
+	l := &Lease{db: fdb, holderID: "replica-a", ttl: TTL}
+
+	events := make(chan bool, 4)
+	done := make(chan error, 1)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	go func() {
+		done <- l.runWithInterval(ctx, 10*time.Millisecond, func(leading bool) {
+			events <- leading
+		})
+	}()
+
+	select {
+	case leading := <-events:
+		if !leading {
+			t.Fatal("expected first event to be becoming leader")
+		}
+	case <-time.After(time.Second):
+		t.Fatal("timed out waiting for initial leadership event")
+	}
+
+	select {
+	case leading := <-events:
+		if leading {
+			t.Fatal("expected a leadership-loss event once renewal starts failing")
+		}
+	case <-time.After(time.Second):
+		t.Fatal("timed out waiting for the leadership-loss event after a renewal error")
+	}
+
+	if err := <-done; err == nil {
+		t.Fatal("expected Run to return the simulated db error")
 	}
 }
 

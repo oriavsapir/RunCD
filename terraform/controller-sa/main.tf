@@ -2,16 +2,6 @@
 # directly in every target project — not a dedicated per-project runner SA.
 # Module shape only for Phase 0; not yet invoked against a real project.
 
-terraform {
-  required_version = ">= 1.10"
-  required_providers {
-    google = {
-      source  = "hashicorp/google"
-      version = "~> 7.40"
-    }
-  }
-}
-
 resource "google_service_account" "controller" {
   project      = var.management_project_id
   account_id   = var.service_account_id

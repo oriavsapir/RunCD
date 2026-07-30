@@ -11,8 +11,11 @@ import (
 
 // SyncUnit is one (app, project) pair ready to reconcile.
 type SyncUnit struct {
-	App        string
-	Project    string
+	App     string
+	Project string
+	// Env is the environments[] key this unit was expanded from — used by
+	// RBAC scope matching ("env:prd", §5.9), not by the reconcile/diff path.
+	Env        string
 	Region     string
 	Sync       config.SyncPolicy
 	SourceRepo string
@@ -27,7 +30,15 @@ func Expand(root *config.Root) ([]SyncUnit, error) {
 	var units []SyncUnit
 
 	for _, app := range root.Apps {
-		env := root.Environments[app.Env] // Parse() already guarantees this exists.
+		// Parse() already rejects an app referencing an unknown environment,
+		// but Expand can be called on a Root built some other way (a test
+		// fixture, a future hot-reload path) — don't silently produce zero
+		// sync units for a typo'd env, fail loudly like every other invalid
+		// reference in this package does.
+		env, ok := root.Environments[app.Env]
+		if !ok {
+			return nil, fmt.Errorf("app %q references unknown environment %q", app.Name, app.Env)
+		}
 
 		resolved := make(map[string]bool, len(env.Projects))
 		for _, p := range env.Projects {
@@ -61,10 +72,14 @@ func Expand(root *config.Root) ([]SyncUnit, error) {
 			if o, ok := app.Overrides[project]; ok && o.Region != "" {
 				region = o.Region
 			}
+			if region == "" {
+				return nil, fmt.Errorf("app %q project %q: no region resolved — set defaults.region, environments[%q].region, or overrides[%q].region", app.Name, project, app.Env, project)
+			}
 
 			units = append(units, SyncUnit{
 				App:        app.Name,
 				Project:    project,
+				Env:        app.Env,
 				Region:     region,
 				Sync:       sync,
 				SourceRepo: app.Source.Repo,

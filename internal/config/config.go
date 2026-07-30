@@ -70,14 +70,36 @@ type App struct {
 	Exclude   []string            `yaml:"exclude,omitempty"`
 }
 
+// NotifyRule is one entry in notify.rules (§5.8): a rule fires when its
+// condition (sync failed, health degraded, or a gated unit stuck
+// OutOfSync) holds, subject to the named duration threshold.
+type NotifyRule struct {
+	On         string `yaml:"on"` // syncFailed | healthDegraded | outOfSyncGated
+	ForMinutes *int   `yaml:"forMinutes,omitempty"`
+	ForHours   *int   `yaml:"forHours,omitempty"`
+}
+
+type Notify struct {
+	SlackWebhookURL string       `yaml:"slackWebhookUrl"`
+	Rules           []NotifyRule `yaml:"rules,omitempty"`
+}
+
 type Root struct {
 	Environments map[string]Environment `yaml:"environments"`
 	Defaults     Defaults               `yaml:"defaults"`
 	Apps         []App                  `yaml:"apps"`
+	Notify       Notify                 `yaml:"notify,omitempty"`
 }
 
-// Parse decodes argorun.yaml and rejects any app whose env doesn't exist —
-// a typo here must fail loudly at parse time (§5.1).
+// validManagedFields are the only fields the diff engine and deploy path
+// know how to compare/apply (§5.7, NFR8). An unrecognized entry here would
+// otherwise be silently ignored by the diff engine rather than rejected.
+var validManagedFields = map[string]bool{"image": true, "traffic": true}
+
+// Parse decodes argorun.yaml and rejects any app whose env doesn't exist, or
+// any defaults.managedFields entry the diff engine doesn't know how to
+// compare — both must fail loudly at parse time (§5.1), not be silently
+// ignored later.
 func Parse(data []byte) (*Root, error) {
 	var root Root
 	if err := yaml.Unmarshal(data, &root); err != nil {
@@ -86,6 +108,35 @@ func Parse(data []byte) (*Root, error) {
 	for _, app := range root.Apps {
 		if _, ok := root.Environments[app.Env]; !ok {
 			return nil, fmt.Errorf("app %q references unknown environment %q", app.Name, app.Env)
+		}
+	}
+	for envName, env := range root.Environments {
+		seen := make(map[string]bool, len(env.Projects))
+		for _, p := range env.Projects {
+			if seen[p] {
+				return nil, fmt.Errorf("environment %q: project %q is listed more than once", envName, p)
+			}
+			seen[p] = true
+		}
+	}
+	for _, f := range root.Defaults.ManagedFields {
+		if !validManagedFields[f] {
+			return nil, fmt.Errorf("defaults.managedFields: %q is not a field argorun knows how to manage (image, traffic)", f)
+		}
+	}
+	for _, rule := range root.Notify.Rules {
+		switch rule.On {
+		case "syncFailed":
+		case "healthDegraded":
+			if rule.ForMinutes == nil {
+				return nil, fmt.Errorf("notify.rules: %q requires forMinutes", rule.On)
+			}
+		case "outOfSyncGated":
+			if rule.ForHours == nil {
+				return nil, fmt.Errorf("notify.rules: %q requires forHours", rule.On)
+			}
+		default:
+			return nil, fmt.Errorf("notify.rules: %q is not a known rule (syncFailed, healthDegraded, outOfSyncGated)", rule.On)
 		}
 	}
 	return &root, nil

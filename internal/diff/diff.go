@@ -26,6 +26,13 @@ func Compute(desired, live cloudrun.ServiceState, managedFields []string, resour
 			if resourceType != "service" {
 				continue
 			}
+			// A manifest that manages traffic but omits the traffic block
+			// (desired == nil) hasn't told argorun what to enforce — treat
+			// that as nothing-to-diff rather than a permanent mismatch
+			// against whatever percent Cloud Run happens to report live.
+			if desired.TrafficLatestRevisionPercent == nil {
+				continue
+			}
 			if !trafficEqual(desired.TrafficLatestRevisionPercent, live.TrafficLatestRevisionPercent) {
 				return OutOfSync
 			}

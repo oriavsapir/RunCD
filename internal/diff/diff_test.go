@@ -57,6 +57,20 @@ func TestCompute_TrafficIgnoredForJobEvenIfManaged(t *testing.T) {
 	}
 }
 
+// TestCompute_TrafficManagedButManifestOmitsItIsSynced regression-tests a
+// permanent-redeploy bug: a real Cloud Run client always reports a non-nil
+// live traffic percent, but desired.TrafficLatestRevisionPercent is nil
+// whenever the manifest simply doesn't set a traffic block. nil-vs-non-nil
+// must not be treated as a mismatch, or the unit would be OutOfSync (and
+// redeployed) on every single poll forever.
+func TestCompute_TrafficManagedButManifestOmitsItIsSynced(t *testing.T) {
+	desired := cloudrun.ServiceState{ImageDigest: "sha256:abc"} // no TrafficLatestRevisionPercent
+	live := cloudrun.ServiceState{ImageDigest: "sha256:abc", TrafficLatestRevisionPercent: intPtr(100)}
+	if got := Compute(desired, live, []string{"image", "traffic"}, "service"); got != Synced {
+		t.Fatalf("expected Synced (nothing to enforce on traffic), got %s", got)
+	}
+}
+
 func TestCompute_JobImageMismatchIsOutOfSync(t *testing.T) {
 	desired := cloudrun.ServiceState{ImageDigest: "sha256:abc"}
 	live := cloudrun.ServiceState{ImageDigest: "sha256:def"}

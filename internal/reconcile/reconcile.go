@@ -1,7 +1,9 @@
-// Package reconcile runs one read-only reconcile pass over a set of sync
-// units (§5.4): fetch live state, check preconditions, diff against
-// managedFields, assess health, and persist the result to the applications
-// table. No deploy — that's a later phase.
+// Package reconcile runs a reconcile pass over sync units (§5.4): fetch
+// live state, check preconditions, diff against managedFields, assess
+// health, deploy when appropriate (§5.3, §6), and persist the result plus a
+// durable sync_events audit row (§5.2, §6) for every deploy attempt. Two
+// entry points share this machinery: RunOnce (the poll loop, auto-sync only)
+// and ManualSync (a single gated-sync request from a human, §5.9/FR4).
 package reconcile
 
 import (
@@ -9,10 +11,12 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"time"
 
 	"golang.org/x/sync/errgroup"
 
 	"github.com/argorun/argorun/internal/cloudrun"
+	"github.com/argorun/argorun/internal/config"
 	"github.com/argorun/argorun/internal/diff"
 	"github.com/argorun/argorun/internal/expander"
 	"github.com/argorun/argorun/internal/health"
@@ -45,20 +49,49 @@ type Result struct {
 	LiveImage    string // empty when live state couldn't be read
 	Status       string
 	Health       string
-	// Err is set for a unit that couldn't be assessed normally (manifest
-	// parse failure, unsupported resourceType, precondition failure, or an
-	// unprovisioned target resource). Not persisted anywhere in Phase 1 —
-	// sync_events (Phase 2) is where failures get a durable record.
+	// StatusSince/HealthSince are when Status/Health last *changed* (not
+	// merely last reconciled) — the Notifier's healthDegraded/
+	// outOfSyncGated rules (§5.8) key off these. Only populated after a
+	// successful upsert.
+	StatusSince time.Time
+	HealthSince time.Time
+	// DeployFailed/FailureMessage are set when a deploy attempt this pass
+	// resolved to sync_events.result=failed — the Notifier's syncFailed
+	// rule fires on this, immediately, no debounce-worthy duration check.
+	DeployFailed   bool
+	FailureMessage string
+	// Err is set for a unit that couldn't be assessed or synced normally
+	// (manifest parse failure, unsupported resourceType, precondition
+	// failure, unprovisioned target resource, or a failed deploy/audit
+	// write). Not persisted to `applications` — sync_events is the durable
+	// record for anything deploy-related; this is for the caller's own
+	// logging.
 	Err error
 }
 
+// db is the subset of *sql.DB the reconciler needs — kept as an interface
+// so tests can inject a wrapper that fails on demand for one specific call.
+type db interface {
+	ExecContext(ctx context.Context, query string, args ...any) (sql.Result, error)
+	QueryRowContext(ctx context.Context, query string, args ...any) *sql.Row
+}
+
+// Notifier is evaluated once per reconcile pass per sync unit (§5.8).
+// Evaluation failures are logged by the caller, not fatal to the pass —
+// a Slack outage shouldn't stop the controller from reconciling.
+type Notifier interface {
+	Evaluate(ctx context.Context, res Result) error
+}
+
 type Reconciler struct {
-	DB            *sql.DB
+	DB            db
 	CloudRun      cloudrun.AdminClient
 	Preconditions precondition.Checker
 	Manifests     ManifestSource
 	ManagedFields []string
 	Workers       int
+	// Notifier is optional; nil means no notifications are evaluated.
+	Notifier Notifier
 }
 
 // RunOnce reconciles every unit concurrently, bounded to r.Workers (default
@@ -70,14 +103,24 @@ func (r *Reconciler) RunOnce(ctx context.Context, units []expander.SyncUnit) ([]
 	}
 
 	results := make([]Result, len(units))
-	g, ctx := errgroup.WithContext(ctx)
+	var g errgroup.Group
 	g.SetLimit(workers)
 
+	// Deliberately not errgroup.WithContext: that cancels every other
+	// in-flight unit's context the instant any single unit's upsert fails,
+	// which would discard perfectly good results for the rest of the fleet
+	// over one transient write error — exactly what §7 says shouldn't
+	// happen ("one bad file can't take down the fleet").
 	for i, unit := range units {
 		g.Go(func() error {
 			res := r.reconcileOne(ctx, unit)
+			res, err := r.upsert(ctx, res)
 			results[i] = res
-			return r.upsert(ctx, res)
+			if err != nil {
+				return err
+			}
+			r.notify(ctx, res)
+			return nil
 		})
 	}
 
@@ -87,7 +130,45 @@ func (r *Reconciler) RunOnce(ctx context.Context, units []expander.SyncUnit) ([]
 	return results, nil
 }
 
+// ManualSync runs a single gated sync request from an authenticated human
+// (§5.9/FR4): the same precondition-check-then-deploy path as the auto
+// loop, but always attempts the deploy (unless the unit is Invalid/Missing)
+// regardless of the unit's auto flag, with trigger=manual and actor set to
+// the caller's verified email.
+func (r *Reconciler) ManualSync(ctx context.Context, unit expander.SyncUnit, actor string) (Result, error) {
+	res := r.reconcile(ctx, unit, syncOptions{trigger: "manual", actor: actor, force: true})
+	res, err := r.upsert(ctx, res)
+	if err == nil {
+		r.notify(ctx, res)
+	}
+	return res, err
+}
+
+func (r *Reconciler) notify(ctx context.Context, res Result) {
+	if r.Notifier == nil {
+		return
+	}
+	// Best-effort: a notification failure (e.g. Slack unreachable) must
+	// never fail the reconcile pass itself.
+	_ = r.Notifier.Evaluate(ctx, res)
+}
+
+type syncOptions struct {
+	trigger string // "auto" | "manual"
+	actor   string
+	// force means "deploy the current desired state regardless of the
+	// unit's auto flag or whether it's already Synced" — the manual Sync
+	// button's semantics. Never overrides an Invalid/Missing status: a
+	// failed precondition or unprovisioned resource blocks deploy
+	// regardless of trigger (§5.10).
+	force bool
+}
+
 func (r *Reconciler) reconcileOne(ctx context.Context, unit expander.SyncUnit) Result {
+	return r.reconcile(ctx, unit, syncOptions{trigger: "auto", actor: "argorun-controller"})
+}
+
+func (r *Reconciler) reconcile(ctx context.Context, unit expander.SyncUnit, opts syncOptions) Result {
 	res := Result{Unit: unit}
 
 	raw, err := r.Manifests.Get(ctx, unit)
@@ -118,24 +199,49 @@ func (r *Reconciler) reconcileOne(ctx context.Context, unit expander.SyncUnit) R
 	}
 
 	// Per §5.7: service and workerPool are both revision-based (workerPool
-	// just has no traffic concept); job is execution-based. Only this
-	// per-resourceType dispatch differs — the rest of the loop is shared.
+	// just has no traffic concept); job is execution-based. Only the
+	// per-resourceType fetch/assess/deploy calls differ — the rest of the
+	// loop (precondition check, diff, deploy-and-audit) is shared. fetch is
+	// a real GetService/GetJob call each time it's invoked — deploySyncUnit
+	// calls it again after a deploy to genuinely re-check Cloud Run, not to
+	// re-read a stale pre-deploy snapshot.
 	switch sd.ResourceType {
 	case manifest.ResourceService:
-		live, err := r.CloudRun.GetService(ctx, unit.Project, unit.Region, unit.App, sd.Image.Digest)
-		return r.applyLiveState(res, desired, err, func() (cloudrun.ServiceState, string) {
-			return live.ServiceState, string(health.AssessService(desired, *live, trafficManaged))
-		}, string(sd.ResourceType))
+		fetch := func(ctx context.Context) (cloudrun.ServiceState, string, error) {
+			live, err := r.CloudRun.GetService(ctx, unit.Project, unit.Region, unit.App, sd.Image.Digest)
+			if err != nil {
+				return cloudrun.ServiceState{}, "", err
+			}
+			return live.ServiceState, string(health.AssessService(desired, *live, trafficManaged)), nil
+		}
+		deploy := func(ctx context.Context, d cloudrun.ServiceState) error {
+			return r.CloudRun.DeployService(ctx, unit.Project, unit.Region, unit.App, d)
+		}
+		return r.applyLiveState(ctx, res, unit, desired, fetch, string(sd.ResourceType), deploy, opts)
 	case manifest.ResourceWorkerPool:
-		live, err := r.CloudRun.GetService(ctx, unit.Project, unit.Region, unit.App, sd.Image.Digest)
-		return r.applyLiveState(res, desired, err, func() (cloudrun.ServiceState, string) {
-			return live.ServiceState, string(health.AssessWorkerPool(*live))
-		}, string(sd.ResourceType))
+		fetch := func(ctx context.Context) (cloudrun.ServiceState, string, error) {
+			live, err := r.CloudRun.GetService(ctx, unit.Project, unit.Region, unit.App, sd.Image.Digest)
+			if err != nil {
+				return cloudrun.ServiceState{}, "", err
+			}
+			return live.ServiceState, string(health.AssessWorkerPool(*live)), nil
+		}
+		deploy := func(ctx context.Context, d cloudrun.ServiceState) error {
+			return r.CloudRun.DeployService(ctx, unit.Project, unit.Region, unit.App, d)
+		}
+		return r.applyLiveState(ctx, res, unit, desired, fetch, string(sd.ResourceType), deploy, opts)
 	case manifest.ResourceJob:
-		live, err := r.CloudRun.GetJob(ctx, unit.Project, unit.Region, unit.App, sd.Image.Digest)
-		return r.applyLiveState(res, desired, err, func() (cloudrun.ServiceState, string) {
-			return live.ServiceState, string(health.AssessJob(*live))
-		}, string(sd.ResourceType))
+		fetch := func(ctx context.Context) (cloudrun.ServiceState, string, error) {
+			live, err := r.CloudRun.GetJob(ctx, unit.Project, unit.Region, unit.App, sd.Image.Digest)
+			if err != nil {
+				return cloudrun.ServiceState{}, "", err
+			}
+			return live.ServiceState, string(health.AssessJob(*live)), nil
+		}
+		deploy := func(ctx context.Context, d cloudrun.ServiceState) error {
+			return r.CloudRun.DeployJob(ctx, unit.Project, unit.Region, unit.App, d)
+		}
+		return r.applyLiveState(ctx, res, unit, desired, fetch, string(sd.ResourceType), deploy, opts)
 	default:
 		res.Status, res.Health, res.Err = StatusInvalid, StatusInvalid, fmt.Errorf("unknown resourceType %q", sd.ResourceType)
 		return res
@@ -144,53 +250,163 @@ func (r *Reconciler) reconcileOne(ctx context.Context, unit expander.SyncUnit) R
 
 // applyLiveState folds a live-state fetch (success or failure) into res:
 // ErrNotProvisioned -> Missing, any other error -> Invalid (both without
-// overwriting a Status a precondition failure already set), otherwise runs
-// assess to get the live ServiceState (for diffing) and health.
-func (r *Reconciler) applyLiveState(res Result, desired cloudrun.ServiceState, liveErr error, assess func() (cloudrun.ServiceState, string), resourceType string) Result {
-	if errors.Is(liveErr, cloudrun.ErrNotProvisioned) {
+// overwriting a Status a precondition failure already set), otherwise diffs
+// the fetched state and — unless already Invalid/Missing, and the unit is
+// either forced (manual sync) or OutOfSync-and-auto-synced — deploys it
+// (§6 steps 5-6).
+func (r *Reconciler) applyLiveState(ctx context.Context, res Result, unit expander.SyncUnit, desired cloudrun.ServiceState, fetch func(context.Context) (cloudrun.ServiceState, string, error), resourceType string, deploy func(context.Context, cloudrun.ServiceState) error, opts syncOptions) Result {
+	live, healthStatus, err := fetch(ctx)
+	if errors.Is(err, cloudrun.ErrNotProvisioned) {
 		res.Health = StatusMissing
 		if res.Status == "" {
 			res.Status = StatusMissing
 		}
 		if res.Err == nil {
-			res.Err = liveErr
+			res.Err = err
 		}
 		return res
 	}
-	if liveErr != nil {
+	if err != nil {
 		res.Health = StatusInvalid
 		if res.Status == "" {
 			res.Status = StatusInvalid
 		}
 		if res.Err == nil {
-			res.Err = fmt.Errorf("get live state: %w", liveErr)
+			res.Err = fmt.Errorf("get live state: %w", err)
 		}
 		return res
 	}
 
-	live, healthStatus := assess()
 	res.LiveImage = live.ImageDigest
 	res.Health = healthStatus
 	if res.Status == "" {
 		res.Status = string(diff.Compute(desired, live, r.ManagedFields, resourceType))
 	}
+
+	blocked := res.Status == StatusInvalid || res.Status == StatusMissing
+	shouldDeploy := !blocked && (opts.force || (res.Status == string(diff.OutOfSync) && autoSyncEnabled(unit.Sync)))
+	if shouldDeploy {
+		res = r.deploySyncUnit(ctx, res, unit, desired, live, resourceType, deploy, fetch, opts)
+	}
 	return res
 }
 
-func (r *Reconciler) upsert(ctx context.Context, res Result) error {
-	var liveImage sql.NullString
-	if res.LiveImage != "" {
-		liveImage = sql.NullString{String: res.LiveImage, Valid: true}
+func autoSyncEnabled(sync config.SyncPolicy) bool {
+	return sync.Auto != nil && *sync.Auto
+}
+
+// deploySyncUnit implements §6 steps 5-6 / §5.3's crash-safety contract: a
+// sync_events row is written in_progress *before* the deploy call and
+// updated after, so a controller crash between those two writes leaves a
+// stale in_progress row that the next reconcile pass never trusts — it
+// re-derives desired/live state fresh (via fetch) instead of reading this
+// row at all.
+//
+// The post-deploy check calls fetch again — a real GetService/GetJob call,
+// not a cached pre-deploy value — because Cloud Run itself, not anything in
+// this process, is the only source of truth for whether the new revision
+// has converged. If it hasn't yet (still creating, or eventually-consistent
+// propagation lag), this pass still records the deploy call itself as
+// succeeded but leaves res.Status honestly reflecting what's actually live;
+// the next poll re-diffs from scratch. A poll that still sees OutOfSync
+// after a deploy it doesn't know is still converging may issue another
+// deploy call — accepted per NFR6/§5.3 ("deploying an already-deployed
+// digest is a no-op"), which is why any real DeployService/DeployJob must
+// itself be idempotent for an unchanged desired digest.
+func (r *Reconciler) deploySyncUnit(ctx context.Context, res Result, unit expander.SyncUnit, desired, live cloudrun.ServiceState, resourceType string, deploy func(context.Context, cloudrun.ServiceState) error, fetch func(context.Context) (cloudrun.ServiceState, string, error), opts syncOptions) Result {
+	// sync_events has an FK on (application, target_gcp_project) ->
+	// applications, so a brand-new sync unit's very first reconcile pass —
+	// already OutOfSync and auto-synced — needs that row to exist before a
+	// sync_events row can reference it. Idempotent (ON CONFLICT DO UPDATE)
+	// on every later pass, so this is a harmless extra write, not a
+	// duplicate-row risk.
+	if _, err := r.upsert(ctx, res); err != nil {
+		res.Err = fmt.Errorf("upsert applications row before deploy: %w", err)
+		return res
 	}
+
+	id, err := r.insertSyncEvent(ctx, unit, opts.trigger, opts.actor, live.ImageDigest, desired.ImageDigest)
+	if err != nil {
+		res.Err = fmt.Errorf("write sync_events(in_progress): %w", err)
+		return res
+	}
+
+	if err := deploy(ctx, desired); err != nil {
+		res.DeployFailed = true
+		res.FailureMessage = err.Error()
+		if updErr := r.updateSyncEvent(ctx, id, "failed", err.Error()); updErr != nil && res.Err == nil {
+			res.Err = fmt.Errorf("deploy failed (%w) and updating sync_events also failed: %w", err, updErr)
+		} else if res.Err == nil {
+			res.Err = fmt.Errorf("deploy: %w", err)
+		}
+		return res // res.Status stays OutOfSync — correctly reflects reality, retried next poll.
+	}
+
+	postLive, postHealth, err := fetch(ctx)
+	if err != nil {
+		// The deploy call itself succeeded; we just couldn't confirm the
+		// result. Leave res.Status/.Health as the pre-deploy values rather
+		// than guessing — the next poll will check again.
+		if updErr := r.updateSyncEvent(ctx, id, "succeeded", ""); updErr != nil && res.Err == nil {
+			res.Err = fmt.Errorf("deploy succeeded but post-deploy check failed (%w) and updating sync_events also failed: %w", err, updErr)
+		} else if res.Err == nil {
+			res.Err = fmt.Errorf("deploy succeeded but post-deploy check failed: %w", err)
+		}
+		return res
+	}
+
+	res.LiveImage = postLive.ImageDigest
+	res.Health = postHealth
+	res.Status = string(diff.Compute(desired, postLive, r.ManagedFields, resourceType))
+
+	if err := r.updateSyncEvent(ctx, id, "succeeded", ""); err != nil && res.Err == nil {
+		res.Err = fmt.Errorf("deploy succeeded but updating sync_events failed: %w", err)
+	}
+	return res
+}
+
+func (r *Reconciler) insertSyncEvent(ctx context.Context, unit expander.SyncUnit, trigger, actor, fromImage, toImage string) (int64, error) {
+	var id int64
+	err := r.DB.QueryRowContext(ctx, `
+		INSERT INTO sync_events (application, target_gcp_project, trigger, actor, from_image, to_image, started_at, result)
+		VALUES ($1, $2, $3, $4, $5, $6, now(), 'in_progress')
+		RETURNING id`,
+		unit.App, unit.Project, trigger, actor, nullIfEmpty(fromImage), toImage).Scan(&id)
+	return id, err
+}
+
+func (r *Reconciler) updateSyncEvent(ctx context.Context, id int64, result, errMsg string) error {
 	_, err := r.DB.ExecContext(ctx, `
-		INSERT INTO applications (name, target_gcp_project, desired_image, live_image, status, health, last_reconciled_at)
-		VALUES ($1, $2, $3, $4, $5, $6, now())
+		UPDATE sync_events SET finished_at = now(), result = $1, error = $2 WHERE id = $3`,
+		result, nullIfEmpty(errMsg), id)
+	return err
+}
+
+func nullIfEmpty(s string) sql.NullString {
+	if s == "" {
+		return sql.NullString{}
+	}
+	return sql.NullString{String: s, Valid: true}
+}
+
+// upsert writes res into the applications table and returns res with
+// StatusSince/HealthSince populated from the row (unchanged if this pass's
+// status/health matches what was already there, reset to now() if not) —
+// the Notifier's duration-based rules (§5.8) depend on these being accurate.
+func (r *Reconciler) upsert(ctx context.Context, res Result) (Result, error) {
+	err := r.DB.QueryRowContext(ctx, `
+		INSERT INTO applications (name, target_gcp_project, desired_image, live_image, status, health, status_since, health_since, last_reconciled_at)
+		VALUES ($1, $2, $3, $4, $5, $6, now(), now(), now())
 		ON CONFLICT (name, target_gcp_project) DO UPDATE SET
 			desired_image = EXCLUDED.desired_image,
 			live_image = EXCLUDED.live_image,
 			status = EXCLUDED.status,
 			health = EXCLUDED.health,
-			last_reconciled_at = now()`,
-		res.Unit.App, res.Unit.Project, res.DesiredImage, liveImage, res.Status, res.Health)
-	return err
+			status_since = CASE WHEN applications.status = EXCLUDED.status THEN applications.status_since ELSE now() END,
+			health_since = CASE WHEN applications.health = EXCLUDED.health THEN applications.health_since ELSE now() END,
+			last_reconciled_at = now()
+		RETURNING status_since, health_since`,
+		res.Unit.App, res.Unit.Project, res.DesiredImage, nullIfEmpty(res.LiveImage), res.Status, res.Health,
+	).Scan(&res.StatusSince, &res.HealthSince)
+	return res, err
 }

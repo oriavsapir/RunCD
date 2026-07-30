@@ -69,4 +69,15 @@ type AdminClient interface {
 	// desiredDigest to determine HasExecutionForDesiredDigest. Returns
 	// ErrNotProvisioned if the resource doesn't exist in the project at all.
 	GetJob(ctx context.Context, project, region, name, desiredDigest string) (*LiveJob, error)
+
+	// DeployService applies desired's managed fields (image digest, and
+	// traffic if managed) to the named service or workerPool as a new
+	// revision. Returns ErrNotProvisioned if the resource shell doesn't
+	// exist yet (§7 — Terraform hasn't provisioned it).
+	DeployService(ctx context.Context, project, region, name string, desired ServiceState) error
+
+	// DeployJob triggers an execution of the named job with desired's image
+	// digest. Returns ErrNotProvisioned if the resource shell doesn't exist
+	// yet.
+	DeployJob(ctx context.Context, project, region, name string, desired ServiceState) error
 }
