@@ -594,6 +594,55 @@ tradeoffs rather than guessed at.
   those normalized to real newlines before giving up.
   - Test: `TestNewClient_NormalizesLiteralNewlineEscapes`
 
+## Bugs found and fixed in a fourth review pass
+
+- [x] **`health.AssessService` missing the same nil-guard `diff.Compute`
+  already has** — same permanent-Progressing bug as the earlier
+  traffic-nil fix, just in the sibling function: when traffic is managed
+  but the manifest omits its `traffic:` block, `desired.TrafficLatestRevisionPercent`
+  is nil while a real Cloud Run client's live percent never is —
+  `trafficEqual(nil, non-nil)` reported Progressing forever for an
+  otherwise perfectly healthy service. Fixed: same nil-guard as `diff.go`.
+  - Test: `TestAssessService_HealthyWhenTrafficManagedButManifestOmitsIt`
+
+- [x] **`executionStatus` never checked `CancelledCount`** (`cloudrun/gcp.go`)
+  — a cancelled job execution (`CompletionTime` set, `FailedCount == 0`,
+  `CancelledCount > 0`) fell through to `ExecutionSucceeded`. Fixed: treated
+  as `ExecutionFailed`, same as any other non-success outcome.
+  - Test: `TestExecutionStatus_CancelledIsFailed`
+
+- [x] **`notify.maybeNotify` had the same fragile-interval bug as
+  `leader/lease.go`** — still cast `interval.String()` into `::interval`;
+  a sub-millisecond `DebounceInterval` would format with a unit Postgres's
+  parser rejects. Fixed identically: numeric seconds × `interval '1 second'`.
+
+- [x] **Singleflight-coalesced client construction used the wrong
+  context** (`cloudrun/gcp.go`, `precondition/gcp.go`) — construction is
+  shared across every concurrent caller for a region/project via
+  `singleflight.Group`, but used whichever caller's `ctx` happened to
+  trigger it; if that caller's context was cancelled/timed out mid-dial,
+  every other waiter — including ones with perfectly valid contexts — got
+  the same spurious cancellation error. Fixed: `context.WithoutCancel(ctx)`
+  for every `NewXxxClient` call inside a singleflight closure.
+
+- [x] **`GoogleAuthenticator.Verify` didn't fail closed on an empty
+  `Audience`** (`auth/auth.go`) — `idtoken.Validate` silently skips the
+  audience check entirely when given `""`, meaning any validly
+  Google-signed token for *any* OAuth client would be accepted. Previously
+  only prevented by `main.go`'s required-env check, not by the auth
+  package itself. Fixed: `Verify` now rejects an empty `Audience` up front.
+  - Test: `TestGoogleAuthenticator_EmptyAudienceFailsClosed`
+
+- [x] **`notify()` was skipped whenever the same-pass upsert failed** (both
+  `RunOnce` and `ManualSync`, `reconcile/reconcile.go`) — a genuine deploy
+  failure (already recorded to `sync_events`) could go completely
+  unalerted if the subsequent `applications`-table write also hit a
+  transient error, since `notify()` was gated on that write succeeding.
+  Fixed: `notify()` now always runs (it's already best-effort/
+  error-swallowing internally), regardless of the upsert outcome.
+  - Test: `TestRunOnce_NotifiesEvenWhenUpsertFails`,
+    `TestManualSync_NotifiesEvenWhenUpsertFails`
+
 - [ ] **Left as-is, deliberately:**
   - A precondition-failing unit still makes a live Cloud Run fetch every
     poll purely to keep `Health` visible for display — real API cost, but

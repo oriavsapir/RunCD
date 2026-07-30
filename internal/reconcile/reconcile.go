@@ -125,10 +125,16 @@ func (r *Reconciler) RunOnce(ctx context.Context, units []expander.SyncUnit) ([]
 				res.Err = fmt.Errorf("upsert: %w", err)
 			}
 			results[i] = res
+			// Notify regardless of the upsert outcome: a genuine deploy
+			// failure (res.DeployFailed) already happened and was recorded
+			// to sync_events before this write — an unrelated persistence
+			// hiccup here shouldn't also suppress the alert about it.
+			// notify() is already best-effort/error-swallowing, so this is
+			// safe even when err != nil.
+			r.notify(ctx, res)
 			if err != nil {
 				return err
 			}
-			r.notify(ctx, res)
 			return nil
 		})
 	}
@@ -147,9 +153,9 @@ func (r *Reconciler) RunOnce(ctx context.Context, units []expander.SyncUnit) ([]
 func (r *Reconciler) ManualSync(ctx context.Context, unit expander.SyncUnit, actor string) (Result, error) {
 	res := r.reconcile(ctx, unit, syncOptions{trigger: "manual", actor: actor, force: true})
 	res, err := r.upsert(ctx, res)
-	if err == nil {
-		r.notify(ctx, res)
-	}
+	// Notify regardless of the upsert outcome — see the identical note in
+	// RunOnce above.
+	r.notify(ctx, res)
 	return res, err
 }
 

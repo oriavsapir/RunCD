@@ -51,7 +51,13 @@ func (c *GCPChecker) client(ctx context.Context, project string) (*pubsub.Client
 		}
 		c.mu.Unlock()
 
-		cl, err := pubsub.NewClient(ctx, project)
+		// context.WithoutCancel: this construction is shared via
+		// singleflight across every concurrent caller for this project,
+		// not just the one whose ctx happened to trigger it — using that
+		// caller's ctx directly would fail every other waiter's client
+		// lookup too if that one caller's context is cancelled/times out
+		// mid-construction, even though their own contexts are still valid.
+		cl, err := pubsub.NewClient(context.WithoutCancel(ctx), project)
 		if err != nil {
 			return nil, fmt.Errorf("create pubsub client for %s: %w", project, err)
 		}

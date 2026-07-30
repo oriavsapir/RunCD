@@ -846,6 +846,38 @@ func TestManualSync_ForcesDeployRegardlessOfAutoFlag(t *testing.T) {
 	}
 }
 
+// TestManualSync_NotifiesEvenWhenUpsertFails is ManualSync's counterpart
+// to TestRunOnce_NotifiesEvenWhenUpsertFails — same bug, same fix, in the
+// human-triggered sync path.
+func TestManualSync_NotifiesEvenWhenUpsertFails(t *testing.T) {
+	realDB := testutil.NewPostgres(t)
+	db := &flakyDB{DB: realDB, failApp: "widget-api"}
+	notifier := &fakeNotifier{}
+	cr := &fakeCloudRun{services: map[string]*cloudrun.LiveService{
+		"example-prod-us/widget-api": {
+			ServiceState:                cloudrun.ServiceState{ImageDigest: validDigest},
+			HasRevisionForDesiredDigest: true,
+			LatestRevisionReady:         true,
+		},
+	}}
+	r := &Reconciler{
+		DB:            db,
+		ManagedFields: []string{"image"},
+		Manifests:     &fakeManifests{byApp: map[string][]byte{"widget-api": serviceYAML()}},
+		CloudRun:      cr,
+		Preconditions: &fakePreconditions{},
+		Notifier:      notifier,
+	}
+
+	unit := expander.SyncUnit{App: "widget-api", Project: "example-prod-us"}
+	if _, err := r.ManualSync(context.Background(), unit, "alice@company.com"); err == nil {
+		t.Fatal("expected ManualSync to report the simulated write failure")
+	}
+	if len(notifier.evaluated) != 1 {
+		t.Fatalf("expected the notifier to still be evaluated despite the upsert failure, got %d calls", len(notifier.evaluated))
+	}
+}
+
 func TestManualSync_AlreadySyncedStillDeploysIdempotently(t *testing.T) {
 	db := testutil.NewPostgres(t)
 	cr := &fakeCloudRun{services: map[string]*cloudrun.LiveService{
@@ -996,6 +1028,40 @@ type erroringNotifier struct{}
 
 func (erroringNotifier) Evaluate(_ context.Context, _ Result) error {
 	return fmt.Errorf("slack is down")
+}
+
+// TestRunOnce_NotifiesEvenWhenUpsertFails regression-tests a bug where
+// notify() was skipped entirely whenever the same-pass upsert errored —
+// meaning a genuine deploy failure (already recorded to sync_events) could
+// go completely unalerted if the final applications-table write also hit
+// a transient error.
+func TestRunOnce_NotifiesEvenWhenUpsertFails(t *testing.T) {
+	realDB := testutil.NewPostgres(t)
+	db := &flakyDB{DB: realDB, failApp: "bad-app"}
+	notifier := &fakeNotifier{}
+
+	r := &Reconciler{
+		DB:            db,
+		ManagedFields: []string{"image"},
+		Manifests:     &fakeManifests{byApp: map[string][]byte{"bad-app": serviceYAML()}},
+		CloudRun: &fakeCloudRun{services: map[string]*cloudrun.LiveService{
+			"example-prod-us/bad-app": {
+				ServiceState:                cloudrun.ServiceState{ImageDigest: validDigest},
+				HasRevisionForDesiredDigest: true,
+				LatestRevisionReady:         true,
+			},
+		}},
+		Preconditions: &fakePreconditions{},
+		Notifier:      notifier,
+	}
+
+	units := []expander.SyncUnit{{App: "bad-app", Project: "example-prod-us"}}
+	if _, err := r.RunOnce(context.Background(), units); err == nil {
+		t.Fatal("expected RunOnce to report the simulated write failure")
+	}
+	if len(notifier.evaluated) != 1 {
+		t.Fatalf("expected the notifier to still be evaluated despite the upsert failure, got %d calls", len(notifier.evaluated))
+	}
 }
 
 func TestRunOnce_NotifierFailureDoesNotFailThePass(t *testing.T) {

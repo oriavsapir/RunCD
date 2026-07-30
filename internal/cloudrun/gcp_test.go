@@ -85,6 +85,20 @@ func TestExecutionStatus_FailedWhenCompletedWithFailures(t *testing.T) {
 	}
 }
 
+// TestExecutionStatus_CancelledIsFailed regression-tests a bug where a
+// cancelled execution (CompletionTime set, FailedCount == 0,
+// CancelledCount > 0) fell through the FailedCount check straight to
+// ExecutionSucceeded, misreporting a cancelled job as healthy.
+func TestExecutionStatus_CancelledIsFailed(t *testing.T) {
+	exec := &runpb.Execution{
+		CompletionTime: timestamppb.New(time.Now()),
+		CancelledCount: 1,
+	}
+	if got := executionStatus(exec); got != ExecutionFailed {
+		t.Fatalf("expected ExecutionFailed for a cancelled execution, got %s", got)
+	}
+}
+
 func TestExecutionStatus_SucceededWhenCompletedWithNoFailures(t *testing.T) {
 	exec := &runpb.Execution{
 		CompletionTime: timestamppb.New(time.Now()),

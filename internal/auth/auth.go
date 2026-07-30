@@ -24,6 +24,14 @@ type GoogleAuthenticator struct {
 }
 
 func (g *GoogleAuthenticator) Verify(ctx context.Context, idToken string) (string, error) {
+	// idtoken.Validate treats an empty audience as "skip the audience
+	// check" — accepting any validly Google-signed token regardless of
+	// which OAuth client it was actually issued for. Fail closed here
+	// rather than relying entirely on main.go's env-var validation to
+	// ensure Audience is never empty.
+	if g.Audience == "" {
+		return "", errors.New("GoogleAuthenticator.Audience is empty — refusing to skip audience validation")
+	}
 	payload, err := idtoken.Validate(ctx, idToken, g.Audience)
 	if err != nil {
 		return "", fmt.Errorf("verify google id token: %w", err)

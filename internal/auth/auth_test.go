@@ -25,3 +25,16 @@ func TestGoogleAuthenticator_EmptyTokenRejected(t *testing.T) {
 		t.Fatal("expected an empty token to be rejected")
 	}
 }
+
+// TestGoogleAuthenticator_EmptyAudienceFailsClosed regression-tests an
+// audience-confusion risk: idtoken.Validate silently skips the audience
+// check entirely when given an empty string, so an empty Audience would
+// otherwise accept any validly Google-signed token for any OAuth client.
+// This must be rejected before Validate is ever called, regardless of what
+// idToken is.
+func TestGoogleAuthenticator_EmptyAudienceFailsClosed(t *testing.T) {
+	g := &GoogleAuthenticator{Audience: ""}
+	if _, err := g.Verify(context.Background(), "not-a-jwt"); err == nil {
+		t.Fatal("expected Verify to fail closed when Audience is empty")
+	}
+}

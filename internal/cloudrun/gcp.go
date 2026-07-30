@@ -83,7 +83,10 @@ func (c *GCPAdminClient) servicesClient(ctx context.Context, region string) (*ru
 		}
 		c.mu.Unlock()
 
-		sc, err := run.NewServicesClient(ctx, regionalEndpoint(region))
+		// context.WithoutCancel: shared via singleflight across every
+		// concurrent caller for this region, not just the one that
+		// triggered it — see the identical note in precondition/gcp.go.
+		sc, err := run.NewServicesClient(context.WithoutCancel(ctx), regionalEndpoint(region))
 		if err != nil {
 			return nil, fmt.Errorf("create Cloud Run services client for %s: %w", region, err)
 		}
@@ -114,7 +117,7 @@ func (c *GCPAdminClient) workerPoolsClient(ctx context.Context, region string) (
 		}
 		c.mu.Unlock()
 
-		wc, err := run.NewWorkerPoolsClient(ctx, regionalEndpoint(region))
+		wc, err := run.NewWorkerPoolsClient(context.WithoutCancel(ctx), regionalEndpoint(region))
 		if err != nil {
 			return nil, fmt.Errorf("create Cloud Run workerPools client for %s: %w", region, err)
 		}
@@ -145,7 +148,7 @@ func (c *GCPAdminClient) jobsClient(ctx context.Context, region string) (*run.Jo
 		}
 		c.mu.Unlock()
 
-		jc, err := run.NewJobsClient(ctx, regionalEndpoint(region))
+		jc, err := run.NewJobsClient(context.WithoutCancel(ctx), regionalEndpoint(region))
 		if err != nil {
 			return nil, fmt.Errorf("create Cloud Run jobs client for %s: %w", region, err)
 		}
@@ -176,7 +179,7 @@ func (c *GCPAdminClient) executionsClient(ctx context.Context, region string) (*
 		}
 		c.mu.Unlock()
 
-		ec, err := run.NewExecutionsClient(ctx, regionalEndpoint(region))
+		ec, err := run.NewExecutionsClient(context.WithoutCancel(ctx), regionalEndpoint(region))
 		if err != nil {
 			return nil, fmt.Errorf("create Cloud Run executions client for %s: %w", region, err)
 		}
@@ -442,11 +445,14 @@ func conditionState(cond *runpb.Condition, reconciling bool) (ready, creating bo
 // executionStatus classifies a fetched Execution by its own completion
 // state — not by trusting the parent Job's ExecutionReference, which only
 // carries a completion status snapshot that can lag the actual Execution.
+// A cancelled execution maps to ExecutionFailed: it didn't complete as
+// desired, same as health.AssessJob's Degraded treatment of any non-success
+// outcome.
 func executionStatus(exec *runpb.Execution) ExecutionStatus {
 	if exec.GetCompletionTime() == nil {
 		return ExecutionRunning
 	}
-	if exec.GetFailedCount() > 0 {
+	if exec.GetFailedCount() > 0 || exec.GetCancelledCount() > 0 {
 		return ExecutionFailed
 	}
 	return ExecutionSucceeded

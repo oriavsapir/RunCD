@@ -28,7 +28,12 @@ func AssessService(desired cloudrun.ServiceState, live cloudrun.LiveService, tra
 	if !live.LatestRevisionReady {
 		return Degraded
 	}
-	if trafficManaged && !trafficEqual(desired.TrafficLatestRevisionPercent, live.TrafficLatestRevisionPercent) {
+	// desired.TrafficLatestRevisionPercent is nil whenever the manifest
+	// manages traffic but doesn't set a traffic: block — nothing to
+	// enforce, so that's not a mismatch (same guard as diff.Compute; a
+	// real Cloud Run client's live percent is never nil, so without this
+	// a fully-healthy service would report Progressing forever).
+	if trafficManaged && desired.TrafficLatestRevisionPercent != nil && !trafficEqual(desired.TrafficLatestRevisionPercent, live.TrafficLatestRevisionPercent) {
 		return Progressing
 	}
 	return Healthy

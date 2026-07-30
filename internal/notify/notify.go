@@ -119,14 +119,20 @@ func (e *Evaluator) maybeNotify(ctx context.Context, res reconcile.Result, rule,
 	}
 	defer func() { _ = tx.Rollback() }() // no-op once committed
 
+	// $4 is a numeric second count multiplied by a literal 1-second
+	// interval, not interval.String() cast to ::interval — Go's
+	// time.Duration.String() only happens to produce Postgres-parseable
+	// text for whole-second/millisecond values; a sub-millisecond interval
+	// would format with a unit ("µs", "ns") Postgres's interval parser
+	// rejects (same bug class as internal/leader/lease.go).
 	var fired bool
 	err = tx.QueryRowContext(ctx, `
 		INSERT INTO notification_debounce (application, target_gcp_project, rule, last_notified_at)
 		VALUES ($1, $2, $3, now())
 		ON CONFLICT (application, target_gcp_project, rule) DO UPDATE SET last_notified_at = now()
-		WHERE notification_debounce.last_notified_at < now() - $4::interval
+		WHERE notification_debounce.last_notified_at < now() - ($4 * interval '1 second')
 		RETURNING true`,
-		res.Unit.App, res.Unit.Project, rule, interval.String(),
+		res.Unit.App, res.Unit.Project, rule, interval.Seconds(),
 	).Scan(&fired)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil // debounced — not an error, just not time yet
