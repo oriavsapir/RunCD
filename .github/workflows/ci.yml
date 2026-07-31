@@ -79,8 +79,10 @@ jobs:
       # <-ctx.Done() — flagged at lease.go's real (and correctly
       # err-guarded) res.RowsAffected() call, not at the test file.
       # web/node_modules is a stray vendored example .go file from an npm
-      # package, nothing to do with this repo.
-      - run: nilaway -exclude-errors-in-files internal/notify/slack.go,internal/api/api_test.go,internal/cloudrun/gcp.go,internal/githubapp/githubapp.go,internal/leader/lease.go,web/node_modules ./...
+      # package, nothing to do with this repo. cmd/runcd/client.go is the
+      # same http.Client.Do false positive as internal/cloudrun/gcp.go
+      # above — the CLI's do() checks err before touching resp.
+      - run: nilaway -exclude-errors-in-files internal/notify/slack.go,internal/api/api_test.go,internal/cloudrun/gcp.go,internal/githubapp/githubapp.go,internal/leader/lease.go,cmd/runcd/client.go,web/node_modules ./...
 
   test:
     runs-on: ubuntu-latest
