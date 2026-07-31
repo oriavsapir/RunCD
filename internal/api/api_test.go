@@ -356,6 +356,41 @@ func TestHandleListUnits_RequiresAuth(t *testing.T) {
 	}
 }
 
+func TestHandleListRBAC_RequiresAuth(t *testing.T) {
+	h, _ := newTestHandler(t)
+	srv := httptest.NewServer(NewMux(h))
+	defer srv.Close()
+
+	resp := getWithBearer(t, srv.URL+"/api/rbac", "")
+	defer func() { _ = resp.Body.Close() }()
+	if resp.StatusCode != http.StatusUnauthorized {
+		t.Fatalf("expected 401, got %d", resp.StatusCode)
+	}
+}
+
+// TestHandleListRBAC_ReturnsConfiguredRoles checks that any authenticated
+// caller — not just an admin — can read the role list, matching every
+// other read view's open-to-any-authenticated-caller posture (§5.9).
+func TestHandleListRBAC_ReturnsConfiguredRoles(t *testing.T) {
+	h, _ := newTestHandler(t)
+	srv := httptest.NewServer(NewMux(h))
+	defer srv.Close()
+
+	resp := getWithBearer(t, srv.URL+"/api/rbac", "dev-only-token")
+	defer func() { _ = resp.Body.Close() }()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("expected 200, got %d", resp.StatusCode)
+	}
+
+	var roles []rbacRoleView
+	if err := json.NewDecoder(resp.Body).Decode(&roles); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if len(roles) != 2 {
+		t.Fatalf("expected 2 roles, got %d: %+v", len(roles), roles)
+	}
+}
+
 // TestHandleListUnits_PendingBeforeAnySync checks that a unit present in
 // config but never reconciled shows up as Pending, not absent — the
 // applications table has no row for it yet.

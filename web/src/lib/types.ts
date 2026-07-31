@@ -52,3 +52,11 @@ export interface SyncResponse {
   status: UnitStatus;
   health: UnitHealth;
 }
+
+export type RbacRole = "admin" | "syncer";
+
+export interface RbacRule {
+  subject: string;
+  role: RbacRole;
+  scope: string[];
+}

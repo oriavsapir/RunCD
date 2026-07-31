@@ -1,4 +1,4 @@
-import type { SyncEvent, SyncResponse, Unit } from "./types";
+import type { RbacRule, SyncEvent, SyncResponse, Unit } from "./types";
 
 // Always same-origin: the browser calls this Next.js server's own
 // /api/proxy route, which forwards to the runcd API server-to-server
@@ -53,6 +53,10 @@ export function getUnitHistory(
   return request<SyncEvent[]>(
     `/api/units/${encodeURIComponent(project)}/${encodeURIComponent(app)}/history`,
   );
+}
+
+export function listRbac(): Promise<RbacRule[]> {
+  return request<RbacRule[]>("/api/rbac");
 }
 
 export function syncUnit(

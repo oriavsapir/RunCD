@@ -1,0 +1,27 @@
+# Example rbac.yaml (§5.9) — lives in the same GitHub repo/branch as
+# runcd.yaml (RUNCD_CONFIG_REPO), at RBAC_PATH (default "rbac.yaml").
+#
+# Everyone with a valid IAP identity already gets read-only access to every
+# dashboard view (unit list, diffs, sync history) — this file only controls
+# who may trigger a manual sync, and for which apps/environments/projects.
+#
+# role: "admin" or "syncer" — both grant the same sync permission today,
+# admin exists for a future finer-grained split (see internal/rbac/rbac.go).
+#
+# scope entries (first match wins):
+#   "*"                    - every app in every environment/project
+#   "env:<name>"           - every app in that environment (any project)
+#   "app:<app>@<project>"  - one specific app in one specific project
+
+roles:
+  - subject: platform-team@company.com
+    role: admin
+    scope: ["*"]
+
+  - subject: dev-team@company.com
+    role: syncer
+    scope: ["env:dev"]
+
+  - subject: oncall@company.com
+    role: syncer
+    scope: ["app:checkout-service@acme-prod"]
