@@ -80,4 +80,9 @@ type AdminClient interface {
 	// digest. Returns ErrNotProvisioned if the resource shell doesn't exist
 	// yet.
 	DeployJob(ctx context.Context, project, region, name string, desired ServiceState) error
+
+	// ListServiceNames returns the short name of every Cloud Run service
+	// that exists in project/region — the prune/orphan-detection read path
+	// (§ prune): services present in GCP but absent from runcd.yaml.
+	ListServiceNames(ctx context.Context, project, region string) ([]string, error)
 }

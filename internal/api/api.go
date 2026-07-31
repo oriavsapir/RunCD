@@ -72,6 +72,7 @@ func NewMux(h *Handler) *http.ServeMux {
 	mux.HandleFunc("GET /api/units/{project}/{app}/dry-run", h.handleDryRun)
 	mux.HandleFunc("GET /api/rbac", h.handleListRBAC)
 	mux.HandleFunc("GET /api/config", h.handleConfig)
+	mux.HandleFunc("GET /api/orphans", h.handleOrphans)
 	mux.HandleFunc("POST /api/sync/{project}/{app}", h.handleSync)
 	if h.Metrics != nil {
 		mux.Handle("GET /metrics", h.Metrics)

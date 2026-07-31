@@ -2,6 +2,7 @@ package cloudrun
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"strings"
 	"sync"
@@ -9,6 +10,7 @@ import (
 	run "cloud.google.com/go/run/apiv2"
 	"cloud.google.com/go/run/apiv2/runpb"
 	"golang.org/x/sync/singleflight"
+	"google.golang.org/api/iterator"
 	"google.golang.org/api/option"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
@@ -236,6 +238,41 @@ func (c *GCPAdminClient) GetService(ctx context.Context, project, region, name, 
 		return nil, fmt.Errorf("get workerPool %s: %w", name, err)
 	}
 	return liveServiceFromWorkerPool(wp, desiredDigest), nil
+}
+
+// ListServiceNames implements AdminClient.ListServiceNames — services only
+// (not workerPools/jobs): a first, deliberately narrower cut at prune's
+// "flag what's orphaned" gap, not full coverage of every resource type.
+func (c *GCPAdminClient) ListServiceNames(ctx context.Context, project, region string) ([]string, error) {
+	sc, err := c.servicesClient(ctx, region)
+	if err != nil {
+		return nil, err
+	}
+	it := sc.ListServices(ctx, &runpb.ListServicesRequest{
+		Parent: fmt.Sprintf("projects/%s/locations/%s", project, region),
+	})
+	var names []string
+	for {
+		svc, err := it.Next()
+		if errors.Is(err, iterator.Done) {
+			break
+		}
+		if err != nil {
+			return nil, fmt.Errorf("list services in projects/%s/locations/%s: %w", project, region, err)
+		}
+		names = append(names, lastPathSegment(svc.GetName()))
+	}
+	return names, nil
+}
+
+// lastPathSegment extracts a resource's short name from its full path, e.g.
+// "projects/p/locations/r/services/name" -> "name".
+func lastPathSegment(fullName string) string {
+	i := strings.LastIndex(fullName, "/")
+	if i < 0 {
+		return fullName
+	}
+	return fullName[i+1:]
 }
 
 // DeployService implements AdminClient.DeployService, with the same

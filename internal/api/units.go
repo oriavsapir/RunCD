@@ -188,6 +188,45 @@ func (h *Handler) handleDryRun(w http.ResponseWriter, r *http.Request) {
 	_ = json.NewEncoder(w).Encode(v)
 }
 
+// orphanView is one live Cloud Run service present in GCP but not declared
+// by any current sync unit for that project/region (§ prune).
+type orphanView struct {
+	Project string `json:"project"`
+	Region  string `json:"region"`
+	App     string `json:"app"`
+}
+
+// handleOrphans runs a live prune/orphan-detection scan (§ prune) over
+// every currently-configured unit's project/region and reports what's
+// found — open to any authenticated caller, like every other read view;
+// this only flags, it never deletes anything.
+func (h *Handler) handleOrphans(w http.ResponseWriter, r *http.Request) {
+	if _, ok := verify(w, r, h.Auth); !ok {
+		return
+	}
+
+	lister, ok := h.Units.(UnitLister)
+	if !ok {
+		http.Error(w, "unit listing not supported", http.StatusNotImplemented)
+		return
+	}
+
+	orphans, err := h.Reconciler.Load().DetectOrphans(r.Context(), lister.List())
+	if err != nil {
+		slog.Error("detect orphans", "error", err)
+		http.Error(w, "failed to detect orphans", http.StatusInternalServerError)
+		return
+	}
+
+	views := make([]orphanView, len(orphans))
+	for i, o := range orphans {
+		views[i] = orphanView{Project: o.Project, Region: o.Region, App: o.App}
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(views)
+}
+
 // syncEventView is the JSON shape for one sync_events row.
 type syncEventView struct {
 	ID         int64      `json:"id"`

@@ -96,6 +96,16 @@ func (f *fakeCloudRun) DeployService(_ context.Context, project, _, name string,
 func (f *fakeCloudRun) DeployJob(context.Context, string, string, string, cloudrun.ServiceState) error {
 	return cloudrun.ErrNotProvisioned
 }
+func (f *fakeCloudRun) ListServiceNames(_ context.Context, project, _ string) ([]string, error) {
+	var names []string
+	prefix := project + "/"
+	for key := range f.services {
+		if after, ok := strings.CutPrefix(key, prefix); ok {
+			names = append(names, after)
+		}
+	}
+	return names, nil
+}
 
 type fakeNotifier struct{}
 
@@ -602,6 +612,43 @@ func TestHandleUnitDetail_UnknownUnitRejected(t *testing.T) {
 	defer func() { _ = resp.Body.Close() }()
 	if resp.StatusCode != http.StatusNotFound {
 		t.Fatalf("expected 404, got %d", resp.StatusCode)
+	}
+}
+
+// TestHandleOrphans_FlagsLiveServiceAbsentFromConfig checks the endpoint
+// end-to-end: a live Cloud Run service the fixture's config never declared
+// shows up as an orphan, and the one it does declare doesn't.
+func TestHandleOrphans_FlagsLiveServiceAbsentFromConfig(t *testing.T) {
+	h, cr := newTestHandler(t)
+	cr.services["example-prod-eu/leftover-app"] = &cloudrun.LiveService{
+		ServiceState: cloudrun.ServiceState{ImageDigest: validDigest},
+	}
+	srv := httptest.NewServer(NewMux(h))
+	defer srv.Close()
+
+	resp := getWithBearer(t, srv.URL+"/api/orphans", "admin-token")
+	defer func() { _ = resp.Body.Close() }()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("expected 200, got %d", resp.StatusCode)
+	}
+	var orphans []orphanView
+	if err := json.NewDecoder(resp.Body).Decode(&orphans); err != nil {
+		t.Fatalf("decode orphans response: %v", err)
+	}
+	if len(orphans) != 1 || orphans[0].App != "leftover-app" || orphans[0].Project != "example-prod-eu" {
+		t.Fatalf("expected exactly one orphan (leftover-app), got %+v", orphans)
+	}
+}
+
+func TestHandleOrphans_RequiresAuth(t *testing.T) {
+	h, _ := newTestHandler(t)
+	srv := httptest.NewServer(NewMux(h))
+	defer srv.Close()
+
+	resp := getWithBearer(t, srv.URL+"/api/orphans", "")
+	defer func() { _ = resp.Body.Close() }()
+	if resp.StatusCode != http.StatusUnauthorized {
+		t.Fatalf("expected 401, got %d", resp.StatusCode)
 	}
 }
 

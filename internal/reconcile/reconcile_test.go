@@ -103,6 +103,20 @@ func (f *fakeCloudRun) DeployJob(_ context.Context, project, _, name string, des
 	return nil
 }
 
+// ListServiceNames derives its answer from the same services map every
+// other method here reads/writes, keyed "project/app" — no separate state
+// to keep in sync.
+func (f *fakeCloudRun) ListServiceNames(_ context.Context, project, _ string) ([]string, error) {
+	var names []string
+	prefix := project + "/"
+	for key := range f.services {
+		if after, ok := strings.CutPrefix(key, prefix); ok {
+			names = append(names, after)
+		}
+	}
+	return names, nil
+}
+
 type fakePreconditions struct{ topics map[string]bool }
 
 func (f *fakePreconditions) TopicExists(_ context.Context, project, name string) (bool, error) {
