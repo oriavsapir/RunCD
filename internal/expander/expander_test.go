@@ -128,6 +128,40 @@ apps:
 	}
 }
 
+func TestExpand_CopiesIgnoreFieldsAndIgnorePreconditions(t *testing.T) {
+	root, err := config.Parse([]byte(`
+environments:
+  prd:
+    projects: [example-prod-us]
+defaults:
+  region: us-central1
+  managedFields: [image, traffic]
+apps:
+  - name: widget-api
+    env: prd
+    source: { repo: git@github.com:org/deployment.git, path: services/widget-api/ }
+    ignoreFields: [traffic]
+    ignorePreconditions: ["pubsubTopic:orders-events"]
+`))
+	if err != nil {
+		t.Fatalf("fixture parse: %v", err)
+	}
+	units, err := Expand(root)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(units) != 1 {
+		t.Fatalf("expected 1 sync unit, got %d", len(units))
+	}
+	u := units[0]
+	if len(u.IgnoreFields) != 1 || u.IgnoreFields[0] != "traffic" {
+		t.Fatalf("expected ignoreFields copied onto the sync unit, got %+v", u.IgnoreFields)
+	}
+	if len(u.IgnorePreconditions) != 1 || u.IgnorePreconditions[0] != "pubsubTopic:orders-events" {
+		t.Fatalf("expected ignorePreconditions copied onto the sync unit, got %+v", u.IgnorePreconditions)
+	}
+}
+
 func TestExpand_NoAppsProducesNoUnits(t *testing.T) {
 	root, err := config.Parse([]byte(`
 environments:

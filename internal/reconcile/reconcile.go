@@ -272,13 +272,19 @@ func (r *Reconciler) reconcile(ctx context.Context, unit expander.SyncUnit, opts
 	}
 	res.DesiredImage = sd.Image.Digest
 
-	if err := precondition.Check(ctx, r.Preconditions, unit.Project, sd.Requires); err != nil {
+	if err := precondition.Check(ctx, r.Preconditions, unit.Project, filterPreconditions(sd.Requires, unit.IgnorePreconditions)); err != nil {
 		res.Status, res.Err = StatusInvalid, err
 	}
 
+	// Computed once here, not re-derived separately in applyLiveState and
+	// deploySyncUnit — both the pre-deploy diff and the post-deploy re-diff
+	// must agree on exactly the same effective field set, or a unit with
+	// ignoreFields set could land on a wrong final status after deploy.
+	managedFields := effectiveManagedFields(r.ManagedFields, unit.IgnoreFields)
+
 	desired := cloudrun.ServiceState{ImageDigest: sd.Image.Digest}
 	trafficManaged := false
-	for _, f := range r.ManagedFields {
+	for _, f := range managedFields {
 		if f == "traffic" {
 			trafficManaged = true
 		}
@@ -306,7 +312,7 @@ func (r *Reconciler) reconcile(ctx context.Context, unit expander.SyncUnit, opts
 		deploy := func(ctx context.Context, d cloudrun.ServiceState) error {
 			return r.CloudRun.DeployService(ctx, unit.Project, unit.Region, unit.App, d)
 		}
-		return r.applyLiveState(ctx, res, unit, desired, fetch, string(sd.ResourceType), deploy, opts)
+		return r.applyLiveState(ctx, res, unit, desired, fetch, string(sd.ResourceType), deploy, opts, managedFields)
 	case manifest.ResourceWorkerPool:
 		fetch := func(ctx context.Context) (cloudrun.ServiceState, string, error) {
 			live, err := r.CloudRun.GetService(ctx, unit.Project, unit.Region, unit.App, sd.Image.Digest)
@@ -318,7 +324,7 @@ func (r *Reconciler) reconcile(ctx context.Context, unit expander.SyncUnit, opts
 		deploy := func(ctx context.Context, d cloudrun.ServiceState) error {
 			return r.CloudRun.DeployService(ctx, unit.Project, unit.Region, unit.App, d)
 		}
-		return r.applyLiveState(ctx, res, unit, desired, fetch, string(sd.ResourceType), deploy, opts)
+		return r.applyLiveState(ctx, res, unit, desired, fetch, string(sd.ResourceType), deploy, opts, managedFields)
 	case manifest.ResourceJob:
 		fetch := func(ctx context.Context) (cloudrun.ServiceState, string, error) {
 			live, err := r.CloudRun.GetJob(ctx, unit.Project, unit.Region, unit.App, sd.Image.Digest)
@@ -330,7 +336,7 @@ func (r *Reconciler) reconcile(ctx context.Context, unit expander.SyncUnit, opts
 		deploy := func(ctx context.Context, d cloudrun.ServiceState) error {
 			return r.CloudRun.DeployJob(ctx, unit.Project, unit.Region, unit.App, d)
 		}
-		return r.applyLiveState(ctx, res, unit, desired, fetch, string(sd.ResourceType), deploy, opts)
+		return r.applyLiveState(ctx, res, unit, desired, fetch, string(sd.ResourceType), deploy, opts, managedFields)
 	default:
 		res.Status, res.Health, res.Err = StatusInvalid, StatusInvalid, fmt.Errorf("unknown resourceType %q", sd.ResourceType)
 		return res
@@ -343,7 +349,7 @@ func (r *Reconciler) reconcile(ctx context.Context, unit expander.SyncUnit, opts
 // the fetched state and — unless already Invalid/Missing, and the unit is
 // either forced (manual sync) or OutOfSync-and-auto-synced — deploys it
 // (§6 steps 5-6).
-func (r *Reconciler) applyLiveState(ctx context.Context, res Result, unit expander.SyncUnit, desired cloudrun.ServiceState, fetch func(context.Context) (cloudrun.ServiceState, string, error), resourceType string, deploy func(context.Context, cloudrun.ServiceState) error, opts syncOptions) Result {
+func (r *Reconciler) applyLiveState(ctx context.Context, res Result, unit expander.SyncUnit, desired cloudrun.ServiceState, fetch func(context.Context) (cloudrun.ServiceState, string, error), resourceType string, deploy func(context.Context, cloudrun.ServiceState) error, opts syncOptions, managedFields []string) Result {
 	live, healthStatus, err := fetch(ctx)
 	if errors.Is(err, cloudrun.ErrNotProvisioned) {
 		res.Health = StatusMissing
@@ -369,20 +375,60 @@ func (r *Reconciler) applyLiveState(ctx context.Context, res Result, unit expand
 	res.LiveImage = live.ImageDigest
 	res.Health = healthStatus
 	if res.Status == "" {
-		res.Status = string(diff.Compute(desired, live, r.ManagedFields, resourceType))
+		res.Status = string(diff.Compute(desired, live, managedFields, resourceType))
 	}
 
 	blocked := res.Status == StatusInvalid || res.Status == StatusMissing
 	autoAllowed := autoSyncEnabled(unit.Sync) && config.WindowsAllow(unit.Sync.SyncWindows, opts.now)
 	shouldDeploy := !opts.dryRun && !blocked && (opts.force || (res.Status == string(diff.OutOfSync) && autoAllowed))
 	if shouldDeploy {
-		res = r.deploySyncUnit(ctx, res, unit, desired, live, resourceType, deploy, fetch, opts)
+		res = r.deploySyncUnit(ctx, res, unit, desired, live, resourceType, deploy, fetch, opts, managedFields)
 	}
 	return res
 }
 
 func autoSyncEnabled(sync config.SyncPolicy) bool {
 	return sync.Auto != nil && *sync.Auto
+}
+
+// effectiveManagedFields subtracts ignore from base, preserving base's
+// order — the diff/traffic-managed logic downstream doesn't care about
+// order, but a stable result makes this deterministic to test.
+func effectiveManagedFields(base, ignore []string) []string {
+	if len(ignore) == 0 {
+		return base
+	}
+	skip := make(map[string]bool, len(ignore))
+	for _, f := range ignore {
+		skip[f] = true
+	}
+	out := make([]string, 0, len(base))
+	for _, f := range base {
+		if !skip[f] {
+			out = append(out, f)
+		}
+	}
+	return out
+}
+
+// filterPreconditions drops any requires entry named "type:name" in ignore
+// — an app-level override for a precondition that's legitimately not
+// applicable to one specific app (config.App.IgnorePreconditions).
+func filterPreconditions(requires []manifest.Precondition, ignore []string) []manifest.Precondition {
+	if len(ignore) == 0 {
+		return requires
+	}
+	skip := make(map[string]bool, len(ignore))
+	for _, s := range ignore {
+		skip[s] = true
+	}
+	out := make([]manifest.Precondition, 0, len(requires))
+	for _, req := range requires {
+		if !skip[req.Type+":"+req.Name] {
+			out = append(out, req)
+		}
+	}
+	return out
 }
 
 // deploySyncUnit implements §6 steps 5-6 / §5.3's crash-safety contract: a
@@ -403,7 +449,7 @@ func autoSyncEnabled(sync config.SyncPolicy) bool {
 // deploy call — accepted per NFR6/§5.3 ("deploying an already-deployed
 // digest is a no-op"), which is why any real DeployService/DeployJob must
 // itself be idempotent for an unchanged desired digest.
-func (r *Reconciler) deploySyncUnit(ctx context.Context, res Result, unit expander.SyncUnit, desired, live cloudrun.ServiceState, resourceType string, deploy func(context.Context, cloudrun.ServiceState) error, fetch func(context.Context) (cloudrun.ServiceState, string, error), opts syncOptions) Result {
+func (r *Reconciler) deploySyncUnit(ctx context.Context, res Result, unit expander.SyncUnit, desired, live cloudrun.ServiceState, resourceType string, deploy func(context.Context, cloudrun.ServiceState) error, fetch func(context.Context) (cloudrun.ServiceState, string, error), opts syncOptions, managedFields []string) Result {
 	// A per-attempt token, not r's holder identity: two concurrent attempts
 	// from the very same replica must be just as mutually exclusive as two
 	// from different replicas, so the lock can't be keyed on anything
@@ -472,7 +518,7 @@ func (r *Reconciler) deploySyncUnit(ctx context.Context, res Result, unit expand
 
 	res.LiveImage = postLive.ImageDigest
 	res.Health = postHealth
-	res.Status = string(diff.Compute(desired, postLive, r.ManagedFields, resourceType))
+	res.Status = string(diff.Compute(desired, postLive, managedFields, resourceType))
 
 	if err := r.updateSyncEvent(ctx, id, "succeeded", ""); err != nil && res.Err == nil {
 		res.Err = fmt.Errorf("deploy succeeded but updating sync_events failed: %w", err)

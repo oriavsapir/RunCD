@@ -341,3 +341,49 @@ func TestSyncPolicyMerge_SyncWindowsReplacedWholesaleWhenOverridden(t *testing.T
 		t.Fatalf("expected base's syncWindows to survive an override that doesn't set it, got %+v", merged.SyncWindows)
 	}
 }
+
+func TestParse_AppIgnoreFieldsAndIgnorePreconditions(t *testing.T) {
+	yaml := []byte(`
+environments:
+  prd:
+    projects: [example-prod-us]
+defaults:
+  region: us-central1
+  managedFields: [image, traffic]
+apps:
+  - name: widget-api
+    env: prd
+    source: { repo: git@github.com:org/deployment.git, path: services/widget-api/ }
+    ignoreFields: [traffic]
+    ignorePreconditions: ["pubsubTopic:orders-events"]
+`)
+	root, err := Parse(yaml)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	app := root.Apps[0]
+	if len(app.IgnoreFields) != 1 || app.IgnoreFields[0] != "traffic" {
+		t.Fatalf("ignoreFields not parsed: %+v", app.IgnoreFields)
+	}
+	if len(app.IgnorePreconditions) != 1 || app.IgnorePreconditions[0] != "pubsubTopic:orders-events" {
+		t.Fatalf("ignorePreconditions not parsed: %+v", app.IgnorePreconditions)
+	}
+}
+
+func TestParse_AppIgnoreFieldsRejectsUnknownField(t *testing.T) {
+	yaml := []byte(`
+environments:
+  prd:
+    projects: [example-prod-us]
+defaults:
+  region: us-central1
+apps:
+  - name: widget-api
+    env: prd
+    source: { repo: git@github.com:org/deployment.git, path: services/widget-api/ }
+    ignoreFields: [bogus]
+`)
+	if _, err := Parse(yaml); err == nil {
+		t.Fatal("expected error for an ignoreFields entry runcd doesn't know how to manage")
+	}
+}

@@ -20,6 +20,10 @@ type SyncUnit struct {
 	Sync       config.SyncPolicy
 	SourceRepo string
 	SourcePath string
+	// IgnoreFields/IgnorePreconditions are copied verbatim from the app's
+	// config entry — see config.App's doc comments.
+	IgnoreFields        []string
+	IgnorePreconditions []string
 }
 
 // Expand resolves every apps[] entry against its environment's project list,
@@ -86,13 +90,15 @@ func Expand(root *config.Root) ([]SyncUnit, error) {
 			}
 
 			units = append(units, SyncUnit{
-				App:        app.Name,
-				Project:    project,
-				Env:        app.Env,
-				Region:     region,
-				Sync:       sync,
-				SourceRepo: app.Source.Repo,
-				SourcePath: app.Source.Path,
+				App:                 app.Name,
+				Project:             project,
+				Env:                 app.Env,
+				Region:              region,
+				Sync:                sync,
+				SourceRepo:          app.Source.Repo,
+				SourcePath:          app.Source.Path,
+				IgnoreFields:        app.IgnoreFields,
+				IgnorePreconditions: app.IgnorePreconditions,
 			})
 		}
 	}

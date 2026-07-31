@@ -14,6 +14,7 @@ import (
 	"github.com/runcd/runcd/internal/config"
 	"github.com/runcd/runcd/internal/diff"
 	"github.com/runcd/runcd/internal/expander"
+	"github.com/runcd/runcd/internal/manifest"
 	"github.com/runcd/runcd/internal/testutil"
 )
 
@@ -1472,5 +1473,101 @@ func TestDryRun_DoesNotBlockAConcurrentRealSync(t *testing.T) {
 	}
 	if errors.Is(res.Err, ErrSyncInProgress) {
 		t.Fatalf("a prior dry run must not leave a lock behind, got %+v", res)
+	}
+}
+
+// TestRunOnce_IgnoreFieldsExcludesFieldFromDiff is the resource-exclusions
+// guarantee: a unit's ignoreFields removes a field from the diff entirely,
+// even though it's still in the reconciler's global ManagedFields — a
+// traffic mismatch that would otherwise be OutOfSync is invisible once
+// traffic is ignored for this one app.
+func TestRunOnce_IgnoreFieldsExcludesFieldFromDiff(t *testing.T) {
+	db := testutil.NewPostgres(t)
+	manifestYAML := []byte(fmt.Sprintf("image:\n  digest: %s\ntraffic:\n  latestRevisionPercent: 80\n", validDigest))
+	live80 := 50
+	r := &Reconciler{
+		DB:            db,
+		ManagedFields: []string{"image", "traffic"},
+		Manifests:     &fakeManifests{byApp: map[string][]byte{"widget-api": manifestYAML}},
+		CloudRun: &fakeCloudRun{services: map[string]*cloudrun.LiveService{
+			"example-prod-us/widget-api": {
+				ServiceState:                cloudrun.ServiceState{ImageDigest: validDigest, TrafficLatestRevisionPercent: &live80},
+				HasRevisionForDesiredDigest: true,
+				LatestRevisionReady:         true,
+			},
+		}},
+		Preconditions: &fakePreconditions{},
+	}
+
+	unit := expander.SyncUnit{App: "widget-api", Project: "example-prod-us", IgnoreFields: []string{"traffic"}}
+	results, err := r.RunOnce(context.Background(), []expander.SyncUnit{unit})
+	if err != nil {
+		t.Fatalf("RunOnce: %v", err)
+	}
+	if results[0].Status != "Synced" {
+		t.Fatalf("expected Synced once traffic is ignored for this app despite a real traffic mismatch (manifest wants 80%%, live is 50%%), got %+v", results[0])
+	}
+}
+
+// TestRunOnce_IgnorePreconditionsSkipsNamedPrecondition is the precondition
+// half of resource exclusions: an app-level ignorePreconditions entry
+// bypasses one specific missing precondition without disabling the check
+// for anything else.
+func TestRunOnce_IgnorePreconditionsSkipsNamedPrecondition(t *testing.T) {
+	db := testutil.NewPostgres(t)
+	manifestYAML := []byte(fmt.Sprintf(`
+image:
+  digest: %s
+requires:
+  - type: pubsubTopic
+    name: orders-events
+`, validDigest))
+	r := &Reconciler{
+		DB:            db,
+		ManagedFields: []string{"image"},
+		Manifests:     &fakeManifests{byApp: map[string][]byte{"widget-api": manifestYAML}},
+		CloudRun: &fakeCloudRun{services: map[string]*cloudrun.LiveService{
+			"example-prod-us/widget-api": {
+				ServiceState:                cloudrun.ServiceState{ImageDigest: validDigest},
+				HasRevisionForDesiredDigest: true,
+				LatestRevisionReady:         true,
+			},
+		}},
+		Preconditions: &fakePreconditions{topics: map[string]bool{}}, // orders-events missing
+	}
+
+	unit := expander.SyncUnit{App: "widget-api", Project: "example-prod-us", IgnorePreconditions: []string{"pubsubTopic:orders-events"}}
+	results, err := r.RunOnce(context.Background(), []expander.SyncUnit{unit})
+	if err != nil {
+		t.Fatalf("RunOnce: %v", err)
+	}
+	if results[0].Status != "Synced" {
+		t.Fatalf("expected the missing-but-ignored precondition to not block sync, got %+v", results[0])
+	}
+	if results[0].Err != nil {
+		t.Fatalf("expected no precondition error once ignored, got %v", results[0].Err)
+	}
+}
+
+func TestEffectiveManagedFields(t *testing.T) {
+	got := effectiveManagedFields([]string{"image", "traffic"}, []string{"traffic"})
+	if len(got) != 1 || got[0] != "image" {
+		t.Fatalf("expected traffic subtracted, got %+v", got)
+	}
+
+	got = effectiveManagedFields([]string{"image", "traffic"}, nil)
+	if len(got) != 2 {
+		t.Fatalf("expected no change with no ignore list, got %+v", got)
+	}
+}
+
+func TestFilterPreconditions(t *testing.T) {
+	requires := []manifest.Precondition{
+		{Type: "pubsubTopic", Name: "orders-events"},
+		{Type: "pubsubTopic", Name: "shipping-events"},
+	}
+	got := filterPreconditions(requires, []string{"pubsubTopic:orders-events"})
+	if len(got) != 1 || got[0].Name != "shipping-events" {
+		t.Fatalf("expected only the named precondition removed, got %+v", got)
 	}
 }

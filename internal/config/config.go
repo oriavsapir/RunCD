@@ -123,6 +123,16 @@ type App struct {
 	Source    Source              `yaml:"source"`
 	Overrides map[string]Override `yaml:"overrides,omitempty"`
 	Exclude   []string            `yaml:"exclude,omitempty"`
+	// IgnoreFields subtracts from defaults.managedFields for this app only
+	// (ArgoCD's resource.exclusions, at field granularity — §7 already has
+	// the allow-list, this is the per-app override on top of it).
+	IgnoreFields []string `yaml:"ignoreFields,omitempty"`
+	// IgnorePreconditions skips specific requires entries for this app
+	// only, each named "type:name" (matching manifest.Precondition, e.g.
+	// "pubsubTopic:orders-events") — an escape hatch for a precondition
+	// that's legitimately not applicable to one app, not a way to
+	// routinely bypass §5.10's gate.
+	IgnorePreconditions []string `yaml:"ignorePreconditions,omitempty"`
 }
 
 // NotifyRule is one entry in notify.rules (§5.8): a rule fires when its
@@ -184,6 +194,13 @@ func Parse(data []byte) (*Root, error) {
 	for _, f := range root.Defaults.ManagedFields {
 		if !validManagedFields[f] {
 			return nil, fmt.Errorf("defaults.managedFields: %q is not a field runcd knows how to manage (image, traffic)", f)
+		}
+	}
+	for _, app := range root.Apps {
+		for _, f := range app.IgnoreFields {
+			if !validManagedFields[f] {
+				return nil, fmt.Errorf("app %q: ignoreFields: %q is not a field runcd knows how to manage (image, traffic)", app.Name, f)
+			}
 		}
 	}
 	for _, w := range root.Defaults.Sync.SyncWindows {
