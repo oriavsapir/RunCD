@@ -13,7 +13,9 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"reflect"
 	"sync"
+	"sync/atomic"
 	"syscall"
 	"time"
 
@@ -33,6 +35,7 @@ import (
 	"github.com/runcd/runcd/internal/precondition"
 	"github.com/runcd/runcd/internal/rbac"
 	"github.com/runcd/runcd/internal/reconcile"
+	"github.com/runcd/runcd/internal/store"
 )
 
 func main() {
@@ -174,6 +177,12 @@ func run() error {
 	}
 	defer func() { _ = closeDB() }()
 
+	// Idempotent — safe on every boot, including one replica racing another
+	// to apply it for the first time (see store.Apply's doc comment).
+	if err := store.Apply(ctx, db); err != nil {
+		return fmt.Errorf("apply schema: %w", err)
+	}
+
 	ghClient, err := githubapp.NewClient(githubAppID, []byte(githubAppPEM))
 	if err != nil {
 		return fmt.Errorf("build GitHub App client: %w", err)
@@ -201,24 +210,16 @@ func run() error {
 	preconditions := precondition.NewGCPChecker()
 	defer func() { _ = preconditions.Close() }()
 
-	var notifier reconcile.Notifier
-	if root.Notify.SlackWebhookURL != "" {
-		notifier = &notify.Evaluator{
-			DB:    db,
-			Sink:  &notify.SlackSink{WebhookURL: root.Notify.SlackWebhookURL},
-			Rules: root.Notify.Rules,
-		}
-	}
-
-	reconciler := &reconcile.Reconciler{
+	reconcilerPtr := &atomic.Pointer[reconcile.Reconciler]{}
+	reconcilerPtr.Store(&reconcile.Reconciler{
 		DB:            db,
 		CloudRun:      cloudRun,
 		Preconditions: preconditions,
 		Manifests:     &gitsource.Source{Client: ghClient},
 		ManagedFields: root.Defaults.ManagedFields,
 		Workers:       reconcile.DefaultWorkers,
-		Notifier:      notifier,
-	}
+		Notifier:      buildNotifier(db, root),
+	})
 
 	dynUnits := &dynamicUnits{}
 	dynUnits.set(units)
@@ -228,7 +229,7 @@ func run() error {
 		RBAC:       rbacStore,
 		Units:      dynUnits,
 		Status:     &api.PostgresStatusStore{DB: db},
-		Reconciler: reconciler,
+		Reconciler: reconcilerPtr,
 	}
 	srv := &http.Server{Addr: httpAddr, Handler: api.NewMux(handler), ReadHeaderTimeout: 10 * time.Second}
 
@@ -256,7 +257,7 @@ func run() error {
 
 	go func() {
 		defer wg.Done()
-		reconcileLoop(ctx, reconcileInterval, lc, ghClient, cfgSrc, reconciler, dynUnits, rbacStore)
+		reconcileLoop(ctx, reconcileInterval, lc, ghClient, cfgSrc, db, reconcilerPtr, dynUnits, rbacStore)
 	}()
 
 	// A bind/serve failure (e.g. the port is already taken) is fatal, not a
@@ -395,12 +396,28 @@ func loadRBAC(ctx context.Context, gh *githubapp.Client, cs configSource) (*rbac
 	return rbac.Parse(data)
 }
 
+// buildNotifier returns nil if no Slack webhook is configured — the
+// interface-typed nil that reconcile.Reconciler's r.Notifier == nil check
+// needs. Assigning a typed *notify.Evaluator to a reconcile.Notifier
+// variable unconditionally would make that check false forever (a non-nil
+// interface holding a nil-webhook Evaluator), so both the startup and
+// hot-reload call sites go through this one function rather than
+// duplicating the conditional.
+func buildNotifier(db *sql.DB, root *config.Root) reconcile.Notifier {
+	if root.Notify.SlackWebhookURL == "" {
+		return nil
+	}
+	return &notify.Evaluator{
+		DB:    db,
+		Sink:  &notify.SlackSink{WebhookURL: root.Notify.SlackWebhookURL},
+		Rules: root.Notify.Rules,
+	}
+}
+
 // dynamicUnits is a UnitLookup refreshed every reconcile pass, so a newly
 // added app is reachable by the manual-sync API without a controller
-// restart. RBAC is refreshed on the same cadence (see reconcileLoop); notify
-// config and managedFields are still only read at startup — ponytail:
-// restart to pick those up, they change far less often than "who can sync
-// what."
+// restart. RBAC, notify config, and managedFields are all refreshed on the
+// same cadence — see reconcileLoop.
 type dynamicUnits struct {
 	mu    sync.RWMutex
 	units map[string]expander.SyncUnit
@@ -434,20 +451,36 @@ func (d *dynamicUnits) List() []expander.SyncUnit {
 	return out
 }
 
-func reconcileLoop(ctx context.Context, interval time.Duration, lc *leadershipContext, gh *githubapp.Client, cs configSource, reconciler *reconcile.Reconciler, units *dynamicUnits, rbacStore *rbac.Store) {
+func reconcileLoop(ctx context.Context, interval time.Duration, lc *leadershipContext, gh *githubapp.Client, cs configSource, db *sql.DB, reconcilerPtr *atomic.Pointer[reconcile.Reconciler], units *dynamicUnits, rbacStore *rbac.Store) {
 	ticker := time.NewTicker(interval)
 	defer ticker.Stop()
+	// lastNotify/lastManagedFields track what the currently-stored
+	// Reconciler was built with, so a reload that hasn't actually changed
+	// either one (the common case — most ticks) doesn't need to construct
+	// and swap in a new Reconciler at all. Zero-valued on the first tick,
+	// which just means that tick's rebuild is a harmless no-op if root
+	// hasn't diverged from startup yet.
+	var lastNotify config.Notify
+	var lastManagedFields []string
 	for {
 		select {
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
-			_, expanded, err := loadUnits(ctx, gh, cs)
+			root, expanded, err := loadUnits(ctx, gh, cs)
 			if err != nil {
 				log.Printf("reconcile: reload config: %v", err)
 				continue
 			}
 			units.set(expanded)
+
+			if !reflect.DeepEqual(root.Notify, lastNotify) || !reflect.DeepEqual(root.Defaults.ManagedFields, lastManagedFields) {
+				next := *reconcilerPtr.Load() // shallow copy: DB/CloudRun/Preconditions/Manifests/Workers carry over unchanged
+				next.ManagedFields = root.Defaults.ManagedFields
+				next.Notifier = buildNotifier(db, root)
+				reconcilerPtr.Store(&next)
+				lastNotify, lastManagedFields = root.Notify, root.Defaults.ManagedFields
+			}
 
 			// A missing/invalid rbac.yaml here doesn't fail closed to empty
 			// like the startup path does — that would silently revoke every
@@ -466,7 +499,7 @@ func reconcileLoop(ctx context.Context, interval time.Duration, lc *leadershipCo
 			if passCtx.Err() != nil {
 				continue // not leader
 			}
-			results, err := reconciler.RunOnce(passCtx, expanded)
+			results, err := reconcilerPtr.Load().RunOnce(passCtx, expanded)
 			if err != nil {
 				log.Printf("reconcile: run once: %v", err)
 			}

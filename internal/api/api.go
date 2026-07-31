@@ -6,8 +6,10 @@ package api
 
 import (
 	"encoding/json"
+	"errors"
 	"log"
 	"net/http"
+	"sync/atomic"
 
 	"github.com/runcd/runcd/internal/auth"
 	"github.com/runcd/runcd/internal/expander"
@@ -45,11 +47,15 @@ func (m StaticUnits) List() []expander.SyncUnit {
 // Handler wires auth -> RBAC -> ManualSync for the gated sync endpoint, and
 // auth -> StatusStore for the dashboard's read-only views.
 type Handler struct {
-	Auth       auth.Authenticator
-	RBAC       *rbac.Store
-	Units      UnitLookup
-	Status     StatusStore
-	Reconciler *reconcile.Reconciler
+	Auth   auth.Authenticator
+	RBAC   *rbac.Store
+	Units  UnitLookup
+	Status StatusStore
+	// Reconciler is an atomic pointer, not a plain *reconcile.Reconciler,
+	// so the controller can hot-swap it (new Notifier/ManagedFields after a
+	// config reload — see cmd/controller/main.go's reconcileLoop) without a
+	// data race against a manual sync reading it concurrently.
+	Reconciler *atomic.Pointer[reconcile.Reconciler]
 }
 
 // NewMux registers the API's routes on a fresh http.ServeMux.
@@ -106,12 +112,21 @@ func (h *Handler) handleSync(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	res, err := h.Reconciler.ManualSync(r.Context(), unit, email)
+	res, err := h.Reconciler.Load().ManualSync(r.Context(), unit, email)
 	if err != nil {
 		// The applications-table write itself failed — an infra error, not
 		// business-level. Log it server-side; don't echo it to the caller.
 		logSensitive(app, project, email, err)
 		http.Error(w, "sync failed", http.StatusInternalServerError)
+		return
+	}
+	if errors.Is(res.Err, reconcile.ErrSyncInProgress) {
+		// The one res.Err case worth telling the caller about specifically:
+		// unlike a failed precondition or a raw GCP/DB error (see the
+		// general case below), "someone else is already syncing this" is
+		// unambiguous and actionable — retry shortly, don't treat it as a
+		// failed sync.
+		http.Error(w, "sync already in progress for this app/project", http.StatusConflict)
 		return
 	}
 	if res.Err != nil {

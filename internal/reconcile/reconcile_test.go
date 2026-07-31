@@ -3,6 +3,7 @@ package reconcile
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"fmt"
 	"sync/atomic"
 	"testing"
@@ -1176,5 +1177,114 @@ func TestRunOnce_NotifierFailureDoesNotFailThePass(t *testing.T) {
 	}
 	if results[0].Status != "Synced" {
 		t.Fatalf("unexpected result: %+v", results[0])
+	}
+}
+
+// blockingCloudRun wraps fakeCloudRun so a test can pin down exactly when a
+// DeployService call is in flight — the window a concurrent second attempt
+// needs to overlap with, to test the lock deterministically instead of via
+// a hopeful sleep.
+type blockingCloudRun struct {
+	*fakeCloudRun
+	started chan struct{}
+	proceed chan struct{}
+}
+
+func (b *blockingCloudRun) DeployService(ctx context.Context, project, region, name string, desired cloudrun.ServiceState) error {
+	close(b.started)
+	<-b.proceed
+	return b.fakeCloudRun.DeployService(ctx, project, region, name, desired)
+}
+
+// TestManualSync_ConcurrentAttemptsOnSameUnitOneWins is the regression test
+// for the race PROGRESS.md flagged: a manual sync (any replica) and the
+// auto-reconcile loop — or, as here, two manual syncs — deploying the same
+// unit at once. Without the sync_locks-backed lock in deploySyncUnit, both
+// would call DeployService concurrently.
+func TestManualSync_ConcurrentAttemptsOnSameUnitOneWins(t *testing.T) {
+	db := testutil.NewPostgres(t)
+	oldDigest := "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+	cr := &blockingCloudRun{
+		fakeCloudRun: &fakeCloudRun{services: map[string]*cloudrun.LiveService{
+			"example-prod-us/widget-api": {ServiceState: cloudrun.ServiceState{ImageDigest: oldDigest}, LatestRevisionReady: true},
+		}},
+		started: make(chan struct{}),
+		proceed: make(chan struct{}),
+	}
+	r := &Reconciler{
+		DB:            db,
+		ManagedFields: []string{"image"},
+		Manifests:     &fakeManifests{byApp: map[string][]byte{"widget-api": serviceYAML()}},
+		CloudRun:      cr,
+		Preconditions: &fakePreconditions{},
+	}
+	unit := expander.SyncUnit{App: "widget-api", Project: "example-prod-us", Sync: manualSync()}
+
+	type outcome struct {
+		res Result
+		err error
+	}
+	firstDone := make(chan outcome, 1)
+	go func() {
+		res, err := r.ManualSync(context.Background(), unit, "first@company.com")
+		firstDone <- outcome{res, err}
+	}()
+
+	select {
+	case <-cr.started:
+	case <-time.After(5 * time.Second):
+		t.Fatal("first ManualSync never reached DeployService")
+	}
+
+	// The first attempt is holding the lock, blocked inside DeployService —
+	// this second attempt must be rejected immediately, not block waiting
+	// for the first to finish.
+	secondRes, err := r.ManualSync(context.Background(), unit, "second@company.com")
+	if err != nil {
+		t.Fatalf("second ManualSync: %v", err)
+	}
+	if !errors.Is(secondRes.Err, ErrSyncInProgress) {
+		t.Fatalf("expected second concurrent attempt to get ErrSyncInProgress, got %+v", secondRes)
+	}
+
+	close(cr.proceed)
+	first := <-firstDone
+	if first.err != nil {
+		t.Fatalf("first ManualSync: %v", first.err)
+	}
+	if first.res.Status != "Synced" {
+		t.Fatalf("expected the first (unblocked) attempt to have deployed successfully, got %+v", first.res)
+	}
+	if got := liveServiceDigest(t, cr.fakeCloudRun, "example-prod-us/widget-api"); got != validDigest {
+		t.Fatalf("expected the first attempt's deploy to have actually happened, got digest %q", got)
+	}
+}
+
+// TestManualSync_LockReleasedAfterAttemptCompletes checks the lock doesn't
+// outlive its attempt — a second, later (non-concurrent) sync of the same
+// unit must succeed once the first has actually finished.
+func TestManualSync_LockReleasedAfterAttemptCompletes(t *testing.T) {
+	db := testutil.NewPostgres(t)
+	cr := &fakeCloudRun{services: map[string]*cloudrun.LiveService{
+		"example-prod-us/widget-api": {ServiceState: cloudrun.ServiceState{ImageDigest: "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}, LatestRevisionReady: true},
+	}}
+	r := &Reconciler{
+		DB:            db,
+		ManagedFields: []string{"image"},
+		Manifests:     &fakeManifests{byApp: map[string][]byte{"widget-api": serviceYAML()}},
+		CloudRun:      cr,
+		Preconditions: &fakePreconditions{},
+	}
+	unit := expander.SyncUnit{App: "widget-api", Project: "example-prod-us", Sync: manualSync()}
+
+	if _, err := r.ManualSync(context.Background(), unit, "first@company.com"); err != nil {
+		t.Fatalf("first ManualSync: %v", err)
+	}
+	res, err := r.ManualSync(context.Background(), unit, "second@company.com")
+	if err != nil {
+		t.Fatalf("second ManualSync: %v", err)
+	}
+	if errors.Is(res.Err, ErrSyncInProgress) {
+		t.Fatalf("expected the lock to be released after the first attempt completed, got %+v", res)
 	}
 }

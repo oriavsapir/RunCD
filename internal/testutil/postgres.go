@@ -14,7 +14,22 @@ import (
 	"github.com/runcd/runcd/internal/store"
 )
 
+// NewPostgres starts a real, throwaway, schema-applied Postgres — what
+// every test outside this package should use.
 func NewPostgres(t *testing.T) *sql.DB {
+	t.Helper()
+	db := NewRawPostgres(t)
+	if err := store.Apply(context.Background(), db); err != nil {
+		t.Fatalf("apply schema: %v", err)
+	}
+	return db
+}
+
+// NewRawPostgres starts a real, throwaway Postgres with no schema applied
+// yet — for internal/store's own tests, which need to exercise Apply
+// itself (idempotency, concurrent-callers race-safety) against a genuinely
+// empty database.
+func NewRawPostgres(t *testing.T) *sql.DB {
 	t.Helper()
 	ctx := context.Background()
 
@@ -39,9 +54,5 @@ func NewPostgres(t *testing.T) *sql.DB {
 		t.Fatalf("open db: %v", err)
 	}
 	t.Cleanup(func() { _ = db.Close() })
-
-	if _, err := db.ExecContext(ctx, store.Schema); err != nil {
-		t.Fatalf("apply schema: %v", err)
-	}
 	return db
 }

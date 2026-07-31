@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync/atomic"
 	"testing"
 
 	"github.com/runcd/runcd/internal/cloudrun"
@@ -134,15 +135,21 @@ roles:
 		RBAC:   rbac.NewStore(rbacCfg),
 		Units:  StaticUnits{"widget-api/example-prod-eu": unit},
 		Status: &PostgresStatusStore{DB: db},
-		Reconciler: &reconcile.Reconciler{
+		Reconciler: newReconcilerPointer(&reconcile.Reconciler{
 			DB:            db,
 			ManagedFields: []string{"image"},
 			Manifests:     &fakeManifests{byApp: map[string][]byte{"widget-api": serviceYAML()}},
 			CloudRun:      cr,
 			Preconditions: fakePreconditions{},
-		},
+		}),
 	}
 	return h, cr
+}
+
+func newReconcilerPointer(r *reconcile.Reconciler) *atomic.Pointer[reconcile.Reconciler] {
+	p := &atomic.Pointer[reconcile.Reconciler]{}
+	p.Store(r)
+	return p
 }
 
 // postSync builds and sends a sync request, failing the test immediately
@@ -230,7 +237,7 @@ func (f *failingDB) QueryRowContext(ctx context.Context, _ string, _ ...any) *sq
 // HTTP response body for any RBAC-authorized caller.
 func TestHandleSync_InfraErrorReturns500WithoutLeakingDetail(t *testing.T) {
 	h, _ := newTestHandler(t)
-	h.Reconciler.DB = &failingDB{real: h.Reconciler.DB.(*sql.DB)}
+	h.Reconciler.Load().DB = &failingDB{real: h.Reconciler.Load().DB.(*sql.DB)}
 
 	srv := httptest.NewServer(NewMux(h))
 	defer srv.Close()
@@ -247,6 +254,30 @@ func TestHandleSync_InfraErrorReturns500WithoutLeakingDetail(t *testing.T) {
 	}
 	if strings.Contains(string(body), "__simulated_write_failure__") {
 		t.Fatalf("response body leaked internal error detail: %s", body)
+	}
+}
+
+// TestHandleSync_LockedUnitReturns409 checks that a unit currently locked
+// by another in-flight deploy attempt (see internal/reconcile's
+// sync_locks-backed lock) surfaces as 409, not a generic 500/200 — unlike
+// most res.Err cases, "someone else is already syncing this" is
+// unambiguous and worth telling the caller.
+func TestHandleSync_LockedUnitReturns409(t *testing.T) {
+	h, _ := newTestHandler(t)
+	db := h.Reconciler.Load().DB.(*sql.DB)
+	if _, err := db.ExecContext(context.Background(), `
+		INSERT INTO sync_locks (application, target_gcp_project, holder, expires_at)
+		VALUES ('widget-api', 'example-prod-eu', 'other-attempt', now() + interval '1 minute')`); err != nil {
+		t.Fatalf("seed sync_locks: %v", err)
+	}
+
+	srv := httptest.NewServer(NewMux(h))
+	defer srv.Close()
+
+	resp := postSync(t, srv.URL+"/api/sync/example-prod-eu/widget-api", "admin-token")
+	defer func() { _ = resp.Body.Close() }()
+	if resp.StatusCode != http.StatusConflict {
+		t.Fatalf("expected 409, got %d", resp.StatusCode)
 	}
 }
 
@@ -268,8 +299,8 @@ func (failingPreconditions) SubscriptionExists(context.Context, string, string) 
 // status/health.
 func TestHandleSync_BusinessLevelErrorNotLeakedInSuccessfulResponse(t *testing.T) {
 	h, _ := newTestHandler(t)
-	h.Reconciler.Preconditions = failingPreconditions{}
-	h.Reconciler.Manifests = &fakeManifests{byApp: map[string][]byte{
+	h.Reconciler.Load().Preconditions = failingPreconditions{}
+	h.Reconciler.Load().Manifests = &fakeManifests{byApp: map[string][]byte{
 		"widget-api": []byte(fmt.Sprintf("image:\n  digest: %s\nrequires:\n  - type: pubsubTopic\n    name: some-topic\n", validDigest)),
 	}}
 

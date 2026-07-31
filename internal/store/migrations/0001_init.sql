@@ -1,7 +1,13 @@
 -- Phase 0 schema (§5.2): last-known state, audit trail, leader lease.
 -- Deliberately minimal, no ORM abstraction beyond what's needed.
+--
+-- Every statement below is idempotent (IF NOT EXISTS / ON CONFLICT DO
+-- NOTHING) — internal/store.Apply runs the whole concatenated Schema on
+-- every controller boot, including against a database that already has it
+-- (see store.Apply's doc comment for why a plain re-run would otherwise
+-- fail on a second boot).
 
-CREATE TABLE applications (
+CREATE TABLE IF NOT EXISTS applications (
   name             text NOT NULL,
   target_gcp_project text NOT NULL,
   desired_image    text NOT NULL,
@@ -14,7 +20,7 @@ CREATE TABLE applications (
   PRIMARY KEY (name, target_gcp_project)
 );
 
-CREATE TABLE sync_events (
+CREATE TABLE IF NOT EXISTS sync_events (
   id            bigserial PRIMARY KEY,
   application   text NOT NULL,
   target_gcp_project text NOT NULL,
@@ -32,14 +38,14 @@ CREATE TABLE sync_events (
 -- sync history is looked up per (application, target_gcp_project) — the
 -- FK columns aren't automatically indexed on the referencing side in
 -- Postgres, and this table is append-only/never deleted (§5.2).
-CREATE INDEX sync_events_application_project_idx ON sync_events (application, target_gcp_project, started_at DESC);
+CREATE INDEX IF NOT EXISTS sync_events_application_project_idx ON sync_events (application, target_gcp_project, started_at DESC);
 
 -- single-row-per-lease leader election (NFR3) — no external coordination service required
-CREATE TABLE leader_lease (
+CREATE TABLE IF NOT EXISTS leader_lease (
   id            int PRIMARY KEY DEFAULT 1,
   holder_id     text NOT NULL,
   expires_at    timestamptz NOT NULL
 );
 
 -- seed the single lease row, already expired, so the first replica to poll claims it
-INSERT INTO leader_lease (id, holder_id, expires_at) VALUES (1, '', 'epoch');
+INSERT INTO leader_lease (id, holder_id, expires_at) VALUES (1, '', 'epoch') ON CONFLICT (id) DO NOTHING;

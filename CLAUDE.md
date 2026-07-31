@@ -36,13 +36,22 @@ is or isn't built.
 (only the leader deploys; a `leadershipContext` cancels in-flight work the
 instant leadership is lost), serves the manual-sync + dashboard-read API on
 every replica, loads `runcd.yaml`/`rbac.yaml` from GitHub via the App
-client.
+client. Applies the Postgres schema on boot (`store.Apply`) and hot-reloads
+config/RBAC/notify settings on every `RECONCILE_INTERVAL` tick — see Phase 5
+below.
+
+`cmd/runcd/main.go` — a small CLI client for the same HTTP API the
+dashboard uses (`internal/api`): list units, show a diff, view history,
+trigger a sync, list RBAC roles. Independent of the dashboard/controller
+processes — just an HTTP client with its own copy of the JSON shapes (same
+relationship `web/src/lib/types.ts` has). Auth: shells out to `gcloud auth
+print-identity-token` when `RUNCD_IAP_AUDIENCE` is set.
 
 `internal/`, roughly in dependency order:
 - `config` — parses `runcd.yaml` (environments, apps, notify rules), validates references
 - `manifest` — per-app manifest format (§5.1), digest-pin validation
 - `expander` — expands config into `SyncUnit`s (one per app × environment)
-- `store` — Postgres schema/migrations (`migrations/*.sql`, embedded via `schema.go`)
+- `store` — Postgres schema/migrations (`migrations/*.sql`, embedded via `schema.go`); every migration is idempotent, and `Apply` (advisory-lock-guarded against concurrent replicas) runs the whole thing on every boot — no separate migration step
 - `leader` — Postgres-backed leader election (conditional UPDATE lease claim)
 - `githubapp` — GitHub App auth (RS256 JWT, stdlib `crypto/rsa`) + Contents API file fetches — no local git clone, keeps the distroless runtime image git-free
 - `gitsource` — `reconcile.ManifestSource` on top of `githubapp`, with a short-TTL cache + singleflight coalescing (many sync units often share one manifest)
@@ -50,11 +59,11 @@ client.
 - `precondition` — `Checker` interface; `GCPChecker` is the real Pub/Sub-backed implementation
 - `diff` — computes Synced/OutOfSync status from desired vs. live state
 - `health` — assesses Healthy/Degraded per resource type (service/job/workerPool)
-- `reconcile` — the core loop: fetch → diff → precondition-gate → deploy → re-fetch → persist → notify. Writes `sync_events` as an audit trail.
+- `reconcile` — the core loop: fetch → diff → precondition-gate → deploy → re-fetch → persist → notify. Writes `sync_events` as an audit trail. A per-unit TTL lock (`sync_locks` table) serializes a manual sync against the auto-reconcile loop (or two concurrent manual syncs) deploying the same unit at once — a losing attempt gets `ErrSyncInProgress`.
 - `rbac` — role/scope matching (`env:x`, `app:x@project`) for who may trigger a manual sync
 - `auth` — identity verification. `IAPAuthenticator` (default, wired in `main.go`) verifies Identity-Aware Proxy's signed assertion header, defense-in-depth on top of IAP/IAM actually gating access; `GoogleAuthenticator` (direct Google OAuth token) is kept as an option for non-IAP deployments but not wired by default.
 - `notify` — Slack notifications on sync-failed / health-degraded / stuck-out-of-sync, debounced via a Postgres transaction (commits the debounce claim only after the send succeeds)
-- `api` — HTTP handlers: `GET /api/units` (list), `GET /api/units/{project}/{app}` (detail/diff), `GET /api/units/{project}/{app}/history` (sync_events), `POST /api/sync/{project}/{app}` (manual sync). Read endpoints are open to any authenticated caller; only sync is RBAC-gated. Go 1.22+ pattern routing.
+- `api` — HTTP handlers: `GET /api/units` (list), `GET /api/units/{project}/{app}` (detail/diff), `GET /api/units/{project}/{app}/history` (sync_events), `GET /api/rbac` (configured roles), `POST /api/sync/{project}/{app}` (manual sync). Read endpoints are open to any authenticated caller; only sync is RBAC-gated. Go 1.22+ pattern routing. `Handler.Reconciler` is an `*atomic.Pointer[reconcile.Reconciler]`, not a plain pointer — swappable so a config hot-reload doesn't race a concurrent manual sync.
 
 `web/` — the Next.js dashboard (Phase 4). App Router, TypeScript, Tailwind
 CSS v4, shadcn/ui + lucide-react. Calls the Go API same-origin
@@ -94,8 +103,9 @@ controller service account (§5.5). Not invoked directly — see its
 
 Phases 0–4 are all done (foundations, reconcile loop, job/worker-pool
 support, sync+audit trail, gated sync/RBAC/notifications, live GCP/GitHub
-wiring, IAP auth, Next.js dashboard). See `PROGRESS.md` for what's still
-explicitly deferred (schema migrations aren't applied by `main.go`, no
-config/RBAC hot-reload, no per-unit deploy lock between manual sync and the
-auto-reconcile loop, and a few other flagged-not-fixed items from the
-review passes).
+wiring, IAP auth, Next.js dashboard, dashboard settings page). Phase 5
+(schema migrations applied on boot, full config/RBAC/notify hot-reload, a
+real per-unit deploy lock) is also done — see `PROGRESS.md` for what's
+still explicitly deferred (a handful of smaller flagged-not-fixed items
+from the review passes, plus deploy-time steps like actually enabling IAP/
+IAM DB auth on the real infra, which aren't code in this repo).

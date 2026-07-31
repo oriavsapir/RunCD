@@ -11,6 +11,7 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"log"
 	"time"
 
 	"golang.org/x/sync/errgroup"
@@ -26,6 +27,22 @@ import (
 
 // DefaultWorkers matches §5.4's default bounded worker pool size.
 const DefaultWorkers = 16
+
+// ErrSyncInProgress means another deploy attempt for this exact unit is
+// already holding its lock — from a concurrent manual sync, the
+// auto-reconcile loop, or both. Manual sync can run on any replica (not
+// just the leader), so this can't be an in-process mutex; it's a row in
+// the sync_locks table instead, checked/claimed atomically alongside the
+// existing applications/sync_events writes.
+var ErrSyncInProgress = errors.New("sync already in progress for this app/project")
+
+// lockTTL bounds how long a held lock survives a crashed holder before a
+// later attempt can reclaim it. Generous relative to the real work a lock
+// is held for: DeployService/DeployJob submit the update and return
+// without polling to readiness (no .Wait on the LRO), so a full deploy
+// attempt — fetch, deploy call, one post-deploy fetch — is a handful of
+// GCP API round-trips, not a multi-minute wait.
+const lockTTL = 2 * time.Minute
 
 // ManifestSource supplies a sync unit's service definition. Fetching it from
 // git is a separate concern (not built yet); this interface keeps the
@@ -329,6 +346,31 @@ func autoSyncEnabled(sync config.SyncPolicy) bool {
 // digest is a no-op"), which is why any real DeployService/DeployJob must
 // itself be idempotent for an unchanged desired digest.
 func (r *Reconciler) deploySyncUnit(ctx context.Context, res Result, unit expander.SyncUnit, desired, live cloudrun.ServiceState, resourceType string, deploy func(context.Context, cloudrun.ServiceState) error, fetch func(context.Context) (cloudrun.ServiceState, string, error), opts syncOptions) Result {
+	// A per-attempt token, not r's holder identity: two concurrent attempts
+	// from the very same replica must be just as mutually exclusive as two
+	// from different replicas, so the lock can't be keyed on anything
+	// shared across attempts.
+	token := fmt.Sprintf("%d", time.Now().UnixNano())
+	acquired, err := r.acquireLock(ctx, unit, token)
+	if err != nil {
+		res.Err = fmt.Errorf("acquire sync lock: %w", err)
+		return res
+	}
+	if !acquired {
+		res.Err = ErrSyncInProgress
+		return res // res.Status stays whatever applyLiveState already computed.
+	}
+	defer func() {
+		// A short-lived, un-cancellable-by-ctx context: if ctx was already
+		// cancelled (e.g. leadership lost mid-deploy), the lock still needs
+		// releasing so a legitimate later attempt isn't stuck waiting out
+		// the full lockTTL — but it must still time out on its own rather
+		// than risk hanging forever against a wedged connection.
+		releaseCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
+		defer cancel()
+		r.releaseLock(releaseCtx, unit, token)
+	}()
+
 	// sync_events has an FK on (application, target_gcp_project) ->
 	// applications, so a brand-new sync unit's very first reconcile pass —
 	// already OutOfSync and auto-synced — needs that row to exist before a
@@ -378,6 +420,43 @@ func (r *Reconciler) deploySyncUnit(ctx context.Context, res Result, unit expand
 		res.Err = fmt.Errorf("deploy succeeded but updating sync_events failed: %w", err)
 	}
 	return res
+}
+
+// acquireLock claims unit's row in sync_locks for token, succeeding if no
+// one else holds it or its previous holder's claim has expired — the same
+// conditional-UPDATE-via-ON-CONFLICT idiom internal/leader uses for
+// leader_lease, just per-unit and row-per-unit instead of a single
+// pre-seeded row.
+func (r *Reconciler) acquireLock(ctx context.Context, unit expander.SyncUnit, token string) (bool, error) {
+	res, err := r.DB.ExecContext(ctx, `
+		INSERT INTO sync_locks (application, target_gcp_project, holder, expires_at)
+		VALUES ($1, $2, $3, now() + ($4 * interval '1 second'))
+		ON CONFLICT (application, target_gcp_project) DO UPDATE
+		  SET holder = EXCLUDED.holder, expires_at = EXCLUDED.expires_at
+		  WHERE sync_locks.expires_at < now()`,
+		unit.App, unit.Project, token, lockTTL.Seconds())
+	if err != nil {
+		return false, err
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return false, err
+	}
+	return n == 1, nil
+}
+
+// releaseLock drops unit's lock row, but only if token is still the
+// holder — guards against releasing a newer attempt's lock after this
+// one's own claim already expired and someone else reclaimed it. Logging
+// rather than returning the error: this runs from a defer after the real
+// work is already done, and a stuck lock only costs a later attempt a
+// wait of at most lockTTL, not correctness.
+func (r *Reconciler) releaseLock(ctx context.Context, unit expander.SyncUnit, token string) {
+	if _, err := r.DB.ExecContext(ctx, `
+		DELETE FROM sync_locks WHERE application = $1 AND target_gcp_project = $2 AND holder = $3`,
+		unit.App, unit.Project, token); err != nil {
+		log.Printf("reconcile: release sync lock for %s/%s: %v", unit.App, unit.Project, err)
+	}
 }
 
 func (r *Reconciler) insertSyncEvent(ctx context.Context, unit expander.SyncUnit, trigger, actor, fromImage, toImage string) (int64, error) {

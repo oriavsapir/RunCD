@@ -340,10 +340,9 @@ all three are fixed now, before Phase 2 built more on top of the same path:
     `GITHUB_APP_ID`, `GITHUB_APP_PEM`.
   - Optional: `RBAC_PATH` (default `rbac.yaml`, same repo/branch as config),
     `HTTP_ADDR` (default `:8080`), `RECONCILE_INTERVAL` (default `30s`).
-  - **Not built yet, on purpose:** schema migrations aren't applied by
-    `main.go` — `internal/store.Schema` still has to be run against the
-    target Postgres out of band before first boot. Config/RBAC/notify
-    hot-reload (see above). A real per-unit deploy lock.
+  - Schema migrations, config/RBAC/notify hot-reload, and a real
+    per-unit deploy lock were all "not built yet" as of this point in the
+    log — see Phase 5 below, where all three landed.
 
 ## Bugs found and fixed in a post-wiring review
 
@@ -924,6 +923,101 @@ direct Google OAuth token verification as the primary path.
     `next dev` boot serves both `/` and `/units/{project}/{app}` with
     status 200 (data fetches themselves aren't exercised locally without
     a live, IAP-fronted backend — see the known gap above).
+
+- [x] **Dashboard settings page** (`web/src/app/settings/page.tsx`) —
+  appearance (theme toggle), a per-environment summary derived from
+  `GET /api/units`, and the RBAC role list via the new `GET /api/rbac`
+  (`internal/api/rbac.go`) — same open-to-any-authenticated-caller posture
+  as every other read view (§5.9: only Sync itself is gated). An example
+  `rbac.yaml` was added under `examples/`, since no reference existed for
+  the format.
+  - Test: `TestHandleListRBAC_RequiresAuth`,
+    `TestHandleListRBAC_ReturnsConfiguredRoles`.
+
+## Phase 5 — Schema migrations on boot, full config hot-reload, a real per-unit deploy lock
+
+Three gaps flagged "not built yet" earlier in this log (see the Live
+wiring and dynamicUnits notes above) are now closed.
+
+- [x] **Schema migrations applied on boot** — `internal/store.Apply`
+  (`internal/store/schema.go`), called from `main.go`'s `run()` right after
+  `openDB` succeeds. Every migration statement was rewritten to be
+  idempotent (`CREATE TABLE IF NOT EXISTS`, `ADD COLUMN IF NOT EXISTS`,
+  `INSERT ... ON CONFLICT DO NOTHING`), so `Apply` is safe to call on every
+  boot — a fresh database, or one that already has some or all of the
+  schema (from a previous `Apply`, or `Schema` having been run by hand
+  before `Apply` existed).
+  - `IF NOT EXISTS`/`ADD COLUMN IF NOT EXISTS` are *not* race-safe in
+    Postgres on their own — two replicas booting at the same moment and
+    both running `Schema` concurrently can hit a catalog-uniqueness error
+    instead of one silently no-opping. `Apply` pins a single `*sql.Conn`
+    and wraps the whole thing in a `pg_advisory_lock`/`pg_advisory_unlock`
+    pair to serialize concurrent callers. Not routed through leader
+    election — that needs `leader_lease` to already exist, which would be
+    a boot-order cycle.
+  - New migration `0003_sync_lock.sql` (`sync_locks` table, for the deploy
+    lock below) is included in `Schema`.
+  - `internal/testutil.NewPostgres` now calls `store.Apply` instead of
+    running `Schema` directly, so the two paths (test setup, real boot)
+    stay identical. `NewRawPostgres` (no schema applied) was split out for
+    `store`'s own tests, which need a genuinely empty database.
+  - Test: `TestApply_IdempotentOnAlreadyAppliedSchema`,
+    `TestApply_ConcurrentCallersBothSucceed` (two goroutines calling
+    `Apply` against one fresh database, both must succeed — this is the
+    test that would fail without the advisory lock).
+
+- [x] **Per-unit deploy lock** (`internal/reconcile`'s `acquireLock`/
+  `releaseLock`, wired into `deploySyncUnit`) — a manual sync (any replica,
+  not just the leader) and the leader's auto-reconcile pass could
+  previously race to deploy the very same unit concurrently. New
+  `sync_locks` table, one row per (app, project), claimed with the same
+  conditional-`UPDATE`-via-`ON CONFLICT` idiom `internal/leader` already
+  uses for `leader_lease` — just per-unit instead of one pre-seeded row.
+  - TTL-based (`lockTTL = 2 * time.Minute`), not held for a connection's
+    lifetime or explicitly renewed: `DeployService`/`DeployJob` submit the
+    update and return without polling to readiness (no `.Wait` on the LRO),
+    so a full deploy attempt is a handful of GCP API round-trips, not a
+    multi-minute wait — the TTL just bounds how long a *crashed* holder can
+    block a later legitimate attempt.
+  - The lock key is a fresh per-*attempt* token (`time.Now().UnixNano()`),
+    not the replica's holder identity — two concurrent attempts from the
+    very same replica must be just as mutually exclusive as two from
+    different replicas.
+  - A losing attempt gets `reconcile.ErrSyncInProgress`, surfaced by
+    `internal/api`'s `handleSync` as `409 Conflict` (the one `res.Err` case
+    specific enough to tell the caller about directly — see the existing
+    "res.Err mixes business-level and infra errors" comment there for why
+    every other case stays generic).
+  - Test: `TestManualSync_ConcurrentAttemptsOnSameUnitOneWins` (via a
+    `blockingCloudRun` fake that pins down exactly when `DeployService` is
+    in flight, so the second attempt's rejection is tested deterministically
+    rather than via a hopeful sleep), `TestManualSync_LockReleasedAfterAttemptCompletes`,
+    `TestHandleSync_LockedUnitReturns409`.
+
+- [x] **Full config/RBAC/notify hot-reload** — `runcd.yaml`'s
+  `defaults.managedFields` and `notify.*` (previously startup-only; RBAC
+  already hot-reloaded) now refresh on the same `RECONCILE_INTERVAL`
+  cadence as everything else. `internal/api.Handler.Reconciler` changed
+  from a plain `*reconcile.Reconciler` to an `*atomic.Pointer[reconcile.Reconciler]`
+  — hot-swapping the whole struct, not synchronizing individual fields, so
+  neither `internal/reconcile`'s package API nor its existing tests needed
+  to change at all.
+  - `cmd/controller/main.go`'s `reconcileLoop` compares the freshly loaded
+    `root.Notify`/`root.Defaults.ManagedFields` against what the
+    currently-stored `Reconciler` was built with (`reflect.DeepEqual`); only
+    on an actual change does it build a new `Reconciler` (a shallow copy —
+    `DB`/`CloudRun`/`Preconditions`/`Manifests`/`Workers` carry over
+    unchanged) and swap it in. Most ticks are a no-op here.
+  - `buildNotifier(db, root)` is the one place a `reconcile.Notifier` gets
+    constructed (startup and every hot-reload both call it) — assigning a
+    typed `*notify.Evaluator` to a `Notifier`-typed variable unconditionally
+    would make `r.Notifier == nil` false forever (a non-nil interface
+    holding a nil-webhook `Evaluator`), so the "no webhook configured -> nil"
+    branch has to live in exactly one function, not be duplicated at each
+    call site.
+  - `notify.Evaluator` has no in-memory state (debouncing lives in the
+    `notification_debounce` table) — confirmed before relying on "rebuild a
+    fresh one every time config changes" being safe.
 
 ## Infra / delivery
 
