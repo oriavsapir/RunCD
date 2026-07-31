@@ -39,6 +39,14 @@ func fakeAPI(t *testing.T) *httptest.Server {
 	mux.HandleFunc("POST /api/sync/example-prod-eu/locked-app", func(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "sync already in progress for this app/project", http.StatusConflict)
 	})
+	mux.HandleFunc("GET /api/units/example-prod-eu/widget-api/dry-run", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = fmt.Fprint(w, `{"app":"widget-api","project":"example-prod-eu","status":"OutOfSync","health":"Healthy","desiredImage":"sha256:cccc","liveImage":"sha256:dddd"}`)
+	})
+	mux.HandleFunc("GET /api/orphans", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = fmt.Fprint(w, `[{"project":"example-prod-eu","region":"us-central1","app":"leftover-app"}]`)
+	})
 	srv := httptest.NewServer(mux)
 	t.Cleanup(srv.Close)
 	return srv
@@ -113,6 +121,35 @@ func TestRun_Sync(t *testing.T) {
 	}
 	if !strings.Contains(stdout.String(), "status=Synced") {
 		t.Fatalf("expected sync result, got: %s", stdout.String())
+	}
+}
+
+func TestRun_SyncDryRun(t *testing.T) {
+	srv := fakeAPI(t)
+	t.Setenv("RUNCD_API_URL", srv.URL)
+	t.Setenv("RUNCD_IAP_AUDIENCE", "")
+
+	var stdout, stderr bytes.Buffer
+	if err := run([]string{"sync", "example-prod-eu", "widget-api", "--dry-run"}, &stdout, &stderr); err != nil {
+		t.Fatalf("run: %v", err)
+	}
+	out := stdout.String()
+	if !strings.Contains(out, "dry run") || !strings.Contains(out, "OutOfSync") {
+		t.Fatalf("expected dry-run preview output, got: %s", out)
+	}
+}
+
+func TestRun_Orphans(t *testing.T) {
+	srv := fakeAPI(t)
+	t.Setenv("RUNCD_API_URL", srv.URL)
+	t.Setenv("RUNCD_IAP_AUDIENCE", "")
+
+	var stdout, stderr bytes.Buffer
+	if err := run([]string{"orphans"}, &stdout, &stderr); err != nil {
+		t.Fatalf("run: %v", err)
+	}
+	if !strings.Contains(stdout.String(), "leftover-app") {
+		t.Fatalf("expected orphans table, got: %s", stdout.String())
 	}
 }
 

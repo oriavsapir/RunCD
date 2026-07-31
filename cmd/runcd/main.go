@@ -35,11 +35,13 @@ func main() {
 const usage = `runcd — CLI client for the runcd API
 
 Usage:
-  runcd units                    list every configured sync unit
-  runcd get <project> <app>      show one unit's desired-vs-live diff
-  runcd history <project> <app>  show sync history for one unit
-  runcd sync <project> <app>     trigger a manual sync
-  runcd rbac                     list configured RBAC roles
+  runcd units                          list every configured sync unit
+  runcd get <project> <app>            show one unit's desired-vs-live diff
+  runcd history <project> <app>        show sync history for one unit
+  runcd sync <project> <app>           trigger a manual sync
+  runcd sync <project> <app> --dry-run preview a sync without deploying anything
+  runcd rbac                           list configured RBAC roles
+  runcd orphans                        list live Cloud Run services absent from config
 
 Configuration (env vars):
   RUNCD_API_URL      required — base URL to call. If the dashboard is
@@ -130,9 +132,20 @@ func run(args []string, stdout, stderr io.Writer) error {
 		return nil
 
 	case "sync":
-		project, app, err := requireTwoArgs(rest, "sync <project> <app>")
+		positional, dryRun := extractFlag(rest, "--dry-run")
+		project, app, err := requireTwoArgs(positional, "sync <project> <app> [--dry-run]")
 		if err != nil {
 			return err
+		}
+		if dryRun {
+			ctx, cancel := context.WithTimeout(background, readTimeout)
+			defer cancel()
+			res, err := c.dryRun(ctx, project, app)
+			if err != nil {
+				return err
+			}
+			renderDryRun(stdout, res)
+			return nil
 		}
 		ctx, cancel := context.WithTimeout(background, syncTimeout)
 		defer cancel()
@@ -153,6 +166,16 @@ func run(args []string, stdout, stderr io.Writer) error {
 		renderRBAC(stdout, rules)
 		return nil
 
+	case "orphans":
+		ctx, cancel := context.WithTimeout(background, readTimeout)
+		defer cancel()
+		orphans, err := c.listOrphans(ctx)
+		if err != nil {
+			return err
+		}
+		renderOrphans(stdout, orphans)
+		return nil
+
 	default:
 		_, _ = fmt.Fprint(stderr, usage)
 		return fmt.Errorf("unknown command %q", cmd)
@@ -164,4 +187,19 @@ func requireTwoArgs(args []string, usage string) (string, string, error) {
 		return "", "", fmt.Errorf("usage: runcd %s", usage)
 	}
 	return args[0], args[1], nil
+}
+
+// extractFlag reports whether flag is present anywhere in args and returns
+// the remaining positional args with it removed — good enough for a single
+// boolean flag alongside two fixed positional args, not a general flag
+// parser.
+func extractFlag(args []string, flag string) (remaining []string, present bool) {
+	for _, a := range args {
+		if a == flag {
+			present = true
+			continue
+		}
+		remaining = append(remaining, a)
+	}
+	return remaining, present
 }

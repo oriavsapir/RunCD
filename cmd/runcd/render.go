@@ -77,6 +77,27 @@ func renderSyncResponse(w io.Writer, res syncResponse) {
 	_, _ = fmt.Fprintf(w, "%s/%s: status=%s health=%s\n", res.Project, res.App, res.Status, res.Health)
 }
 
+func renderDryRun(w io.Writer, res dryRunResponse) {
+	_, _ = fmt.Fprintf(w, "%s/%s (dry run — nothing was deployed)\n", res.Project, res.App)
+	_, _ = fmt.Fprintf(w, "Status:        %s\n", res.Status)
+	_, _ = fmt.Fprintf(w, "Health:        %s\n", res.Health)
+	_, _ = fmt.Fprintf(w, "Desired image: %s\n", orDash(res.DesiredImage))
+	_, _ = fmt.Fprintf(w, "Live image:    %s\n", orDash(res.LiveImage))
+}
+
+func renderOrphans(w io.Writer, orphans []orphan) {
+	if len(orphans) == 0 {
+		_, _ = fmt.Fprintln(w, "No orphaned services found — every live Cloud Run service scanned is declared in config.")
+		return
+	}
+	tw := newTabwriter(w)
+	_, _ = fmt.Fprintln(tw, "PROJECT\tREGION\tSERVICE")
+	for _, o := range orphans {
+		_, _ = fmt.Fprintf(tw, "%s\t%s\t%s\n", o.Project, o.Region, o.App)
+	}
+	_ = tw.Flush()
+}
+
 func orDash(s string) string {
 	if s == "" {
 		return "-"

@@ -58,6 +58,23 @@ type syncResponse struct {
 	Health  string `json:"health"`
 }
 
+// dryRunResponse mirrors internal/api/units.go's dryRunView JSON shape.
+type dryRunResponse struct {
+	App          string `json:"app"`
+	Project      string `json:"project"`
+	Status       string `json:"status"`
+	Health       string `json:"health"`
+	DesiredImage string `json:"desiredImage"`
+	LiveImage    string `json:"liveImage"`
+}
+
+// orphan mirrors internal/api/units.go's orphanView JSON shape.
+type orphan struct {
+	Project string `json:"project"`
+	Region  string `json:"region"`
+	App     string `json:"app"`
+}
+
 // apiError carries the HTTP status alongside the response body, so a
 // caller can distinguish e.g. 409 (sync already in progress) from a
 // genuine failure without string-matching the message.
@@ -153,6 +170,18 @@ func (c *client) sync(ctx context.Context, project, app string) (syncResponse, e
 	var res syncResponse
 	err := c.do(ctx, http.MethodPost, "/api/sync/"+url.PathEscape(project)+"/"+url.PathEscape(app), &res)
 	return res, err
+}
+
+func (c *client) dryRun(ctx context.Context, project, app string) (dryRunResponse, error) {
+	var res dryRunResponse
+	err := c.do(ctx, http.MethodGet, "/api/units/"+url.PathEscape(project)+"/"+url.PathEscape(app)+"/dry-run", &res)
+	return res, err
+}
+
+func (c *client) listOrphans(ctx context.Context) ([]orphan, error) {
+	var orphans []orphan
+	err := c.do(ctx, http.MethodGet, "/api/orphans", &orphans)
+	return orphans, err
 }
 
 // identityToken shells out to gcloud for a Google-signed identity token
