@@ -700,6 +700,23 @@ func TestHandleDryRun_UnknownUnitRejected(t *testing.T) {
 	}
 }
 
+// TestHandleDryRun_OutOfScopeSubjectForbidden guards against dry-run's own
+// review finding: it fires real Cloud Run/Pub-Sub calls, so it needs the
+// same RBAC gate as a real sync, not the open-to-any-authenticated-caller
+// posture the rest of the read views have.
+func TestHandleDryRun_OutOfScopeSubjectForbidden(t *testing.T) {
+	h, _ := newTestHandler(t)
+	srv := httptest.NewServer(NewMux(h))
+	defer srv.Close()
+
+	// dev-only@company.com is scoped to env:dev; widget-api/example-prod-eu is prd.
+	resp := getWithBearer(t, srv.URL+"/api/units/example-prod-eu/widget-api/dry-run", "dev-only-token")
+	defer func() { _ = resp.Body.Close() }()
+	if resp.StatusCode != http.StatusForbidden {
+		t.Fatalf("expected 403, got %d", resp.StatusCode)
+	}
+}
+
 // TestHandleMetrics_ReflectsSyncedUnitAndSyncEvent checks the /metrics
 // endpoint against the same data a manual sync just persisted — the
 // dashboard's own read views already prove ListApplications/SyncHistory

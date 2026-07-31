@@ -158,8 +158,15 @@ type dryRunView struct {
 // fetch/precondition/diff/health computation ManualSync does, but never
 // deploys and never touches the DB — safe to call right before a real sync,
 // or repeatedly, with no side effects.
+//
+// RBAC-checked like handleSync, unlike the rest of the read views: those
+// only ever read Postgres, but a dry run makes the same real Cloud
+// Run/Pub-Sub API calls a sync does — without this gate, any authenticated
+// caller (not just one with sync access to this app/project) could burn GCP
+// quota on demand with no rate limit.
 func (h *Handler) handleDryRun(w http.ResponseWriter, r *http.Request) {
-	if _, ok := verify(w, r, h.Auth); !ok {
+	email, ok := verify(w, r, h.Auth)
+	if !ok {
 		return
 	}
 
@@ -168,6 +175,11 @@ func (h *Handler) handleDryRun(w http.ResponseWriter, r *http.Request) {
 	unit, ok := h.Units.Find(app, project)
 	if !ok {
 		http.Error(w, "unknown app/project", http.StatusNotFound)
+		return
+	}
+
+	if !rbac.CanSync(h.RBAC.Get(), email, unit) {
+		http.Error(w, "forbidden: no role grants sync access to this app/project", http.StatusForbidden)
 		return
 	}
 

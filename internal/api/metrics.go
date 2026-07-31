@@ -4,6 +4,8 @@ import (
 	"context"
 	"fmt"
 	"net/http"
+	"sync"
+	"time"
 
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
@@ -12,6 +14,58 @@ import (
 	"go.opentelemetry.io/otel/metric"
 	sdkmetric "go.opentelemetry.io/otel/sdk/metric"
 )
+
+// metricsCacheTTL bounds how often a scrape actually re-queries Postgres.
+// sync_events is append-only and never pruned (§5.2) — SyncEventCounts'
+// GROUP BY is a full scan of an ever-growing table, so a scraper hitting
+// /metrics faster than this (Prometheus defaults to a 15s-60s
+// scrape_interval, but nothing stops a misconfigured one from polling much
+// faster) would otherwise re-scan the whole table on every single request.
+const metricsCacheTTL = 15 * time.Second
+
+// metricsSnapshot is what one (possibly cached) collection observes.
+type metricsSnapshot struct {
+	statusCounts map[string]int64
+	healthCounts map[string]int64
+	eventCounts  []SyncEventCount
+}
+
+// metricsCache serves a single snapshot to every collection within
+// metricsCacheTTL of the last real query, instead of re-querying per
+// scrape.
+type metricsCache struct {
+	mu        sync.Mutex
+	expiresAt time.Time
+	snapshot  metricsSnapshot
+}
+
+func (c *metricsCache) get(ctx context.Context, status StatusStore) (metricsSnapshot, error) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if time.Now().Before(c.expiresAt) {
+		return c.snapshot, nil
+	}
+
+	rows, err := status.ListApplications(ctx)
+	if err != nil {
+		return metricsSnapshot{}, fmt.Errorf("metrics: list applications: %w", err)
+	}
+	statusCounts := map[string]int64{}
+	healthCounts := map[string]int64{}
+	for _, row := range rows {
+		statusCounts[row.Status]++
+		healthCounts[row.Health]++
+	}
+
+	eventCounts, err := status.SyncEventCounts(ctx)
+	if err != nil {
+		return metricsSnapshot{}, fmt.Errorf("metrics: sync event counts: %w", err)
+	}
+
+	c.snapshot = metricsSnapshot{statusCounts: statusCounts, healthCounts: healthCounts, eventCounts: eventCounts}
+	c.expiresAt = time.Now().Add(metricsCacheTTL)
+	return c.snapshot, nil
+}
 
 // NewMetricsHandler wires OTel metric instruments — status/health snapshot
 // gauges and a cumulative sync-events counter — to callbacks that read the
@@ -54,29 +108,19 @@ func NewMetricsHandler(status StatusStore) (http.Handler, error) {
 		return nil, fmt.Errorf("create runcd_sync_events_total: %w", err)
 	}
 
+	cache := &metricsCache{}
 	_, err = meter.RegisterCallback(func(ctx context.Context, o metric.Observer) error {
-		rows, err := status.ListApplications(ctx)
+		snap, err := cache.get(ctx, status)
 		if err != nil {
-			return fmt.Errorf("metrics: list applications: %w", err)
+			return err
 		}
-		statusCounts := map[string]int64{}
-		healthCounts := map[string]int64{}
-		for _, row := range rows {
-			statusCounts[row.Status]++
-			healthCounts[row.Health]++
-		}
-		for s, c := range statusCounts {
+		for s, c := range snap.statusCounts {
 			o.ObserveInt64(syncStatus, c, metric.WithAttributes(attribute.String("status", s)))
 		}
-		for h, c := range healthCounts {
+		for h, c := range snap.healthCounts {
 			o.ObserveInt64(healthStatus, c, metric.WithAttributes(attribute.String("health", h)))
 		}
-
-		eventCounts, err := status.SyncEventCounts(ctx)
-		if err != nil {
-			return fmt.Errorf("metrics: sync event counts: %w", err)
-		}
-		for _, ec := range eventCounts {
+		for _, ec := range snap.eventCounts {
 			o.ObserveInt64(syncEvents, ec.Count,
 				metric.WithAttributes(attribute.String("trigger", ec.Trigger), attribute.String("result", ec.Result)))
 		}

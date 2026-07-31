@@ -46,6 +46,15 @@ func readLimited(r io.Reader) ([]byte, error) {
 	return body, nil
 }
 
+// decodeJSONLimited decodes a JSON response body into out, capped at
+// maxResponseBytes — the same size guard readLimited gives the raw-bytes
+// paths (manifest fetch, error bodies), applied to the success-path JSON
+// decodes (installation lookup, token mint) that would otherwise stream an
+// unbounded response straight into json.Decoder.
+func decodeJSONLimited(r io.Reader, out any) error {
+	return json.NewDecoder(io.LimitReader(r, maxResponseBytes+1)).Decode(out)
+}
+
 // Client mints short-lived GitHub App installation tokens (cached per repo)
 // and uses them to read files from arbitrary repos the app is installed on.
 type Client struct {
@@ -263,7 +272,7 @@ func (c *Client) installationID(ctx context.Context, jwt, owner, repo string) (i
 		return 0, fmt.Errorf("find installation for %s/%s: %s: %s", owner, repo, resp.Status, body)
 	}
 	var out installationResponse
-	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
+	if err := decodeJSONLimited(resp.Body, &out); err != nil {
 		return 0, fmt.Errorf("decode installation response: %w", err)
 	}
 	return out.ID, nil
@@ -294,7 +303,7 @@ func (c *Client) mintToken(ctx context.Context, jwt string, installationID int64
 		return "", time.Time{}, fmt.Errorf("mint installation token: %s: %s", resp.Status, body)
 	}
 	var out installationTokenResponse
-	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
+	if err := decodeJSONLimited(resp.Body, &out); err != nil {
 		return "", time.Time{}, fmt.Errorf("decode installation token response: %w", err)
 	}
 	return out.Token, out.ExpiresAt, nil
