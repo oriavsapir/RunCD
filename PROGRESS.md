@@ -1019,6 +1019,166 @@ wiring and dynamicUnits notes above) are now closed.
     `notification_debounce` table) — confirmed before relying on "rebuild a
     fresh one every time config changes" being safe.
 
+## Phase 6 — ArgoCD-informed roadmap items: sync windows, dry-run, exclusions, metrics, prune
+
+Five items from the wiki's Roadmap page's "Now" tier, all landed together.
+
+- [x] **Sync windows** (`config.SyncWindow`, `environments[env].sync.syncWindows`)
+  — allow/deny + day-of-week/UTC-hour schedule, no cron dependency (a
+  weekday-name list + `startHour`/`endHour` in `[0,24]`, equal-and-nonzero
+  rejected at parse time as an almost-certain typo for a narrow window
+  rather than the deliberate all-day default `0`/`0` means). Merges like
+  every other `SyncPolicy` field (`environments[env]` replaces
+  `defaults.sync.syncWindows` wholesale if set at all, not merged
+  entry-by-entry). Gates **auto-sync only** — `reconcile.go`'s
+  `applyLiveState` checks `config.WindowsAllow` only on the
+  `OutOfSync && autoSyncEnabled` branch; a manual (forced) sync always
+  bypasses it, matching the roadmap's own "auto-sync only allow/deny"
+  framing. `now` is computed once per `RunOnce`/`ManualSync`/`DryRun` pass
+  (`Reconciler.Now`, an injectable clock defaulting to `time.Now`) rather
+  than per-unit inside `applyLiveState`, so one pass gives every unit a
+  reproducible answer even straddling a window boundary.
+  - Test: `go test ./internal/config/... -run SyncWindow -v` (day/hour
+    matching, deny-wins-over-allow, overnight wraparound, the
+    ambiguous-equal-hours rejection), `go test ./internal/reconcile/... -run
+    DeniedSyncWindow -v` (a deny window blocks `RunOnce`'s auto path but not
+    a forced `ManualSync`).
+
+- [x] **Dry-run / diff preview** (`reconcile.Reconciler.DryRun`,
+  `GET /api/units/{project}/{app}/dry-run`) — the same
+  fetch/precondition-check/diff/health computation `ManualSync` does,
+  gated by a `dryRun` flag in `syncOptions` checked *before* `force` in
+  `applyLiveState`'s `shouldDeploy` — so a dry run never reaches
+  `deploySyncUnit`, never takes the `sync_locks` row, never upserts
+  `applications`, never writes `sync_events`. RBAC-checked identically to
+  `handleSync` (not open like the rest of the read views): it makes the
+  same real Cloud Run/Pub-Sub API calls a sync does, so an unscoped caller
+  shouldn't be able to trigger them on demand. `cmd/runcd`:
+  `runcd sync <project> <app> --dry-run` calls this instead of a real sync.
+  - Test: `TestDryRun_ComputesResultWithoutDeployingOrPersisting`,
+    `TestDryRun_DoesNotBlockAConcurrentRealSync` (asserts zero rows in
+    `applications`/`sync_locks`/`sync_events` after a dry run, and that a
+    real `ManualSync` on the same unit right after isn't blocked),
+    `TestHandleDryRun_ReportsOutOfSyncWithoutDeployingOrPersisting`,
+    `TestHandleDryRun_OutOfScopeSubjectForbidden`.
+
+- [x] **Resource exclusions** (`config.App.IgnoreFields`/`.IgnorePreconditions`)
+  — a per-app override subtracting from `defaults.managedFields` (validated
+  against the same known-field set as `defaults.managedFields` itself) or
+  skipping named `"type:name"` `requires` entries (e.g.
+  `"pubsubTopic:orders-events"`). The effective field set is computed
+  **once** in `reconcile()` (`effectiveManagedFields`) and threaded
+  explicitly through both `applyLiveState`'s pre-deploy diff and
+  `deploySyncUnit`'s post-deploy re-diff — previously-hypothetical bug
+  class avoided: if each read `r.ManagedFields` independently, a unit's
+  `ignoreFields` could apply inconsistently between the two checks and
+  land on a wrong final status.
+  - Test: `TestRunOnce_IgnoreFieldsExcludesFieldFromDiff` (a real traffic
+    mismatch the unit ignores never even reaches `OutOfSync`),
+    `TestRunOnce_IgnorePreconditionsSkipsNamedPrecondition`,
+    `TestEffectiveManagedFields`, `TestFilterPreconditions`,
+    `TestParse_AppIgnoreFieldsRejectsUnknownField`.
+
+- [x] **Metrics endpoint** (`GET /metrics`, `internal/api/metrics.go`) —
+  OTel SDK instruments (`go.opentelemetry.io/otel/sdk/metric` +
+  `.../exporters/prometheus`, a new dependency), not a hand-rolled
+  exposition-format writer: `runcd_sync_status_total`/
+  `runcd_health_status_total` (observable gauges) and
+  `runcd_sync_events_total` (observable counter), all callback-driven —
+  read from Postgres at collection time, never incremented in-process,
+  since `applications`/`sync_events` are shared across every controller
+  replica and a per-replica in-memory tally would reset on restart and
+  disagree between replicas. A dedicated `prometheus.Registry` per
+  `NewMetricsHandler` call (not the global default one), so multiple
+  `Handler`s (every test fixture) don't panic on a duplicate collector.
+  Deliberately unauthenticated — matches the controller's existing no-IAP
+  posture (Cloud Run IAM invoker gates who reaches it at all; a scraper
+  generally carries no IAP/OAuth identity to check anyway). A 15s TTL
+  cache in front of the underlying queries bounds real Postgres reads to
+  at most once per window regardless of scrape frequency — `sync_events`
+  is append-only and never pruned, so its `GROUP BY` is a full scan that
+  would otherwise re-run on every single scrape.
+  - Test: `TestHandleMetrics_ReflectsSyncedUnitAndSyncEvent`,
+    `TestHandleMetrics_RequiresNoAuth`.
+
+- [x] **Prune / orphan detection** (`cloudrun.AdminClient.ListServiceNames`,
+  `reconcile.Reconciler.DetectOrphans`, `GET /api/orphans`) — read-only:
+  nothing is ever deleted, this only flags. `ListServiceNames` (real impl
+  in `GCPAdminClient`, via Cloud Run Admin API v2's `ListServices`) covers
+  services only, not jobs/workerPools — a deliberately narrower first cut.
+  `DetectOrphans` groups current sync units by `(project, region)`, lists
+  live services per distinct pair, and flags any live service name no
+  current unit declares there.
+  - **Documented scope limitation**: only `(project, region)` pairs a
+    *surviving* unit still targets are scanned — if every app for a
+    project is removed from `runcd.yaml` in the same change, that
+    project's own orphans go undetected (nothing in the expanded unit set
+    still points at it). Closing that gap needs the full `config.Root`
+    (every `environments[env].projects` entry, independent of whether an
+    app still references it), a larger change than "even just flagging"
+    (the roadmap's own bar) requires.
+  - Test: `TestDetectOrphans_FlagsLiveServiceAbsentFromUnits`,
+    `TestDetectOrphans_NoOrphansWhenEveryLiveServiceIsDeclared`,
+    `TestDetectOrphans_ScansEachDistinctProjectRegionOnce`,
+    `TestHandleOrphans_FlagsLiveServiceAbsentFromConfig`. `cmd/runcd`:
+    `runcd orphans` lists the result as a table.
+
+## Bugs found and fixed in a seventh review pass
+
+Findings against the Phase 6 work above, all verified against the actual
+source before fixing.
+
+- [x] **Unbounded response reads from GitHub** (`internal/githubapp/githubapp.go`)
+  — every GitHub API response (manifest content, error bodies, and — missed
+  in an earlier pass at the same file — the success-path JSON decodes for
+  the installation lookup and token mint) was read with no size cap; a
+  huge or malicious response could OOM every replica mid reconcile pass.
+  Fixed: a shared `readLimited`/`decodeJSONLimited` pair, both wrapping
+  `io.LimitReader` at a 10 MiB ceiling.
+- [x] **Dry-run had no RBAC gate** (`internal/api/units.go`) — see Phase 6's
+  dry-run entry above; fixed in the same pass this was found.
+- [x] **`/metrics` re-scanned `sync_events` on every scrape** — see Phase 6's
+  metrics entry above; fixed with the 15s TTL cache.
+- [x] **IAP JWKS fetch had no client-level timeout** (`internal/auth/auth.go`)
+  — `oidc.NewRemoteKeySet` used `http.DefaultClient` (unbounded); a stalled
+  `gstatic.com` fetch could pile up request-handling goroutines. Fixed: a
+  10s-timeout client threaded through `oidc.ClientContext`.
+- [x] **Logging switched to structured JSON** (`log/slog` + `slog.NewJSONHandler`,
+  set once in `cmd/controller/main.go`'s `main()`) — every prior
+  `log.Printf` call site now uses `slog` with structured key-value args;
+  Cloud Logging ingests this as `jsonPayload` with real severity levels
+  instead of an opaque `textPayload` line. Incidentally subsumes the `%q`
+  log-injection workarounds several call sites needed before (slog's JSON
+  encoding of each field neutralizes that regardless of content).
+- [x] **Dashboard: one failing fetch blanked sibling sections**
+  (`web/src/app/settings/page.tsx`, `web/src/app/units/[project]/[app]/page.tsx`)
+  — `Promise.all` rejecting wholesale meant a single failed call (e.g.
+  `/api/rbac` 500) left every section's state `null` forever, not just the
+  failing one's. Fixed: `Promise.allSettled`, each section's state/error
+  applied independently.
+- [x] **Sync-window equal start/end hour was a silent full-day blackout**
+  (`internal/config/config.go`) — `{startHour:5,endHour:5}` (a plausible
+  typo) meant "all day," identical to the deliberate `0`/`0` default, with
+  no validation warning. Fixed: rejected at parse time unless both are
+  literally `0`.
+- [x] **Filter input had no accessible name** (`web/src/app/page.tsx`) —
+  placeholder-only, unlike the adjacent view-toggle buttons which use
+  `aria-label`. Fixed: added one.
+- **Deferred, not fixed in this pass** (real design decisions, not
+  mechanical): CLI JSON output mode / `FinishedAt` rendering in
+  `runcd history`, dashboard auto-refresh/polling (possibly intentional
+  given the stdlib-first philosophy — worth confirming with whoever owns
+  that tradeoff), a rate limit on the dry-run endpoint specifically (it
+  shares its live-GCP-call cost profile with `ManualSync`, which has no
+  rate limit either — the RBAC gate added above gives it the same access
+  control, not a cost bound), Settings page's per-environment auto-sync
+  ratio (reported as dividing by distinct app names rather than sync
+  units — flagged, not independently re-verified against current code),
+  `DiffView`'s image-only comparison not reflecting `ignoreFields`/
+  `ignorePreconditions` in what it renders, no visible success feedback on
+  the Sync button, no loading/disabled state on the page-level Refresh
+  button, unmemoized stat-tile filtering on every keystroke.
+
 ## Infra / delivery
 
 - [x] **Dockerfile** — multi-stage (`golang:1.26-alpine` build →

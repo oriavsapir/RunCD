@@ -42,8 +42,9 @@ below.
 
 `cmd/runcd/main.go` — a small CLI client for the same HTTP API the
 dashboard uses (`internal/api`): list units, show a diff, view history,
-trigger a sync, list RBAC roles. Independent of the dashboard/controller
-processes — just an HTTP client with its own copy of the JSON shapes (same
+trigger a sync (or preview one with `--dry-run`), list RBAC roles, list
+orphaned services. Independent of the dashboard/controller processes —
+just an HTTP client with its own copy of the JSON shapes (same
 relationship `web/src/lib/types.ts` has). Auth: shells out to `gcloud auth
 print-identity-token` when `RUNCD_IAP_AUDIENCE` is set.
 
@@ -59,11 +60,11 @@ print-identity-token` when `RUNCD_IAP_AUDIENCE` is set.
 - `precondition` — `Checker` interface; `GCPChecker` is the real Pub/Sub-backed implementation
 - `diff` — computes Synced/OutOfSync status from desired vs. live state
 - `health` — assesses Healthy/Degraded per resource type (service/job/workerPool)
-- `reconcile` — the core loop: fetch → diff → precondition-gate → deploy → re-fetch → persist → notify. Writes `sync_events` as an audit trail. A per-unit TTL lock (`sync_locks` table) serializes a manual sync against the auto-reconcile loop (or two concurrent manual syncs) deploying the same unit at once — a losing attempt gets `ErrSyncInProgress`.
+- `reconcile` — the core loop: fetch → diff → precondition-gate (respecting each app's `ignorePreconditions`) → sync-window check (auto-sync only) → deploy → re-fetch → persist → notify. Writes `sync_events` as an audit trail. A per-unit TTL lock (`sync_locks` table) serializes a manual sync against the auto-reconcile loop (or two concurrent manual syncs) deploying the same unit at once — a losing attempt gets `ErrSyncInProgress`. `DryRun` runs the same fetch/diff/health path with deploy short-circuited, no lock taken, nothing persisted. `DetectOrphans` lists live Cloud Run services per project/region a unit still targets and flags any not declared by a current unit there (prune, read-only).
 - `rbac` — role/scope matching (`env:x`, `app:x@project`) for who may trigger a manual sync
 - `auth` — identity verification. `IAPAuthenticator` (default, wired in `main.go`) verifies Identity-Aware Proxy's signed assertion header, defense-in-depth on top of IAP/IAM actually gating access; `GoogleAuthenticator` (direct Google OAuth token) is kept as an option for non-IAP deployments but not wired by default.
 - `notify` — Slack notifications on sync-failed / health-degraded / stuck-out-of-sync, debounced via a Postgres transaction (commits the debounce claim only after the send succeeds)
-- `api` — HTTP handlers: `GET /api/units` (list), `GET /api/units/{project}/{app}` (detail/diff), `GET /api/units/{project}/{app}/history` (sync_events), `GET /api/rbac` (configured roles), `POST /api/sync/{project}/{app}` (manual sync). Read endpoints are open to any authenticated caller; only sync is RBAC-gated. Go 1.22+ pattern routing. `Handler.Reconciler` is an `*atomic.Pointer[reconcile.Reconciler]`, not a plain pointer — swappable so a config hot-reload doesn't race a concurrent manual sync.
+- `api` — HTTP handlers: `GET /api/units` (list), `GET /api/units/{project}/{app}` (detail/diff), `GET /api/units/{project}/{app}/history` (sync_events), `GET /api/units/{project}/{app}/dry-run` (preview a sync without deploying), `GET /api/rbac` (configured roles), `GET /api/config` (runtime config), `GET /api/orphans` (prune/orphan detection), `POST /api/sync/{project}/{app}` (manual sync), `GET /metrics` (OTel-backed Prometheus exposition). Read endpoints are open to any authenticated caller; sync and dry-run are RBAC-gated (dry-run makes the same real Cloud Run/Pub-Sub calls a sync does, so it needs the same gate — unlike the rest of the reads, which only touch Postgres). `/metrics` is the one unauthenticated route, matching the controller's no-IAP posture. Go 1.22+ pattern routing. `Handler.Reconciler` is an `*atomic.Pointer[reconcile.Reconciler]`, not a plain pointer — swappable so a config hot-reload doesn't race a concurrent manual sync.
 
 `web/` — the Next.js dashboard (Phase 4). App Router, TypeScript, Tailwind
 CSS v4, shadcn/ui + lucide-react. Calls the Go API same-origin
@@ -105,7 +106,9 @@ Phases 0–4 are all done (foundations, reconcile loop, job/worker-pool
 support, sync+audit trail, gated sync/RBAC/notifications, live GCP/GitHub
 wiring, IAP auth, Next.js dashboard, dashboard settings page). Phase 5
 (schema migrations applied on boot, full config/RBAC/notify hot-reload, a
-real per-unit deploy lock) is also done — see `PROGRESS.md` for what's
-still explicitly deferred (a handful of smaller flagged-not-fixed items
-from the review passes, plus deploy-time steps like actually enabling IAP/
-IAM DB auth on the real infra, which aren't code in this repo).
+real per-unit deploy lock) is also done. Phase 6 (sync windows, dry-run
+preview, per-app resource exclusions, an OTel-backed `/metrics` endpoint,
+prune/orphan detection) is also done — see `PROGRESS.md` for what's still
+explicitly deferred (a handful of smaller flagged-not-fixed items from the
+review passes, plus deploy-time steps like actually enabling IAP/IAM DB
+auth on the real infra, which aren't code in this repo).
