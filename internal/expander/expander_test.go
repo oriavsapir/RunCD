@@ -3,7 +3,7 @@ package expander
 import (
 	"testing"
 
-	"github.com/argorun/argorun/internal/config"
+	"github.com/runcd/runcd/internal/config"
 )
 
 func rootFixture(t *testing.T) *config.Root {

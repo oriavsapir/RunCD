@@ -11,8 +11,8 @@ import (
 	"fmt"
 	"time"
 
-	"github.com/argorun/argorun/internal/config"
-	"github.com/argorun/argorun/internal/reconcile"
+	"github.com/runcd/runcd/internal/config"
+	"github.com/runcd/runcd/internal/reconcile"
 )
 
 // DefaultDebounceInterval matches §5.8's default: at most once per hour per
@@ -66,7 +66,7 @@ func (e *Evaluator) evalSyncFailed(ctx context.Context, res reconcile.Result, _ 
 	if !res.DeployFailed {
 		return nil
 	}
-	msg := fmt.Sprintf("argorun: sync failed for %s in %s: %s", res.Unit.App, res.Unit.Project, res.FailureMessage)
+	msg := fmt.Sprintf("runcd: sync failed for %s in %s: %s", res.Unit.App, res.Unit.Project, res.FailureMessage)
 	return e.maybeNotify(ctx, res, "syncFailed", msg)
 }
 
@@ -77,7 +77,7 @@ func (e *Evaluator) evalHealthDegraded(ctx context.Context, res reconcile.Result
 	if time.Since(res.HealthSince) < time.Duration(*rule.ForMinutes)*time.Minute {
 		return nil
 	}
-	msg := fmt.Sprintf("argorun: %s in %s has been Degraded since %s", res.Unit.App, res.Unit.Project, res.HealthSince.Format(time.RFC3339))
+	msg := fmt.Sprintf("runcd: %s in %s has been Degraded since %s", res.Unit.App, res.Unit.Project, res.HealthSince.Format(time.RFC3339))
 	// Fold the threshold into the debounce key: two healthDegraded rules
 	// with different forMinutes (e.g. an early warning plus an escalation)
 	// must debounce independently, not collide on one "healthDegraded" row.
@@ -91,7 +91,7 @@ func (e *Evaluator) evalOutOfSyncGated(ctx context.Context, res reconcile.Result
 	if time.Since(res.StatusSince) < time.Duration(*rule.ForHours)*time.Hour {
 		return nil
 	}
-	msg := fmt.Sprintf("argorun: gated sync unit %s in %s has been OutOfSync since %s", res.Unit.App, res.Unit.Project, res.StatusSince.Format(time.RFC3339))
+	msg := fmt.Sprintf("runcd: gated sync unit %s in %s has been OutOfSync since %s", res.Unit.App, res.Unit.Project, res.StatusSince.Format(time.RFC3339))
 	return e.maybeNotify(ctx, res, fmt.Sprintf("outOfSyncGated:%d", *rule.ForHours), msg)
 }
 

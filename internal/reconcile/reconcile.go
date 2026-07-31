@@ -15,13 +15,13 @@ import (
 
 	"golang.org/x/sync/errgroup"
 
-	"github.com/argorun/argorun/internal/cloudrun"
-	"github.com/argorun/argorun/internal/config"
-	"github.com/argorun/argorun/internal/diff"
-	"github.com/argorun/argorun/internal/expander"
-	"github.com/argorun/argorun/internal/health"
-	"github.com/argorun/argorun/internal/manifest"
-	"github.com/argorun/argorun/internal/precondition"
+	"github.com/runcd/runcd/internal/cloudrun"
+	"github.com/runcd/runcd/internal/config"
+	"github.com/runcd/runcd/internal/diff"
+	"github.com/runcd/runcd/internal/expander"
+	"github.com/runcd/runcd/internal/health"
+	"github.com/runcd/runcd/internal/manifest"
+	"github.com/runcd/runcd/internal/precondition"
 )
 
 // DefaultWorkers matches §5.4's default bounded worker pool size.
@@ -36,7 +36,7 @@ type ManifestSource interface {
 
 // Status values a sync unit's applications row can land on. Invalid covers
 // both a non-digest-pinned manifest (§7) and a failed precondition — in
-// both cases the unit can never sync until something outside argorun is
+// both cases the unit can never sync until something outside runcd is
 // fixed, so it's surfaced the same way rather than as ordinary drift.
 const (
 	StatusInvalid = "Invalid"
@@ -180,7 +180,7 @@ type syncOptions struct {
 }
 
 func (r *Reconciler) reconcileOne(ctx context.Context, unit expander.SyncUnit) Result {
-	return r.reconcile(ctx, unit, syncOptions{trigger: "auto", actor: "argorun-controller"})
+	return r.reconcile(ctx, unit, syncOptions{trigger: "auto", actor: "runcd-controller"})
 }
 
 func (r *Reconciler) reconcile(ctx context.Context, unit expander.SyncUnit, opts syncOptions) Result {

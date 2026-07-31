@@ -1,4 +1,4 @@
-# argorun
+# runcd
 
 ArgoCD-equivalent for Google Cloud Run: reconciles declared manifests against
 live Cloud Run services/jobs/worker-pools, gated by preconditions and RBAC.
@@ -35,11 +35,11 @@ is or isn't built.
 `cmd/controller/main.go` — entrypoint. Leader-gates the auto-reconcile loop
 (only the leader deploys; a `leadershipContext` cancels in-flight work the
 instant leadership is lost), serves the manual-sync + dashboard-read API on
-every replica, loads `argorun.yaml`/`rbac.yaml` from GitHub via the App
+every replica, loads `runcd.yaml`/`rbac.yaml` from GitHub via the App
 client.
 
 `internal/`, roughly in dependency order:
-- `config` — parses `argorun.yaml` (environments, apps, notify rules), validates references
+- `config` — parses `runcd.yaml` (environments, apps, notify rules), validates references
 - `manifest` — per-app manifest format (§5.1), digest-pin validation
 - `expander` — expands config into `SyncUnit`s (one per app × environment)
 - `store` — Postgres schema/migrations (`migrations/*.sql`, embedded via `schema.go`)

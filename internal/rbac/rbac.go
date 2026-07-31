@@ -8,10 +8,11 @@ package rbac
 import (
 	"fmt"
 	"strings"
+	"sync/atomic"
 
 	"gopkg.in/yaml.v3"
 
-	"github.com/argorun/argorun/internal/expander"
+	"github.com/runcd/runcd/internal/expander"
 )
 
 type Role string
@@ -71,6 +72,25 @@ func CanSync(cfg *Config, subject string, unit expander.SyncUnit) bool {
 	}
 	return false
 }
+
+// Store holds a *Config that can be swapped out for a freshly-loaded one
+// without disrupting concurrent readers — config hot-reload (§8: RBAC
+// changes take effect on the next config poll, no controller restart)
+// refreshes it from a background goroutine while API handlers read it per
+// request.
+type Store struct {
+	v atomic.Pointer[Config]
+}
+
+func NewStore(cfg *Config) *Store {
+	s := &Store{}
+	s.Set(cfg)
+	return s
+}
+
+func (s *Store) Set(cfg *Config) { s.v.Store(cfg) }
+
+func (s *Store) Get() *Config { return s.v.Load() }
 
 func scopeMatches(scope string, unit expander.SyncUnit) bool {
 	if scope == "*" {

@@ -1,4 +1,4 @@
-// Command controller is the argorun-controller entrypoint: leader election
+// Command controller is the runcd-controller entrypoint: leader election
 // gates the auto-reconcile loop (only the leader deploys), while every
 // replica serves the manual-sync API (§5.3/§5.4/§5.9).
 package main
@@ -21,18 +21,18 @@ import (
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/stdlib"
 
-	"github.com/argorun/argorun/internal/api"
-	"github.com/argorun/argorun/internal/auth"
-	"github.com/argorun/argorun/internal/cloudrun"
-	"github.com/argorun/argorun/internal/config"
-	"github.com/argorun/argorun/internal/expander"
-	"github.com/argorun/argorun/internal/githubapp"
-	"github.com/argorun/argorun/internal/gitsource"
-	"github.com/argorun/argorun/internal/leader"
-	"github.com/argorun/argorun/internal/notify"
-	"github.com/argorun/argorun/internal/precondition"
-	"github.com/argorun/argorun/internal/rbac"
-	"github.com/argorun/argorun/internal/reconcile"
+	"github.com/runcd/runcd/internal/api"
+	"github.com/runcd/runcd/internal/auth"
+	"github.com/runcd/runcd/internal/cloudrun"
+	"github.com/runcd/runcd/internal/config"
+	"github.com/runcd/runcd/internal/expander"
+	"github.com/runcd/runcd/internal/githubapp"
+	"github.com/runcd/runcd/internal/gitsource"
+	"github.com/runcd/runcd/internal/leader"
+	"github.com/runcd/runcd/internal/notify"
+	"github.com/runcd/runcd/internal/precondition"
+	"github.com/runcd/runcd/internal/rbac"
+	"github.com/runcd/runcd/internal/reconcile"
 )
 
 func main() {
@@ -133,15 +133,15 @@ func run() error {
 	if err != nil {
 		return err
 	}
-	configRepo, err := requiredEnv("ARGORUN_CONFIG_REPO")
+	configRepo, err := requiredEnv("RUNCD_CONFIG_REPO")
 	if err != nil {
 		return err
 	}
-	configBranch, err := requiredEnv("ARGORUN_CONFIG_BRANCH")
+	configBranch, err := requiredEnv("RUNCD_CONFIG_BRANCH")
 	if err != nil {
 		return err
 	}
-	configPath, err := requiredEnv("ARGORUN_CONFIG_PATH")
+	configPath, err := requiredEnv("RUNCD_CONFIG_PATH")
 	if err != nil {
 		return err
 	}
@@ -194,6 +194,7 @@ func run() error {
 		log.Printf("startup: %v — manual sync will be denied until %s exists", err, rbacPath)
 		rbacCfg = &rbac.Config{}
 	}
+	rbacStore := rbac.NewStore(rbacCfg)
 
 	cloudRun := cloudrun.NewGCPAdminClient()
 	defer func() { _ = cloudRun.Close() }()
@@ -224,7 +225,7 @@ func run() error {
 
 	handler := &api.Handler{
 		Auth:       iapAuth,
-		RBAC:       rbacCfg,
+		RBAC:       rbacStore,
 		Units:      dynUnits,
 		Status:     &api.PostgresStatusStore{DB: db},
 		Reconciler: reconciler,
@@ -255,7 +256,7 @@ func run() error {
 
 	go func() {
 		defer wg.Done()
-		reconcileLoop(ctx, reconcileInterval, lc, ghClient, cfgSrc, reconciler, dynUnits)
+		reconcileLoop(ctx, reconcileInterval, lc, ghClient, cfgSrc, reconciler, dynUnits, rbacStore)
 	}()
 
 	// A bind/serve failure (e.g. the port is already taken) is fatal, not a
@@ -396,9 +397,10 @@ func loadRBAC(ctx context.Context, gh *githubapp.Client, cs configSource) (*rbac
 
 // dynamicUnits is a UnitLookup refreshed every reconcile pass, so a newly
 // added app is reachable by the manual-sync API without a controller
-// restart. RBAC/notify config and managedFields are only read at startup —
-// ponytail: restart to pick those up, add a full config-hot-reload path if
-// that friction matters later.
+// restart. RBAC is refreshed on the same cadence (see reconcileLoop); notify
+// config and managedFields are still only read at startup — ponytail:
+// restart to pick those up, they change far less often than "who can sync
+// what."
 type dynamicUnits struct {
 	mu    sync.RWMutex
 	units map[string]expander.SyncUnit
@@ -432,7 +434,7 @@ func (d *dynamicUnits) List() []expander.SyncUnit {
 	return out
 }
 
-func reconcileLoop(ctx context.Context, interval time.Duration, lc *leadershipContext, gh *githubapp.Client, cs configSource, reconciler *reconcile.Reconciler, units *dynamicUnits) {
+func reconcileLoop(ctx context.Context, interval time.Duration, lc *leadershipContext, gh *githubapp.Client, cs configSource, reconciler *reconcile.Reconciler, units *dynamicUnits, rbacStore *rbac.Store) {
 	ticker := time.NewTicker(interval)
 	defer ticker.Stop()
 	for {
@@ -447,6 +449,16 @@ func reconcileLoop(ctx context.Context, interval time.Duration, lc *leadershipCo
 			}
 			units.set(expanded)
 
+			// A missing/invalid rbac.yaml here doesn't fail closed to empty
+			// like the startup path does — that would silently revoke every
+			// existing grant on a transient fetch error. Keep serving the
+			// last-known-good rules and just log it.
+			if newRBAC, err := loadRBAC(ctx, gh, cs); err != nil {
+				log.Printf("reconcile: reload %s: %v", cs.rbacPath, err)
+			} else {
+				rbacStore.Set(newRBAC)
+			}
+
 			// passCtx is this leadership term's context, not the raw ctx —
 			// if leadership is lost partway through RunOnce, passCtx is
 			// cancelled and in-flight work for this pass aborts.
@@ -454,8 +466,19 @@ func reconcileLoop(ctx context.Context, interval time.Duration, lc *leadershipCo
 			if passCtx.Err() != nil {
 				continue // not leader
 			}
-			if _, err := reconciler.RunOnce(passCtx, expanded); err != nil {
+			results, err := reconciler.RunOnce(passCtx, expanded)
+			if err != nil {
 				log.Printf("reconcile: run once: %v", err)
+			}
+			// RunOnce's own error is just the first of possibly several
+			// concurrent failures with no unit attribution (see its comment) —
+			// without this, a unit landing on Invalid/Missing is otherwise
+			// silent: the reason lives only in the applications table's
+			// status column, never in the logs.
+			for _, res := range results {
+				if res.Err != nil {
+					log.Printf("reconcile %s/%s: %v", res.Unit.App, res.Unit.Project, res.Err)
+				}
 			}
 		}
 	}

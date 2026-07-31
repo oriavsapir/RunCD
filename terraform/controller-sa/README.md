@@ -1,9 +1,9 @@
 # controller-sa
 
-Provisions argorun's shared controller service account (§5.5): one identity,
+Provisions runcd's shared controller service account (§5.5): one identity,
 granted `roles/run.developer` directly in every target project it manages —
 not a dedicated per-project runner SA. Adding a project to
-`environments[env].projects` in `argorun.yaml` corresponds to adding it to
+`environments[env].projects` in `runcd.yaml` corresponds to adding it to
 `target_projects` here.
 
 **Status:** module shape only. Not yet invoked against a real management or
@@ -29,7 +29,7 @@ directly, only through a caller).
 | Name | Description | Type | Default |
 |------|-------------|------|---------|
 | `management_project_id` | GCP project that owns the controller's shared service account. | `string` | n/a |
-| `service_account_id` | Account ID (local part) for the controller's shared service account. | `string` | `"argorun-controller"` |
+| `service_account_id` | Account ID (local part) for the controller's shared service account. | `string` | `"runcd-controller"` |
 | `target_projects` | Project IDs the controller may deploy to — one entry per project listed under any `environments[env].projects`. | `set(string)` | `[]` |
 | `runtime_service_account_emails` | Per-project runtime service account the deployed revision runs as, keyed by target project ID, if `iam.serviceAccounts.actAs` is required (§5.5 point 2 — verify against current GCP docs). | `map(string)` | `{}` |
 

@@ -2,7 +2,7 @@
 // workerPool are revision-based, job is execution-based.
 package health
 
-import "github.com/argorun/argorun/internal/cloudrun"
+import "github.com/runcd/runcd/internal/cloudrun"
 
 type Status string
 

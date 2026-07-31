@@ -1,0 +1,71 @@
+import { GoogleAuth } from "google-auth-library";
+import { type NextRequest, NextResponse } from "next/server";
+
+// Server-side proxy to the runcd API. The dashboard and the API are two
+// separate Cloud Run services with no shared domain, so a browser can't
+// call the API directly — IAP's session cookie is scoped to its own
+// origin and wouldn't be sent on a cross-site fetch. Instead this route
+// runs on the dashboard's own Cloud Run service account and calls the API
+// server-to-server.
+//
+// Two independent controls, since IAP's own audience validation only
+// supports the email-less machine-to-machine case (no OAuth brand exists
+// for direct-Cloud-Run IAP, and the legacy OAuth Admin API IAP would
+// otherwise need is being shut down) — stacking two IAP layers can't work,
+// so only the dashboard has IAP:
+//   - Cloud Run IAM invoker (audience = the API's own URL) gates *who can
+//     call* — only this service's account, via the standard
+//     service-to-service pattern: https://docs.cloud.google.com/run/docs/authenticating/service-to-service
+//   - the human's IAP assertion, forwarded verbatim, tells the API *which
+//     human* — the API's IAPAuthenticator verifies it against the
+//     dashboard's own audience and extracts the email RBAC checks against.
+const API_BASE_URL = process.env.RUNCD_API_URL;
+
+const auth = new GoogleAuth();
+
+async function forward(req: NextRequest, path: string[]) {
+  if (!API_BASE_URL) {
+    return NextResponse.json(
+      { error: "RUNCD_API_URL is not configured" },
+      { status: 500 },
+    );
+  }
+
+  const client = await auth.getIdTokenClient(API_BASE_URL);
+  const authHeaders = await client.getRequestHeaders();
+  const iapAssertion = req.headers.get("x-goog-iap-jwt-assertion");
+  const url = `${API_BASE_URL}/${path.join("/")}${req.nextUrl.search}`;
+
+  const res = await fetch(url, {
+    method: req.method,
+    headers: {
+      ...Object.fromEntries(authHeaders),
+      Accept: "application/json",
+      // Google's frontend strips any client-supplied X-Goog-* header before
+      // it reaches Cloud Run (anti-spoofing for what's normally
+      // infra-injected-only) — the assertion has to travel under a
+      // different name than the one IAP itself used to attach it to this
+      // request. internal/auth's IAPAuthenticator reads this same name.
+      ...(iapAssertion ? { "x-runcd-iap-assertion": iapAssertion } : {}),
+    },
+  });
+  const body = await res.text();
+  return new NextResponse(body, {
+    status: res.status,
+    headers: {
+      "content-type": res.headers.get("content-type") ?? "application/json",
+    },
+  });
+}
+
+type RouteParams = { params: Promise<{ path: string[] }> };
+
+export async function GET(req: NextRequest, { params }: RouteParams) {
+  const { path } = await params;
+  return forward(req, path);
+}
+
+export async function POST(req: NextRequest, { params }: RouteParams) {
+  const { path } = await params;
+  return forward(req, path);
+}

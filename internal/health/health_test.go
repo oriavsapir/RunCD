@@ -3,7 +3,7 @@ package health
 import (
 	"testing"
 
-	"github.com/argorun/argorun/internal/cloudrun"
+	"github.com/runcd/runcd/internal/cloudrun"
 )
 
 func intPtr(v int) *int { return &v }

@@ -9,10 +9,10 @@ import (
 	"log"
 	"net/http"
 
-	"github.com/argorun/argorun/internal/auth"
-	"github.com/argorun/argorun/internal/expander"
-	"github.com/argorun/argorun/internal/rbac"
-	"github.com/argorun/argorun/internal/reconcile"
+	"github.com/runcd/runcd/internal/auth"
+	"github.com/runcd/runcd/internal/expander"
+	"github.com/runcd/runcd/internal/rbac"
+	"github.com/runcd/runcd/internal/reconcile"
 )
 
 // UnitLookup resolves an (app, project) pair to the sync unit currently
@@ -46,7 +46,7 @@ func (m StaticUnits) List() []expander.SyncUnit {
 // auth -> StatusStore for the dashboard's read-only views.
 type Handler struct {
 	Auth       auth.Authenticator
-	RBAC       *rbac.Config
+	RBAC       *rbac.Store
 	Units      UnitLookup
 	Status     StatusStore
 	Reconciler *reconcile.Reconciler
@@ -69,10 +69,23 @@ type syncResponse struct {
 	Health  string `json:"health"`
 }
 
-func (h *Handler) handleSync(w http.ResponseWriter, r *http.Request) {
-	email, err := h.Auth.Verify(r)
+// verify authenticates the caller and logs the reason on failure — the
+// underlying error (bad audience, expired token, malformed header, ...)
+// never reaches the response body, so without this it's otherwise
+// impossible to tell why a caller got a 401.
+func verify(w http.ResponseWriter, r *http.Request, a auth.Authenticator) (string, bool) {
+	email, err := a.Verify(r)
 	if err != nil {
+		log.Printf("auth: %v", err)
 		http.Error(w, "invalid token", http.StatusUnauthorized)
+		return "", false
+	}
+	return email, true
+}
+
+func (h *Handler) handleSync(w http.ResponseWriter, r *http.Request) {
+	email, ok := verify(w, r, h.Auth)
+	if !ok {
 		return
 	}
 
@@ -87,7 +100,7 @@ func (h *Handler) handleSync(w http.ResponseWriter, r *http.Request) {
 	// §5.9: RBAC-checked — everyone authenticated gets read-only by
 	// default, only an admin/syncer rule whose scope covers this unit may
 	// trigger a sync.
-	if !rbac.CanSync(h.RBAC, email, unit) {
+	if !rbac.CanSync(h.RBAC.Get(), email, unit) {
 		http.Error(w, "forbidden: no role grants sync access to this app/project", http.StatusForbidden)
 		return
 	}

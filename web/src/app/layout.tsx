@@ -13,7 +13,7 @@ const geistMono = Geist_Mono({
 });
 
 export const metadata: Metadata = {
-  title: "argorun",
+  title: "RunCD",
   description: "ArgoCD-equivalent dashboard for Cloud Run sync units",
 };
 

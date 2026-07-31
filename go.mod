@@ -1,4 +1,4 @@
-module github.com/argorun/argorun
+module github.com/runcd/runcd
 
 go 1.26.5
 

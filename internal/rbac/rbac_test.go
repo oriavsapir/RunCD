@@ -3,7 +3,7 @@ package rbac
 import (
 	"testing"
 
-	"github.com/argorun/argorun/internal/expander"
+	"github.com/runcd/runcd/internal/expander"
 )
 
 func TestParse_Valid(t *testing.T) {
@@ -127,5 +127,44 @@ roles:
 	unit := expander.SyncUnit{App: "widget-api", Project: "example-prod-eu", Env: "prd"}
 	if CanSync(cfg, "bob@company.com", unit) {
 		t.Fatal("expected a scope for a different env to deny")
+	}
+}
+
+// TestStore_SetSwapsWhatGetReturns is config-hot-reload's core invariant:
+// a Store must reflect a newly-loaded rbac.yaml without callers needing
+// their own synchronization.
+func TestStore_SetSwapsWhatGetReturns(t *testing.T) {
+	before, err := Parse([]byte(`
+roles:
+  - subject: alice@company.com
+    role: admin
+    scope: ["*"]
+`))
+	if err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+	store := NewStore(before)
+
+	unit := expander.SyncUnit{App: "widget-api", Project: "example-prod-eu", Env: "prd"}
+	if !CanSync(store.Get(), "alice@company.com", unit) {
+		t.Fatal("expected alice to be granted access from the initial config")
+	}
+
+	after, err := Parse([]byte(`
+roles:
+  - subject: bob@company.com
+    role: admin
+    scope: ["*"]
+`))
+	if err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+	store.Set(after)
+
+	if CanSync(store.Get(), "alice@company.com", unit) {
+		t.Fatal("expected alice's grant to be gone after the reload replaced it")
+	}
+	if !CanSync(store.Get(), "bob@company.com", unit) {
+		t.Fatal("expected bob to be granted access from the reloaded config")
 	}
 }

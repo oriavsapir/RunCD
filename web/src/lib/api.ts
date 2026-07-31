@@ -1,12 +1,11 @@
 import type { SyncEvent, SyncResponse, Unit } from "./types";
 
-// Empty means same-origin: the dashboard is expected to sit behind the
-// same Identity-Aware Proxy perimeter as the argorun API (either the same
-// Cloud Run service, or two services fronted by one IAP-protected load
-// balancer with path-based routing) — the browser's existing IAP session
-// cookie then authenticates API calls automatically. Set
-// NEXT_PUBLIC_API_BASE_URL only if the API is truly on a different origin.
-const API_BASE_URL = process.env.NEXT_PUBLIC_API_BASE_URL ?? "";
+// Always same-origin: the browser calls this Next.js server's own
+// /api/proxy route, which forwards to the runcd API server-to-server
+// (see app/api/proxy/[...path]/route.ts). The dashboard and the API are
+// separate IAP-protected Cloud Run services, so the browser can't call the
+// API's origin directly — IAP's session cookie is scoped to its own origin.
+const API_BASE_URL = "/api/proxy";
 
 export class ApiError extends Error {
   constructor(

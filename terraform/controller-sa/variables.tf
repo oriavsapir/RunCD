@@ -6,13 +6,13 @@ variable "management_project_id" {
 variable "service_account_id" {
   description = "Account ID (local part) for the controller's shared service account."
   type        = string
-  default     = "argorun-controller"
+  default     = "runcd-controller"
 }
 
 variable "target_projects" {
   description = <<-EOT
     GCP project IDs the controller may deploy to — one entry per project
-    listed under any environments[env].projects in argorun.yaml (§5.1, §5.5).
+    listed under any environments[env].projects in runcd.yaml (§5.1, §5.5).
     Adding a project here is the "one IAM binding" provisioning step in §5.5.
   EOT
   type        = set(string)

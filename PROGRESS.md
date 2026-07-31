@@ -1,4 +1,4 @@
-# argorun — build checklist
+# runcd — build checklist
 
 Tracks what's built against the design spec's phased plan (§10). Every item
 below is either done-and-tested or explicitly not-yet-started — nothing
@@ -45,7 +45,7 @@ half-wired.
 
 ## Phase 1 — Core reconcile loop (read-only, no deploy)
 
-- [x] **Root config parsing** (`argorun.yaml`, §5.1) — `internal/config/`
+- [x] **Root config parsing** (`runcd.yaml`, §5.1) — `internal/config/`
   `environments`/`defaults`/`apps[]`, sync-policy merge (env overrides
   auto/interval, defaults fills in retry/selfHeal). Rejects an app
   referencing an unknown environment.
@@ -287,7 +287,7 @@ all three are fixed now, before Phase 2 built more on top of the same path:
   `notification_debounce` table.
 
 - [x] **`config.Root.Notify`** — `notify.slackWebhookUrl`/`notify.rules`
-  parsed as part of root `argorun.yaml` (§5.1), not a separate file.
+  parsed as part of root `runcd.yaml` (§5.1), not a separate file.
   Rejects an unknown `on` value or a `healthDegraded`/`outOfSyncGated` rule
   missing its required `forMinutes`/`forHours` at parse time.
 
@@ -323,8 +323,8 @@ all three are fixed now, before Phase 2 built more on top of the same path:
   unit's manifest from its `SourceRepo`'s default branch (`SyncUnit` carries
   no ref).
 
-- [x] **`main.go`** now actually runs the controller: loads `argorun.yaml`
-  and `rbac.yaml` from `ARGORUN_CONFIG_REPO` via the GitHub App client,
+- [x] **`main.go`** now actually runs the controller: loads `runcd.yaml`
+  and `rbac.yaml` from `RUNCD_CONFIG_REPO` via the GitHub App client,
   leader-gates the auto-reconcile loop (only the leader deploys; every
   replica serves the API — no per-unit lock, so a manual sync on a
   non-leader replica can race the leader's auto pass; fine for a
@@ -336,7 +336,7 @@ all three are fixed now, before Phase 2 built more on top of the same path:
   - Required env: `DATABASE_URL`, `IAP_AUDIENCE` (the expected `aud` claim
     on Identity-Aware Proxy's signed identity assertion — fails startup if
     unset, it's a trust boundary; see the IAP section below),
-    `ARGORUN_CONFIG_REPO`, `ARGORUN_CONFIG_BRANCH`, `ARGORUN_CONFIG_PATH`,
+    `RUNCD_CONFIG_REPO`, `RUNCD_CONFIG_BRANCH`, `RUNCD_CONFIG_PATH`,
     `GITHUB_APP_ID`, `GITHUB_APP_PEM`.
   - Optional: `RBAC_PATH` (default `rbac.yaml`, same repo/branch as config),
     `HTTP_ADDR` (default `:8080`), `RECONCILE_INTERVAL` (default `30s`).
@@ -406,7 +406,7 @@ tradeoffs rather than guessed at.
   spec that doesn't sum to 100 (an invalid spec, previously only caught
   deep inside the API call). Fixed: `validatedPercent` now rejects anything
   but a full cutover (0 or 100) with a clear error naming the limitation —
-  argorun's traffic model has no way to say where the remaining percent
+  runcd's traffic model has no way to say where the remaining percent
   should go.
   - Test: `TestValidatedPercent_FullCutoverAccepted`,
     `TestValidatedPercent_PartialRejected`
@@ -784,7 +784,7 @@ on the next review.
 
 Decided against both a custom NextAuth.js sign-in flow and Dex (an OIDC
 broker ArgoCD optionally uses for multi-IdP federation — unnecessary here:
-argorun is single-org/single-provider, so brokering buys nothing). Cloud
+runcd is single-org/single-provider, so brokering buys nothing). Cloud
 Run sits behind an External HTTPS Load Balancer with IAP enabled: IAP
 authenticates the caller (via IAM) before the request ever reaches the
 service, and attaches a signed identity assertion header. This replaces
@@ -890,7 +890,7 @@ direct Google OAuth token verification as the primary path.
   - `src/lib/api.ts` — typed client. Calls are same-origin
     (`credentials: "include"`, no bearer-token handling in the frontend at
     all) on the assumption the dashboard sits behind the same
-    IAP-protected perimeter as the argorun API (one Cloud Run service, or
+    IAP-protected perimeter as the runcd API (one Cloud Run service, or
     two behind one load balancer with path routing) — the browser's
     existing IAP session cookie authenticates API calls automatically.
     `NEXT_PUBLIC_API_BASE_URL` overrides this if the API is genuinely on a
@@ -932,8 +932,8 @@ direct Google OAuth token verification as the primary path.
   Packages `cmd/controller`, which today only runs the leader-election loop
   (`DATABASE_URL` → connect → `leader.Run`) — nothing else is wired into
   `main.go` yet.
-  - Test: `docker build -t argorun-controller:test .` then
-    `docker run --rm -e DATABASE_URL=... argorun-controller:test`
+  - Test: `docker build -t runcd-controller:test .` then
+    `docker run --rm -e DATABASE_URL=... runcd-controller:test`
 
 - [x] **CI** (`.github/workflows/ci.yml`) — 7 parallel jobs: `fmt` (gofmt),
   `vet`, `lint` (golangci-lint v2.12.2 via `golangci-lint-action@v9`, config

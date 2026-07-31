@@ -16,7 +16,7 @@ import (
 var ErrNotProvisioned = errors.New("resource not provisioned: run Terraform first")
 
 // ServiceState is the subset of Cloud Run service spec the diff engine and
-// health assessment reason about — only the fields argorun ever manages
+// health assessment reason about — only the fields runcd ever manages
 // (§5.7's managed-field set) plus what's needed to assess health.
 type ServiceState struct {
 	ImageDigest string

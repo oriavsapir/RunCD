@@ -3,7 +3,7 @@
 // the Cloud Run equivalent of ArgoCD's ignoreDifferences.
 package diff
 
-import "github.com/argorun/argorun/internal/cloudrun"
+import "github.com/runcd/runcd/internal/cloudrun"
 
 type Status string
 
@@ -27,7 +27,7 @@ func Compute(desired, live cloudrun.ServiceState, managedFields []string, resour
 				continue
 			}
 			// A manifest that manages traffic but omits the traffic block
-			// (desired == nil) hasn't told argorun what to enforce — treat
+			// (desired == nil) hasn't told runcd what to enforce — treat
 			// that as nothing-to-diff rather than a permanent mismatch
 			// against whatever percent Cloud Run happens to report live.
 			if desired.TrafficLatestRevisionPercent == nil {

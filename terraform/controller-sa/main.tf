@@ -5,7 +5,7 @@
 resource "google_service_account" "controller" {
   project      = var.management_project_id
   account_id   = var.service_account_id
-  display_name = "argorun controller (shared, all target projects)"
+  display_name = "runcd controller (shared, all target projects)"
 }
 
 # One IAM binding per project add (§5.5 point 1) — deploy-only, never project

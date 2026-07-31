@@ -6,8 +6,8 @@ import (
 	"net/http"
 	"time"
 
-	"github.com/argorun/argorun/internal/expander"
-	"github.com/argorun/argorun/internal/rbac"
+	"github.com/runcd/runcd/internal/expander"
+	"github.com/runcd/runcd/internal/rbac"
 )
 
 // UnitLister exposes every currently-configured sync unit, not just ones
@@ -73,9 +73,8 @@ func applyRow(v *unitView, row ApplicationRow) {
 // last-known status/health, open to any authenticated caller — read
 // visibility has no RBAC gate (§5.9); only Sync itself does.
 func (h *Handler) handleListUnits(w http.ResponseWriter, r *http.Request) {
-	email, err := h.Auth.Verify(r)
-	if err != nil {
-		http.Error(w, "invalid token", http.StatusUnauthorized)
+	email, ok := verify(w, r, h.Auth)
+	if !ok {
 		return
 	}
 
@@ -99,7 +98,7 @@ func (h *Handler) handleListUnits(w http.ResponseWriter, r *http.Request) {
 
 	views := make([]unitView, 0, len(units))
 	for _, u := range units {
-		v := unitViewFrom(u, h.RBAC, email)
+		v := unitViewFrom(u, h.RBAC.Get(), email)
 		if row, ok := byKey[u.App+"/"+u.Project]; ok {
 			applyRow(&v, row)
 		}
@@ -113,9 +112,8 @@ func (h *Handler) handleListUnits(w http.ResponseWriter, r *http.Request) {
 // handleUnitDetail serves one sync unit's full state — the same fields as
 // the list view, used by the dashboard's diff view (desired vs live).
 func (h *Handler) handleUnitDetail(w http.ResponseWriter, r *http.Request) {
-	email, err := h.Auth.Verify(r)
-	if err != nil {
-		http.Error(w, "invalid token", http.StatusUnauthorized)
+	email, ok := verify(w, r, h.Auth)
+	if !ok {
 		return
 	}
 
@@ -127,7 +125,7 @@ func (h *Handler) handleUnitDetail(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	v := unitViewFrom(unit, h.RBAC, email)
+	v := unitViewFrom(unit, h.RBAC.Get(), email)
 	row, found, err := h.Status.GetApplication(r.Context(), app, project)
 	if err != nil {
 		// %q escapes control characters, defeating log injection from
@@ -164,8 +162,7 @@ type syncEventView struct {
 const defaultHistoryLimit = 50
 
 func (h *Handler) handleUnitHistory(w http.ResponseWriter, r *http.Request) {
-	if _, err := h.Auth.Verify(r); err != nil {
-		http.Error(w, "invalid token", http.StatusUnauthorized)
+	if _, ok := verify(w, r, h.Auth); !ok {
 		return
 	}
 

@@ -36,7 +36,7 @@ type Precondition struct {
 }
 
 // ServiceDefinition is one service's app.yaml (§5.1). No env, project, or
-// region — those are bound in the root argorun.yaml's apps[]/environments.
+// region — those are bound in the root runcd.yaml's apps[]/environments.
 type ServiceDefinition struct {
 	ResourceType ResourceType   `yaml:"resourceType,omitempty"`
 	Image        Image          `yaml:"image"`
@@ -88,7 +88,7 @@ func validateTraffic(t *Traffic) error {
 
 func validateImage(img Image) error {
 	if img.Digest == "" {
-		return fmt.Errorf("image.digest is required — argorun never accepts a floating tag (NFR2)")
+		return fmt.Errorf("image.digest is required — runcd never accepts a floating tag (NFR2)")
 	}
 	if !digestPattern.MatchString(img.Digest) {
 		return fmt.Errorf("image.digest %q is not a valid digest reference (expected sha256:<64 hex chars>)", img.Digest)

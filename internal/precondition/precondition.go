@@ -8,7 +8,7 @@ import (
 	"context"
 	"fmt"
 
-	"github.com/argorun/argorun/internal/manifest"
+	"github.com/runcd/runcd/internal/manifest"
 )
 
 // Checker verifies a single precondition exists in a target project.

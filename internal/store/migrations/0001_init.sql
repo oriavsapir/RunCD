@@ -19,7 +19,7 @@ CREATE TABLE sync_events (
   application   text NOT NULL,
   target_gcp_project text NOT NULL,
   trigger       text NOT NULL CHECK (trigger IN ('auto', 'manual')),
-  actor         text,               -- OAuth email for manual; 'argorun-controller' for auto
+  actor         text,               -- OAuth email for manual; 'runcd-controller' for auto
   from_image    text,
   to_image      text NOT NULL,
   started_at    timestamptz NOT NULL,

@@ -8,7 +8,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/argorun/argorun/internal/expander"
+	"github.com/runcd/runcd/internal/expander"
 )
 
 type countingFetcher struct {

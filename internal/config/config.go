@@ -1,4 +1,4 @@
-// Package config parses the root argorun.yaml (§5.1): the fan-out source of
+// Package config parses the root runcd.yaml (§5.1): the fan-out source of
 // truth binding apps[] to environments[env].projects.
 package config
 
@@ -97,14 +97,14 @@ type Root struct {
 // otherwise be silently ignored by the diff engine rather than rejected.
 var validManagedFields = map[string]bool{"image": true, "traffic": true}
 
-// Parse decodes argorun.yaml and rejects any app whose env doesn't exist, or
+// Parse decodes runcd.yaml and rejects any app whose env doesn't exist, or
 // any defaults.managedFields entry the diff engine doesn't know how to
 // compare — both must fail loudly at parse time (§5.1), not be silently
 // ignored later.
 func Parse(data []byte) (*Root, error) {
 	var root Root
 	if err := yaml.Unmarshal(data, &root); err != nil {
-		return nil, fmt.Errorf("parse argorun.yaml: %w", err)
+		return nil, fmt.Errorf("parse runcd.yaml: %w", err)
 	}
 	for _, app := range root.Apps {
 		if _, ok := root.Environments[app.Env]; !ok {
@@ -129,7 +129,7 @@ func Parse(data []byte) (*Root, error) {
 	}
 	for _, f := range root.Defaults.ManagedFields {
 		if !validManagedFields[f] {
-			return nil, fmt.Errorf("defaults.managedFields: %q is not a field argorun knows how to manage (image, traffic)", f)
+			return nil, fmt.Errorf("defaults.managedFields: %q is not a field runcd knows how to manage (image, traffic)", f)
 		}
 	}
 	for _, rule := range root.Notify.Rules {

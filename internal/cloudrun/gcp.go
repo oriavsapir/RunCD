@@ -403,7 +403,7 @@ func (c *GCPAdminClient) DeployJob(ctx context.Context, project, region, name st
 }
 
 // validatedPercent rejects anything other than a full cutover to the
-// latest revision (100). argorun's traffic model
+// latest revision (100). runcd's traffic model
 // (manifest.Traffic.LatestRevisionPercent) has no way to say where the
 // remaining traffic should go, so any other value — including 0, which
 // would still produce a single TrafficTarget summing to 0% rather than the

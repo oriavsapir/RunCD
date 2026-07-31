@@ -6,7 +6,7 @@ package expander
 import (
 	"fmt"
 
-	"github.com/argorun/argorun/internal/config"
+	"github.com/runcd/runcd/internal/config"
 )
 
 // SyncUnit is one (app, project) pair ready to reconcile.

@@ -6,10 +6,10 @@ import (
 	"testing"
 	"time"
 
-	"github.com/argorun/argorun/internal/config"
-	"github.com/argorun/argorun/internal/expander"
-	"github.com/argorun/argorun/internal/reconcile"
-	"github.com/argorun/argorun/internal/testutil"
+	"github.com/runcd/runcd/internal/config"
+	"github.com/runcd/runcd/internal/expander"
+	"github.com/runcd/runcd/internal/reconcile"
+	"github.com/runcd/runcd/internal/testutil"
 )
 
 type fakeSink struct {

@@ -86,16 +86,24 @@ const iapJWKSURL = "https://www.gstatic.com/iap/verify/public_key-jwk"
 // iapIssuer is the fixed issuer IAP signs its assertions as.
 const iapIssuer = "https://cloud.google.com/iap"
 
-// iapAssertionHeader is the header IAP attaches to every request it
-// forwards, carrying the signed identity assertion.
-const iapAssertionHeader = "X-Goog-IAP-JWT-Assertion" //nolint:gosec // a header name, not a credential
+// iapAssertionHeader is the header carrying IAP's signed identity
+// assertion. IAP itself always attaches this under X-Goog-IAP-JWT-Assertion,
+// but Google's frontend strips any client-supplied X-Goog-* header before it
+// reaches Cloud Run — so a caller relaying an assertion it received (as the
+// dashboard's server-side proxy does, forwarding the human's IAP identity to
+// this API, which has no IAP of its own) has to use a different name.
+const iapAssertionHeader = "X-RunCD-IAP-Assertion" //nolint:gosec // a header name, not a credential
 
 // IAPAuthenticator verifies the signed identity assertion Google's
-// Identity-Aware Proxy attaches to every request it forwards. IAP itself
-// already gates who can reach the service at all (via IAM); verifying the
-// JWT here is defense-in-depth against a request that bypasses IAP (e.g.
-// hitting the origin directly) forging that header — the pattern Google
-// documents at https://cloud.google.com/iap/docs/signed-headers-howto.
+// Identity-Aware Proxy attaches to every request it forwards. For services
+// that sit directly behind their own IAP (like the dashboard), this is
+// defense-in-depth against a request that bypasses IAP and forges the
+// header — the pattern Google documents at
+// https://cloud.google.com/iap/docs/signed-headers-howto. For the runcd
+// API itself, which has no IAP of its own (Cloud Run IAM gates *who* can
+// call it; this verifies *which human*), this assertion — forwarded
+// verbatim by the dashboard's server-side proxy — is the primary source of
+// the caller's identity, not just a backstop.
 type IAPAuthenticator struct {
 	verifier *oidc.IDTokenVerifier
 }
@@ -116,7 +124,14 @@ func NewIAPAuthenticator(audience string) (*IAPAuthenticator, error) {
 		return nil, errors.New("IAP audience is empty — refusing to skip audience validation")
 	}
 	keySet := oidc.NewRemoteKeySet(context.Background(), iapJWKSURL)
-	verifier := oidc.NewVerifier(iapIssuer, keySet, &oidc.Config{ClientID: audience})
+	// go-oidc's Config defaults SupportedSigningAlgs to RS256 only; IAP signs
+	// its assertions with ES256 (its JWKS only ever publishes EC keys), so
+	// without this every real assertion is rejected before signature
+	// verification even runs.
+	verifier := oidc.NewVerifier(iapIssuer, keySet, &oidc.Config{
+		ClientID:             audience,
+		SupportedSigningAlgs: []string{oidc.ES256},
+	})
 	return &IAPAuthenticator{verifier: verifier}, nil
 }
 

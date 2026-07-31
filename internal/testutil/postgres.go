@@ -11,7 +11,7 @@ import (
 	_ "github.com/jackc/pgx/v5/stdlib" // registers the "pgx" sql.Open driver used below
 	"github.com/testcontainers/testcontainers-go/modules/postgres"
 
-	"github.com/argorun/argorun/internal/store"
+	"github.com/runcd/runcd/internal/store"
 )
 
 func NewPostgres(t *testing.T) *sql.DB {
@@ -19,9 +19,9 @@ func NewPostgres(t *testing.T) *sql.DB {
 	ctx := context.Background()
 
 	pgc, err := postgres.Run(ctx, "postgres:18-alpine",
-		postgres.WithDatabase("argorun"),
-		postgres.WithUsername("argorun"),
-		postgres.WithPassword("argorun"),
+		postgres.WithDatabase("runcd"),
+		postgres.WithUsername("runcd"),
+		postgres.WithPassword("runcd"),
 		postgres.BasicWaitStrategies(),
 	)
 	if err != nil {

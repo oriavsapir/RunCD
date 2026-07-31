@@ -4,7 +4,7 @@ import (
 	"context"
 	"testing"
 
-	"github.com/argorun/argorun/internal/manifest"
+	"github.com/runcd/runcd/internal/manifest"
 )
 
 type fakeChecker struct {

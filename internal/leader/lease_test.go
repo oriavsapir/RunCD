@@ -7,7 +7,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/argorun/argorun/internal/testutil"
+	"github.com/runcd/runcd/internal/testutil"
 )
 
 // failAfterN wraps a real *sql.DB and fails every ExecContext call once

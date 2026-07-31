@@ -8,10 +8,10 @@ import (
 	"testing"
 	"time"
 
-	"github.com/argorun/argorun/internal/cloudrun"
-	"github.com/argorun/argorun/internal/config"
-	"github.com/argorun/argorun/internal/expander"
-	"github.com/argorun/argorun/internal/testutil"
+	"github.com/runcd/runcd/internal/cloudrun"
+	"github.com/runcd/runcd/internal/config"
+	"github.com/runcd/runcd/internal/expander"
+	"github.com/runcd/runcd/internal/testutil"
 )
 
 const validDigest = "sha256:3f8a1c0000000000000000000000000000000000000000000000000000000000"
@@ -564,7 +564,7 @@ func TestRunOnce_DeploysOutOfSyncAutoUnit(t *testing.T) {
 	if err != nil {
 		t.Fatalf("query sync_events: %v", err)
 	}
-	if trigger != "auto" || actor != "argorun-controller" || fromImage != oldDigest || toImage != validDigest || result != "succeeded" {
+	if trigger != "auto" || actor != "runcd-controller" || fromImage != oldDigest || toImage != validDigest || result != "succeeded" {
 		t.Fatalf("unexpected sync_events row: trigger=%s actor=%s from=%s to=%s result=%s", trigger, actor, fromImage, toImage, result)
 	}
 }
@@ -696,7 +696,7 @@ func TestRunOnce_CrashMidSync_DeployAlreadyTookEffect(t *testing.T) {
 	}
 	if _, err := db.ExecContext(context.Background(), `
 		INSERT INTO sync_events (application, target_gcp_project, trigger, actor, from_image, to_image, started_at, result)
-		VALUES ('widget-api', 'example-dev-01', 'auto', 'argorun-controller', $1, $2, now(), 'in_progress')`, oldDigest, validDigest); err != nil {
+		VALUES ('widget-api', 'example-dev-01', 'auto', 'runcd-controller', $1, $2, now(), 'in_progress')`, oldDigest, validDigest); err != nil {
 		t.Fatalf("seed crashed sync_events row: %v", err)
 	}
 
@@ -760,7 +760,7 @@ func TestRunOnce_CrashMidSync_DeployNeverTookEffect(t *testing.T) {
 	}
 	if _, err := db.ExecContext(context.Background(), `
 		INSERT INTO sync_events (application, target_gcp_project, trigger, actor, from_image, to_image, started_at, result)
-		VALUES ('widget-api', 'example-dev-01', 'auto', 'argorun-controller', $1, $2, now(), 'in_progress')`, oldDigest, validDigest); err != nil {
+		VALUES ('widget-api', 'example-dev-01', 'auto', 'runcd-controller', $1, $2, now(), 'in_progress')`, oldDigest, validDigest); err != nil {
 		t.Fatalf("seed crashed sync_events row: %v", err)
 	}
 

@@ -10,7 +10,7 @@ import (
 
 	"golang.org/x/sync/singleflight"
 
-	"github.com/argorun/argorun/internal/expander"
+	"github.com/runcd/runcd/internal/expander"
 )
 
 // DefaultCacheTTL caps how long a fetched manifest is reused across sync
