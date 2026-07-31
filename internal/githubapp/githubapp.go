@@ -25,6 +25,27 @@ import (
 	"golang.org/x/sync/singleflight"
 )
 
+// maxResponseBytes bounds every GitHub API response body this client reads
+// (manifest file content, error bodies) — an unbounded io.ReadAll on a
+// compromised or misbehaving upstream could otherwise OOM every replica
+// mid reconcile pass. Generous for a manifest file (§5.1's format is a
+// small YAML doc) or an error body (diagnostic text only).
+const maxResponseBytes = 10 << 20 // 10 MiB
+
+// readLimited reads at most maxResponseBytes from r, erroring if the body
+// is truncated rather than silently returning a partial manifest.
+func readLimited(r io.Reader) ([]byte, error) {
+	limited := io.LimitReader(r, maxResponseBytes+1)
+	body, err := io.ReadAll(limited)
+	if err != nil {
+		return nil, err
+	}
+	if len(body) > maxResponseBytes {
+		return nil, fmt.Errorf("response exceeded %d byte limit", maxResponseBytes)
+	}
+	return body, nil
+}
+
 // Client mints short-lived GitHub App installation tokens (cached per repo)
 // and uses them to read files from arbitrary repos the app is installed on.
 type Client struct {
@@ -137,10 +158,10 @@ func (c *Client) GetFile(ctx context.Context, repo, ref, path string) ([]byte, e
 	defer func() { _ = resp.Body.Close() }()
 
 	if resp.StatusCode != http.StatusOK {
-		body, _ := io.ReadAll(resp.Body)
+		body, _ := readLimited(resp.Body)
 		return nil, fmt.Errorf("fetch %s/%s:%s: %s: %s", owner, name, path, resp.Status, body)
 	}
-	return io.ReadAll(resp.Body)
+	return readLimited(resp.Body)
 }
 
 // installationToken returns a cached token for owner/repo, minting a fresh
@@ -238,7 +259,7 @@ func (c *Client) installationID(ctx context.Context, jwt, owner, repo string) (i
 	defer func() { _ = resp.Body.Close() }()
 
 	if resp.StatusCode != http.StatusOK {
-		body, _ := io.ReadAll(resp.Body)
+		body, _ := readLimited(resp.Body)
 		return 0, fmt.Errorf("find installation for %s/%s: %s: %s", owner, repo, resp.Status, body)
 	}
 	var out installationResponse
@@ -269,7 +290,7 @@ func (c *Client) mintToken(ctx context.Context, jwt string, installationID int64
 	defer func() { _ = resp.Body.Close() }()
 
 	if resp.StatusCode != http.StatusCreated {
-		body, _ := io.ReadAll(resp.Body)
+		body, _ := readLimited(resp.Body)
 		return "", time.Time{}, fmt.Errorf("mint installation token: %s: %s", resp.Status, body)
 	}
 	var out installationTokenResponse

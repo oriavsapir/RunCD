@@ -2,7 +2,6 @@
 
 import { useEffect, useState } from "react";
 import {
-  AlertCircle,
   Bell,
   BellOff,
   Clock,
@@ -13,7 +12,6 @@ import {
   Palette,
   ShieldCheck,
 } from "lucide-react";
-import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
 import {
   Card,
   CardContent,
@@ -86,23 +84,26 @@ export default function SettingsPage() {
   const [units, setUnits] = useState<Unit[] | null>(null);
   const [roles, setRoles] = useState<RbacRule[] | null>(null);
   const [config, setConfig] = useState<RuntimeConfig | null>(null);
-  const [error, setError] = useState<string | null>(null);
+  const [unitsError, setUnitsError] = useState<string | null>(null);
+  const [rolesError, setRolesError] = useState<string | null>(null);
+  const [configError, setConfigError] = useState<string | null>(null);
 
+  // Promise.allSettled, not .all: one section's fetch failing (e.g.
+  // /api/rbac 500) must not blank out sibling sections that loaded fine —
+  // each result is applied independently below.
   useEffect(() => {
     let cancelled = false;
-    Promise.all([listUnits(), listRbac(), getRuntimeConfig()])
-      .then(([u, r, c]) => {
-        if (!cancelled) {
-          setUnits(u);
-          setRoles(r);
-          setConfig(c);
-        }
-      })
-      .catch((err: unknown) => {
-        if (!cancelled) {
-          setError(err instanceof Error ? err.message : "Failed to load settings");
-        }
-      });
+    Promise.allSettled([listUnits(), listRbac(), getRuntimeConfig()]).then(
+      ([u, r, c]) => {
+        if (cancelled) return;
+        if (u.status === "fulfilled") setUnits(u.value);
+        else setUnitsError(u.reason instanceof Error ? u.reason.message : "Failed to load units");
+        if (r.status === "fulfilled") setRoles(r.value);
+        else setRolesError(r.reason instanceof Error ? r.reason.message : "Failed to load RBAC roles");
+        if (c.status === "fulfilled") setConfig(c.value);
+        else setConfigError(c.reason instanceof Error ? c.reason.message : "Failed to load controller config");
+      },
+    );
     return () => {
       cancelled = true;
     };
@@ -123,14 +124,6 @@ export default function SettingsPage() {
           can sync what.
         </p>
       </div>
-
-      {error && (
-        <Alert variant="destructive">
-          <AlertCircle />
-          <AlertTitle>Failed to load settings</AlertTitle>
-          <AlertDescription>{error}</AlertDescription>
-        </Alert>
-      )}
 
       {units && envGroups && (
         <div className="grid grid-cols-2 gap-3 sm:grid-cols-4">
@@ -173,7 +166,9 @@ export default function SettingsPage() {
           </CardDescription>
         </CardHeader>
         <CardContent>
-          {!config && !error ? (
+          {configError ? (
+            <p className="text-destructive text-sm">{configError}</p>
+          ) : !config ? (
             <Skeleton className="h-32 w-full" />
           ) : (
             config && (
@@ -238,7 +233,9 @@ export default function SettingsPage() {
           </CardDescription>
         </CardHeader>
         <CardContent>
-          {!units && !error ? (
+          {unitsError ? (
+            <p className="text-destructive text-sm">{unitsError}</p>
+          ) : !units ? (
             <Skeleton className="h-24 w-full" />
           ) : (
             <Table>
@@ -288,9 +285,11 @@ export default function SettingsPage() {
           </CardDescription>
         </CardHeader>
         <CardContent>
-          {!roles && !error ? (
+          {rolesError ? (
+            <p className="text-destructive text-sm">{rolesError}</p>
+          ) : !roles ? (
             <Skeleton className="h-24 w-full" />
-          ) : roles && roles.length === 0 ? (
+          ) : roles.length === 0 ? (
             <p className="text-muted-foreground text-sm">
               No roles configured — every sync request will be denied until
               rbac.yaml grants one.

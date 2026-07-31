@@ -19,24 +19,31 @@ export default function UnitDetailPage() {
 
   const [unit, setUnit] = useState<Unit | null>(null);
   const [events, setEvents] = useState<SyncEvent[] | null>(null);
-  const [error, setError] = useState<string | null>(null);
+  const [unitError, setUnitError] = useState<string | null>(null);
+  const [eventsError, setEventsError] = useState<string | null>(null);
   const [refreshKey, setRefreshKey] = useState(0);
 
+  // Promise.allSettled, not .all: a failing history fetch shouldn't blank
+  // out the diff view (or vice versa) — each result applies independently.
   useEffect(() => {
     let cancelled = false;
-    Promise.all([getUnit(project, app), getUnitHistory(project, app)])
-      .then(([u, h]) => {
-        if (!cancelled) {
-          setUnit(u);
-          setEvents(h);
-          setError(null);
+    Promise.allSettled([getUnit(project, app), getUnitHistory(project, app)]).then(
+      ([u, h]) => {
+        if (cancelled) return;
+        if (u.status === "fulfilled") {
+          setUnit(u.value);
+          setUnitError(null);
+        } else {
+          setUnitError(u.reason instanceof Error ? u.reason.message : "Failed to load unit");
         }
-      })
-      .catch((err: unknown) => {
-        if (!cancelled) {
-          setError(err instanceof Error ? err.message : "Failed to load unit");
+        if (h.status === "fulfilled") {
+          setEvents(h.value);
+          setEventsError(null);
+        } else {
+          setEventsError(h.reason instanceof Error ? h.reason.message : "Failed to load sync history");
         }
-      });
+      },
+    );
     return () => {
       cancelled = true;
     };
@@ -74,15 +81,23 @@ export default function UnitDetailPage() {
         </div>
       </div>
 
-      {error && (
+      {unitError && (
         <Alert variant="destructive">
           <AlertCircle />
           <AlertTitle>Failed to load unit</AlertTitle>
-          <AlertDescription>{error}</AlertDescription>
+          <AlertDescription>{unitError}</AlertDescription>
         </Alert>
       )}
 
-      {!error && degraded && (
+      {eventsError && (
+        <Alert variant="destructive">
+          <AlertCircle />
+          <AlertTitle>Failed to load sync history</AlertTitle>
+          <AlertDescription>{eventsError}</AlertDescription>
+        </Alert>
+      )}
+
+      {!unitError && degraded && (
         <Alert variant="destructive">
           <AlertCircle />
           <AlertTitle>
@@ -97,17 +112,13 @@ export default function UnitDetailPage() {
         </Alert>
       )}
 
-      {!unit && !error ? (
-        <Skeleton className="h-48 w-full" />
-      ) : (
-        unit && <DiffView unit={unit} />
-      )}
+      {!unit && !unitError ? <Skeleton className="h-48 w-full" /> : unit && <DiffView unit={unit} />}
 
       <div>
         <h2 className="mb-2 text-lg font-semibold tracking-tight">
           Sync history
         </h2>
-        {!events && !error ? (
+        {!events && !eventsError ? (
           <Skeleton className="h-32 w-full" />
         ) : (
           events && <HistoryTable events={events} />

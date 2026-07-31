@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"net/http"
 	"strings"
+	"time"
 
 	"github.com/coreos/go-oidc/v3/oidc"
 	"google.golang.org/api/idtoken"
@@ -86,6 +87,9 @@ const iapJWKSURL = "https://www.gstatic.com/iap/verify/public_key-jwk"
 // iapIssuer is the fixed issuer IAP signs its assertions as.
 const iapIssuer = "https://cloud.google.com/iap"
 
+// jwksFetchTimeout bounds the remote key set's fetch of iapJWKSURL.
+const jwksFetchTimeout = 10 * time.Second
+
 // iapAssertionHeader is the header carrying IAP's signed identity
 // assertion. IAP itself always attaches this under X-Goog-IAP-JWT-Assertion,
 // but Google's frontend strips any client-supplied X-Goog-* header before it
@@ -123,7 +127,13 @@ func NewIAPAuthenticator(audience string) (*IAPAuthenticator, error) {
 	if audience == "" {
 		return nil, errors.New("IAP audience is empty — refusing to skip audience validation")
 	}
-	keySet := oidc.NewRemoteKeySet(context.Background(), iapJWKSURL)
+	// oidc.NewRemoteKeySet uses http.DefaultClient (no timeout) unless a
+	// client is threaded through the context — without this, a stalled
+	// gstatic.com fetch (the initial fetch, or any later refresh on a key
+	// rotation/cache miss) could pile up request-handling goroutines
+	// indefinitely.
+	ctx := oidc.ClientContext(context.Background(), &http.Client{Timeout: jwksFetchTimeout})
+	keySet := oidc.NewRemoteKeySet(ctx, iapJWKSURL)
 	// go-oidc's Config defaults SupportedSigningAlgs to RS256 only; IAP signs
 	// its assertions with ES256 (its JWKS only ever publishes EC keys), so
 	// without this every real assertion is rejected before signature

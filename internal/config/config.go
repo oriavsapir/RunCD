@@ -85,6 +85,14 @@ func (w SyncWindow) validate() error {
 	if w.StartHour < 0 || w.StartHour > 24 || w.EndHour < 0 || w.EndHour > 24 {
 		return fmt.Errorf("syncWindows: startHour/endHour must be within [0,24], got %d/%d", w.StartHour, w.EndHour)
 	}
+	// Equal start/end means "all day" (the zero-value default) — but a
+	// non-zero equal pair, e.g. startHour:5/endHour:5, is almost always a
+	// typo for a narrow window, not a deliberate all-day one, and silently
+	// producing an all-day allow/deny from it is exactly the kind of
+	// surprising blast radius worth failing loudly on instead.
+	if w.StartHour == w.EndHour && w.StartHour != 0 {
+		return fmt.Errorf("syncWindows: startHour and endHour are both %d — write 0/0 for an explicit all-day window, or pick different hours", w.StartHour)
+	}
 	return nil
 }
 

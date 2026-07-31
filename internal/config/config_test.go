@@ -290,6 +290,43 @@ defaults:
 	}
 }
 
+func TestParse_SyncWindowsRejectAmbiguousEqualNonZeroHours(t *testing.T) {
+	yaml := []byte(`
+environments:
+  prd:
+    projects: [example-prod-us]
+    sync:
+      syncWindows:
+        - kind: deny
+          startHour: 5
+          endHour: 5
+defaults:
+  region: us-central1
+`)
+	if _, err := Parse(yaml); err == nil {
+		t.Fatal("expected error for an ambiguous non-zero equal startHour/endHour (likely a typo for a narrow window)")
+	}
+}
+
+func TestParse_SyncWindowsAllowExplicitAllDayZeroHours(t *testing.T) {
+	yaml := []byte(`
+environments:
+  prd:
+    projects: [example-prod-us]
+    sync:
+      syncWindows:
+        - kind: deny
+          days: [Sat, Sun]
+          startHour: 0
+          endHour: 0
+defaults:
+  region: us-central1
+`)
+	if _, err := Parse(yaml); err != nil {
+		t.Fatalf("expected explicit 0/0 all-day window to be accepted, got: %v", err)
+	}
+}
+
 func TestSyncPolicyMerge_SyncWindowsReplacedWholesaleWhenOverridden(t *testing.T) {
 	base := SyncPolicy{SyncWindows: []SyncWindow{{Kind: SyncWindowDeny, Days: []string{"Sat"}}}}
 	override := SyncPolicy{SyncWindows: []SyncWindow{{Kind: SyncWindowAllow}}}

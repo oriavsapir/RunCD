@@ -208,6 +208,7 @@ export default function Home() {
                   value={query}
                   onChange={(e) => setQuery(e.target.value)}
                   placeholder="Filter by app, project, or environment…"
+                  aria-label="Filter by app, project, or environment"
                   className="h-9 pl-8"
                 />
               </div>
