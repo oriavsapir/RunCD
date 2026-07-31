@@ -7,9 +7,9 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"os/exec"
 	"strings"
-	"time"
 )
 
 // unit mirrors internal/api/units.go's unitView JSON shape. Kept as an
@@ -74,6 +74,13 @@ func (e *apiError) Error() string {
 // connection pooling beyond http.DefaultClient's own, matching how small
 // this surface is (five endpoints, all fast, all idempotent-safe to just
 // fail and let the user re-run).
+//
+// No client-level Timeout: sync blocks synchronously through the
+// controller's fetch->diff->precondition->deploy->re-fetch sequence,
+// which routinely exceeds any timeout short enough to be reasonable for
+// the read endpoints (units/get/history/rbac). Each call site instead
+// gets its own context deadline sized for what it actually does — see
+// main.go.
 type client struct {
 	baseURL string
 	token   string // "" if the API isn't behind IAP (or auth is handled some other way in front of this process)
@@ -81,7 +88,7 @@ type client struct {
 }
 
 func newClient(baseURL, token string) *client {
-	return &client{baseURL: strings.TrimSuffix(baseURL, "/"), token: token, http: &http.Client{Timeout: 30 * time.Second}}
+	return &client{baseURL: strings.TrimSuffix(baseURL, "/"), token: token, http: &http.Client{}}
 }
 
 // do's target (c.baseURL, set once at startup from RUNCD_API_URL — see
@@ -126,13 +133,13 @@ func (c *client) listUnits(ctx context.Context) ([]unit, error) {
 
 func (c *client) getUnit(ctx context.Context, project, app string) (unit, error) {
 	var u unit
-	err := c.do(ctx, http.MethodGet, "/api/units/"+project+"/"+app, &u)
+	err := c.do(ctx, http.MethodGet, "/api/units/"+url.PathEscape(project)+"/"+url.PathEscape(app), &u)
 	return u, err
 }
 
 func (c *client) getHistory(ctx context.Context, project, app string) ([]syncEvent, error) {
 	var events []syncEvent
-	err := c.do(ctx, http.MethodGet, "/api/units/"+project+"/"+app+"/history", &events)
+	err := c.do(ctx, http.MethodGet, "/api/units/"+url.PathEscape(project)+"/"+url.PathEscape(app)+"/history", &events)
 	return events, err
 }
 
@@ -144,7 +151,7 @@ func (c *client) listRBAC(ctx context.Context) ([]rbacRule, error) {
 
 func (c *client) sync(ctx context.Context, project, app string) (syncResponse, error) {
 	var res syncResponse
-	err := c.do(ctx, http.MethodPost, "/api/sync/"+project+"/"+app, &res)
+	err := c.do(ctx, http.MethodPost, "/api/sync/"+url.PathEscape(project)+"/"+url.PathEscape(app), &res)
 	return res, err
 }
 

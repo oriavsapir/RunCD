@@ -10,6 +10,19 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"time"
+)
+
+// readTimeout bounds the fast, read-only endpoints (units/get/history/
+// rbac). syncTimeout is far more generous: handleSync blocks synchronously
+// through fetch->diff->precondition->deploy->re-fetch, which routinely
+// exceeds readTimeout for a real Cloud Run deploy — a sync that times out
+// client-side still left the deploy running server-side, so a low timeout
+// here just trades a clear in-progress wait for a confusing client error
+// and a subsequent 409 on retry.
+const (
+	readTimeout = 30 * time.Second
+	syncTimeout = 10 * time.Minute
 )
 
 func main() {
@@ -54,21 +67,33 @@ func run(args []string, stdout, stderr io.Writer) error {
 		return errors.New("no command given")
 	}
 
+	cmd, rest := args[0], args[1:]
+
+	// help/-h/--help must work with no configuration at all — a brand-new
+	// user with RUNCD_API_URL unset yet still needs to see the command
+	// list (this is the README's own suggested first step), not a config
+	// error before the switch below even looks at cmd.
+	if cmd == "-h" || cmd == "--help" || cmd == "help" {
+		_, _ = fmt.Fprint(stdout, usage)
+		return nil
+	}
+
 	baseURL := os.Getenv("RUNCD_API_URL")
 	if baseURL == "" {
 		return errors.New("RUNCD_API_URL is required")
 	}
 
-	ctx := context.Background()
-	token, err := identityToken(ctx, os.Getenv("RUNCD_IAP_AUDIENCE"))
+	background := context.Background()
+	token, err := identityToken(background, os.Getenv("RUNCD_IAP_AUDIENCE"))
 	if err != nil {
 		return err
 	}
 	c := newClient(baseURL, token)
 
-	cmd, rest := args[0], args[1:]
 	switch cmd {
 	case "units":
+		ctx, cancel := context.WithTimeout(background, readTimeout)
+		defer cancel()
 		units, err := c.listUnits(ctx)
 		if err != nil {
 			return err
@@ -81,6 +106,8 @@ func run(args []string, stdout, stderr io.Writer) error {
 		if err != nil {
 			return err
 		}
+		ctx, cancel := context.WithTimeout(background, readTimeout)
+		defer cancel()
 		u, err := c.getUnit(ctx, project, app)
 		if err != nil {
 			return err
@@ -93,6 +120,8 @@ func run(args []string, stdout, stderr io.Writer) error {
 		if err != nil {
 			return err
 		}
+		ctx, cancel := context.WithTimeout(background, readTimeout)
+		defer cancel()
 		events, err := c.getHistory(ctx, project, app)
 		if err != nil {
 			return err
@@ -105,6 +134,8 @@ func run(args []string, stdout, stderr io.Writer) error {
 		if err != nil {
 			return err
 		}
+		ctx, cancel := context.WithTimeout(background, syncTimeout)
+		defer cancel()
 		res, err := c.sync(ctx, project, app)
 		if err != nil {
 			return err
@@ -113,15 +144,13 @@ func run(args []string, stdout, stderr io.Writer) error {
 		return nil
 
 	case "rbac":
+		ctx, cancel := context.WithTimeout(background, readTimeout)
+		defer cancel()
 		rules, err := c.listRBAC(ctx)
 		if err != nil {
 			return err
 		}
 		renderRBAC(stdout, rules)
-		return nil
-
-	case "-h", "--help", "help":
-		_, _ = fmt.Fprint(stdout, usage)
 		return nil
 
 	default:

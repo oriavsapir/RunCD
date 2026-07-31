@@ -131,6 +131,16 @@ func (r *Reconciler) RunOnce(ctx context.Context, units []expander.SyncUnit) ([]
 	for i, unit := range units {
 		g.Go(func() error {
 			res := r.reconcileOne(ctx, unit)
+			if errors.Is(res.Err, ErrSyncInProgress) {
+				// See the identical guard in ManualSync: a concurrent
+				// manual sync elsewhere already owns (or will own) this
+				// pass's applications row for this unit — upserting this
+				// attempt's stale pre-lock result would be a last-write-
+				// wins race against that write.
+				results[i] = res
+				r.notify(ctx, res)
+				return nil
+			}
 			res, err := r.upsert(ctx, res)
 			if err != nil && res.Err == nil {
 				// The aggregate error g.Wait() returns below is just the
@@ -169,6 +179,19 @@ func (r *Reconciler) RunOnce(ctx context.Context, units []expander.SyncUnit) ([]
 // the caller's verified email.
 func (r *Reconciler) ManualSync(ctx context.Context, unit expander.SyncUnit, actor string) (Result, error) {
 	res := r.reconcile(ctx, unit, syncOptions{trigger: "manual", actor: actor, force: true})
+	if errors.Is(res.Err, ErrSyncInProgress) {
+		// The winning attempt already owns (or will own) this pass's
+		// applications row — this result reflects this attempt's own
+		// pre-lock fetch, not the winner's outcome. Upserting it anyway
+		// would be a last-write-wins race against the winner's own write:
+		// if this write lands second, it clobbers the winner's fresher
+		// status back to this stale one, and incorrectly resets
+		// status_since/health_since (upsert's CASE only preserves them
+		// when the new status matches the existing row) — which the
+		// notifier's healthDegraded/outOfSyncGated duration rules key off.
+		r.notify(ctx, res)
+		return res, nil
+	}
 	res, err := r.upsert(ctx, res)
 	// Notify regardless of the upsert outcome — see the identical note in
 	// RunOnce above.

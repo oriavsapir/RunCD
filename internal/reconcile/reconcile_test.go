@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -442,20 +443,29 @@ type flakyDB struct {
 	failApp string
 }
 
+// matchesFailApp only matches the applications-table write itself, not
+// every DB call naming failApp as an argument — the per-unit sync_locks
+// lock (acquireLock, ExecContext) also passes app as its first arg, and
+// would otherwise be the one that fails instead of the applications
+// upsert these tests are actually about.
+func (f *flakyDB) matchesFailApp(query string, args []any) bool {
+	if !strings.Contains(query, "applications") {
+		return false
+	}
+	app, ok := args[0].(string)
+	return ok && app == f.failApp
+}
+
 func (f *flakyDB) ExecContext(ctx context.Context, query string, args ...any) (sql.Result, error) {
-	if len(args) > 0 {
-		if app, ok := args[0].(string); ok && app == f.failApp {
-			return nil, fmt.Errorf("simulated write failure for %s", app)
-		}
+	if len(args) > 0 && f.matchesFailApp(query, args) {
+		return nil, fmt.Errorf("simulated write failure for %s", args[0])
 	}
 	return f.DB.ExecContext(ctx, query, args...)
 }
 
 func (f *flakyDB) QueryRowContext(ctx context.Context, query string, args ...any) *sql.Row {
-	if len(args) > 0 {
-		if app, ok := args[0].(string); ok && app == f.failApp {
-			return f.DB.QueryRowContext(ctx, "SELECT 1 FROM __simulated_write_failure__")
-		}
+	if len(args) > 0 && f.matchesFailApp(query, args) {
+		return f.DB.QueryRowContext(ctx, "SELECT 1 FROM __simulated_write_failure__")
 	}
 	return f.DB.QueryRowContext(ctx, query, args...)
 }
@@ -1286,5 +1296,55 @@ func TestManualSync_LockReleasedAfterAttemptCompletes(t *testing.T) {
 	}
 	if errors.Is(res.Err, ErrSyncInProgress) {
 		t.Fatalf("expected the lock to be released after the first attempt completed, got %+v", res)
+	}
+}
+
+// TestManualSync_LockContention_DoesNotUpsertStaleResult is the regression
+// test for a race the lock itself doesn't close: a losing attempt still
+// computed a result from its own pre-lock fetch (e.g. OutOfSync, from
+// before the winner's deploy) — unconditionally upserting that anyway,
+// like ManualSync/RunOnce used to, is a last-write-wins race against the
+// winner's own write. If this write lands after the winner's, it clobbers
+// the winner's fresher status back to the loser's stale one and
+// incorrectly resets status_since (which the notifier's duration-based
+// rules key off). ManualSync must skip the upsert entirely when it loses
+// the lock, not just skip the deploy.
+func TestManualSync_LockContention_DoesNotUpsertStaleResult(t *testing.T) {
+	db := testutil.NewPostgres(t)
+	unit := expander.SyncUnit{App: "widget-api", Project: "example-prod-us", Sync: manualSync()}
+
+	// Simulate another attempt already holding this unit's lock.
+	if _, err := db.ExecContext(context.Background(), `
+		INSERT INTO sync_locks (application, target_gcp_project, holder, expires_at)
+		VALUES ('widget-api', 'example-prod-us', 'other-attempt', now() + interval '1 minute')`); err != nil {
+		t.Fatalf("seed sync_locks: %v", err)
+	}
+
+	r := &Reconciler{
+		DB:            db,
+		ManagedFields: []string{"image"},
+		Manifests:     &fakeManifests{byApp: map[string][]byte{"widget-api": serviceYAML()}},
+		CloudRun: &fakeCloudRun{services: map[string]*cloudrun.LiveService{
+			"example-prod-us/widget-api": {ServiceState: cloudrun.ServiceState{ImageDigest: "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}, LatestRevisionReady: true},
+		}},
+		Preconditions: &fakePreconditions{},
+	}
+
+	res, err := r.ManualSync(context.Background(), unit, "alice@company.com")
+	if err != nil {
+		t.Fatalf("ManualSync: %v", err)
+	}
+	if !errors.Is(res.Err, ErrSyncInProgress) {
+		t.Fatalf("expected ErrSyncInProgress, got %+v", res)
+	}
+
+	var count int
+	if err := db.QueryRowContext(context.Background(),
+		`SELECT count(*) FROM applications WHERE name = 'widget-api' AND target_gcp_project = 'example-prod-us'`,
+	).Scan(&count); err != nil {
+		t.Fatalf("query applications: %v", err)
+	}
+	if count != 0 {
+		t.Fatalf("expected no applications row written by the losing attempt, found %d", count)
 	}
 }

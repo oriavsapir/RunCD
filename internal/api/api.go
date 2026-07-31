@@ -83,7 +83,12 @@ type syncResponse struct {
 func verify(w http.ResponseWriter, r *http.Request, a auth.Authenticator) (string, bool) {
 	email, err := a.Verify(r)
 	if err != nil {
-		log.Printf("auth: %v", err)
+		// %q, not %v: err can wrap a JWT/token-library error whose text may
+		// echo back raw request-derived bytes (a malformed token, header
+		// content) — the same log-injection concern logSensitive below
+		// guards against for app/project/email, just applied here to the
+		// error text itself rather than only the plain string fields.
+		log.Printf("auth: %q", err) //nolint:gosec
 		http.Error(w, "invalid token", http.StatusUnauthorized)
 		return "", false
 	}

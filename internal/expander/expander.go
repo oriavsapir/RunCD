@@ -55,6 +55,15 @@ func Expand(root *config.Root) ([]SyncUnit, error) {
 			if !resolved[project] {
 				return nil, fmt.Errorf("app %q: exclude references project %q not in environment %q", app.Name, project, app.Env)
 			}
+			// A project both overridden and excluded is a real config
+			// mistake, not a meaningless combination worth silently
+			// resolving one way — the override would otherwise expand
+			// (or fail to expand) to nothing, unreachable and unused,
+			// exactly the kind of silent misexpansion the checks above
+			// this one already fail loudly on instead.
+			if _, ok := app.Overrides[project]; ok {
+				return nil, fmt.Errorf("app %q: project %q is both overridden and excluded", app.Name, project)
+			}
 			excluded[project] = true
 		}
 
