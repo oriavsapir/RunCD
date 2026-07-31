@@ -143,6 +143,54 @@ func (h *Handler) handleUnitDetail(w http.ResponseWriter, r *http.Request) {
 	_ = json.NewEncoder(w).Encode(v)
 }
 
+// dryRunView previews what a manual sync would compute — status, health,
+// desired/live image — without any of it being persisted. Deliberately
+// omits the reconcile error text itself: like handleSync, a precondition
+// failure or a raw GCP/DB error isn't safe to echo verbatim to the client
+// (see logSensitive in api.go); Status already surfaces Invalid/Missing.
+type dryRunView struct {
+	App          string `json:"app"`
+	Project      string `json:"project"`
+	Status       string `json:"status"`
+	Health       string `json:"health"`
+	DesiredImage string `json:"desiredImage,omitempty"`
+	LiveImage    string `json:"liveImage,omitempty"`
+}
+
+// handleDryRun previews a manual sync (§ dry-run/diff preview): the same
+// fetch/precondition/diff/health computation ManualSync does, but never
+// deploys and never touches the DB — safe to call right before a real sync,
+// or repeatedly, with no side effects.
+func (h *Handler) handleDryRun(w http.ResponseWriter, r *http.Request) {
+	if _, ok := verify(w, r, h.Auth); !ok {
+		return
+	}
+
+	project := r.PathValue("project")
+	app := r.PathValue("app")
+	unit, ok := h.Units.Find(app, project)
+	if !ok {
+		http.Error(w, "unknown app/project", http.StatusNotFound)
+		return
+	}
+
+	res := h.Reconciler.Load().DryRun(r.Context(), unit)
+	if res.Err != nil {
+		log.Printf("dry run %q/%q: %v", app, project, res.Err) //nolint:gosec // %q escapes control chars, see the note on logSensitive in api.go
+	}
+
+	v := dryRunView{
+		App:          app,
+		Project:      project,
+		Status:       res.Status,
+		Health:       res.Health,
+		DesiredImage: res.DesiredImage,
+		LiveImage:    res.LiveImage,
+	}
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(v)
+}
+
 // syncEventView is the JSON shape for one sync_events row.
 type syncEventView struct {
 	ID         int64      `json:"id"`

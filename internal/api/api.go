@@ -65,6 +65,7 @@ func NewMux(h *Handler) *http.ServeMux {
 	mux.HandleFunc("GET /api/units", h.handleListUnits)
 	mux.HandleFunc("GET /api/units/{project}/{app}", h.handleUnitDetail)
 	mux.HandleFunc("GET /api/units/{project}/{app}/history", h.handleUnitHistory)
+	mux.HandleFunc("GET /api/units/{project}/{app}/dry-run", h.handleDryRun)
 	mux.HandleFunc("GET /api/rbac", h.handleListRBAC)
 	mux.HandleFunc("GET /api/config", h.handleConfig)
 	mux.HandleFunc("POST /api/sync/{project}/{app}", h.handleSync)

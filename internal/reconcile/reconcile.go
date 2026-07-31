@@ -109,6 +109,16 @@ type Reconciler struct {
 	Workers       int
 	// Notifier is optional; nil means no notifications are evaluated.
 	Notifier Notifier
+	// Now is optional; nil means time.Now. Overridden in tests so sync
+	// window evaluation is deterministic instead of racing the real clock.
+	Now func() time.Time
+}
+
+func (r *Reconciler) now() time.Time {
+	if r.Now != nil {
+		return r.Now()
+	}
+	return time.Now()
 }
 
 // RunOnce reconciles every unit concurrently, bounded to r.Workers (default
@@ -123,6 +133,10 @@ func (r *Reconciler) RunOnce(ctx context.Context, units []expander.SyncUnit) ([]
 	var g errgroup.Group
 	g.SetLimit(workers)
 
+	// Computed once for the whole pass, not per unit inside applyLiveState —
+	// see syncOptions.now's doc comment.
+	now := r.now()
+
 	// Deliberately not errgroup.WithContext: that cancels every other
 	// in-flight unit's context the instant any single unit's upsert fails,
 	// which would discard perfectly good results for the rest of the fleet
@@ -130,7 +144,7 @@ func (r *Reconciler) RunOnce(ctx context.Context, units []expander.SyncUnit) ([]
 	// happen ("one bad file can't take down the fleet").
 	for i, unit := range units {
 		g.Go(func() error {
-			res := r.reconcileOne(ctx, unit)
+			res := r.reconcileOne(ctx, unit, now)
 			if errors.Is(res.Err, ErrSyncInProgress) {
 				// See the identical guard in ManualSync: a concurrent
 				// manual sync elsewhere already owns (or will own) this
@@ -178,7 +192,7 @@ func (r *Reconciler) RunOnce(ctx context.Context, units []expander.SyncUnit) ([]
 // regardless of the unit's auto flag, with trigger=manual and actor set to
 // the caller's verified email.
 func (r *Reconciler) ManualSync(ctx context.Context, unit expander.SyncUnit, actor string) (Result, error) {
-	res := r.reconcile(ctx, unit, syncOptions{trigger: "manual", actor: actor, force: true})
+	res := r.reconcile(ctx, unit, syncOptions{trigger: "manual", actor: actor, force: true, now: r.now()})
 	if errors.Is(res.Err, ErrSyncInProgress) {
 		// The winning attempt already owns (or will own) this pass's
 		// applications row — this result reflects this attempt's own
@@ -217,10 +231,30 @@ type syncOptions struct {
 	// failed precondition or unprovisioned resource blocks deploy
 	// regardless of trigger (§5.10).
 	force bool
+	// dryRun computes fetch/precondition/diff/health exactly as a real sync
+	// would, but never deploys — checked ahead of force in applyLiveState,
+	// so a dry run never reaches deploySyncUnit and never takes a sync_locks
+	// row.
+	dryRun bool
+	// now is when this attempt's sync-window check should be evaluated
+	// against — computed once per pass (RunOnce/ManualSync/DryRun), not
+	// inside applyLiveState per unit, so a single pass gives every unit a
+	// consistent, reproducible answer even as it straddles a window
+	// boundary. Only consulted on the auto (non-force, non-dryRun) path.
+	now time.Time
 }
 
-func (r *Reconciler) reconcileOne(ctx context.Context, unit expander.SyncUnit) Result {
-	return r.reconcile(ctx, unit, syncOptions{trigger: "auto", actor: "runcd-controller"})
+// DryRun previews what a manual sync would do — the same fetch,
+// precondition-check, diff, and health assessment as ManualSync — without
+// deploying, without acquiring the per-unit sync lock, and without
+// persisting anything (no applications upsert, no sync_events row). Safe to
+// call concurrently with a real sync of the same unit.
+func (r *Reconciler) DryRun(ctx context.Context, unit expander.SyncUnit) Result {
+	return r.reconcile(ctx, unit, syncOptions{trigger: "manual", dryRun: true, now: r.now()})
+}
+
+func (r *Reconciler) reconcileOne(ctx context.Context, unit expander.SyncUnit, now time.Time) Result {
+	return r.reconcile(ctx, unit, syncOptions{trigger: "auto", actor: "runcd-controller", now: now})
 }
 
 func (r *Reconciler) reconcile(ctx context.Context, unit expander.SyncUnit, opts syncOptions) Result {
@@ -339,7 +373,8 @@ func (r *Reconciler) applyLiveState(ctx context.Context, res Result, unit expand
 	}
 
 	blocked := res.Status == StatusInvalid || res.Status == StatusMissing
-	shouldDeploy := !blocked && (opts.force || (res.Status == string(diff.OutOfSync) && autoSyncEnabled(unit.Sync)))
+	autoAllowed := autoSyncEnabled(unit.Sync) && config.WindowsAllow(unit.Sync.SyncWindows, opts.now)
+	shouldDeploy := !opts.dryRun && !blocked && (opts.force || (res.Status == string(diff.OutOfSync) && autoAllowed))
 	if shouldDeploy {
 		res = r.deploySyncUnit(ctx, res, unit, desired, live, resourceType, deploy, fetch, opts)
 	}

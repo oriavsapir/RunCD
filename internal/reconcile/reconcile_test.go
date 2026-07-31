@@ -12,6 +12,7 @@ import (
 
 	"github.com/runcd/runcd/internal/cloudrun"
 	"github.com/runcd/runcd/internal/config"
+	"github.com/runcd/runcd/internal/diff"
 	"github.com/runcd/runcd/internal/expander"
 	"github.com/runcd/runcd/internal/testutil"
 )
@@ -577,6 +578,54 @@ func TestRunOnce_DeploysOutOfSyncAutoUnit(t *testing.T) {
 	}
 	if trigger != "auto" || actor != "runcd-controller" || fromImage != oldDigest || toImage != validDigest || result != "succeeded" {
 		t.Fatalf("unexpected sync_events row: trigger=%s actor=%s from=%s to=%s result=%s", trigger, actor, fromImage, toImage, result)
+	}
+}
+
+// TestRunOnce_DeniedSyncWindowBlocksAutoDeployButNotManualSync is the
+// reconcile-level guarantee behind the roadmap's "auto-sync only allow/deny
+// between these hours": a deny window blocks RunOnce's auto path, but a
+// human's ManualSync (force=true) always bypasses it.
+func TestRunOnce_DeniedSyncWindowBlocksAutoDeployButNotManualSync(t *testing.T) {
+	db := testutil.NewPostgres(t)
+	oldDigest := "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+	cr := &fakeCloudRun{services: map[string]*cloudrun.LiveService{
+		"example-dev-01/widget-api": {ServiceState: cloudrun.ServiceState{ImageDigest: oldDigest}, LatestRevisionReady: true},
+	}}
+	// 2026-08-01 is a Saturday (UTC) — inside the deny window below.
+	saturday := time.Date(2026, time.August, 1, 12, 0, 0, 0, time.UTC)
+	r := &Reconciler{
+		DB:            db,
+		ManagedFields: []string{"image"},
+		Manifests:     &fakeManifests{byApp: map[string][]byte{"widget-api": serviceYAML()}},
+		CloudRun:      cr,
+		Preconditions: &fakePreconditions{},
+		Now:           func() time.Time { return saturday },
+	}
+
+	sync := autoSync()
+	sync.SyncWindows = []config.SyncWindow{{Kind: config.SyncWindowDeny, Days: []string{"Sat", "Sun"}}}
+	unit := expander.SyncUnit{App: "widget-api", Project: "example-dev-01", Sync: sync}
+
+	results, err := r.RunOnce(context.Background(), []expander.SyncUnit{unit})
+	if err != nil {
+		t.Fatalf("RunOnce: %v", err)
+	}
+	if results[0].Status != string(diff.OutOfSync) {
+		t.Fatalf("expected the deny window to block the auto deploy, got %+v", results[0])
+	}
+	if got := liveServiceDigest(t, cr, "example-dev-01/widget-api"); got != oldDigest {
+		t.Fatalf("expected no deploy while inside a deny window, got digest %q", got)
+	}
+
+	res, err := r.ManualSync(context.Background(), unit, "alice@company.com")
+	if err != nil {
+		t.Fatalf("ManualSync: %v", err)
+	}
+	if res.Status != "Synced" {
+		t.Fatalf("expected a manual (forced) sync to bypass the sync window, got %+v", res)
+	}
+	if got := liveServiceDigest(t, cr, "example-dev-01/widget-api"); got != validDigest {
+		t.Fatalf("expected manual sync to have deployed despite the deny window, got digest %q", got)
 	}
 }
 
@@ -1346,5 +1395,82 @@ func TestManualSync_LockContention_DoesNotUpsertStaleResult(t *testing.T) {
 	}
 	if count != 0 {
 		t.Fatalf("expected no applications row written by the losing attempt, found %d", count)
+	}
+}
+
+// TestDryRun_ComputesResultWithoutDeployingOrPersisting guards against the
+// exact trap dry-run implementations fall into: it must short-circuit
+// before deploySyncUnit, not just skip the deploy() call inside it — a dry
+// run that reached deploySyncUnit would still take the sync_locks row,
+// upsert applications, and write a sync_events row, none of which a preview
+// should ever do.
+func TestDryRun_ComputesResultWithoutDeployingOrPersisting(t *testing.T) {
+	db := testutil.NewPostgres(t)
+	oldDigest := "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+	cr := &fakeCloudRun{services: map[string]*cloudrun.LiveService{
+		"example-prod-us/widget-api": {ServiceState: cloudrun.ServiceState{ImageDigest: oldDigest}, LatestRevisionReady: true},
+	}}
+	r := &Reconciler{
+		DB:            db,
+		ManagedFields: []string{"image"},
+		Manifests:     &fakeManifests{byApp: map[string][]byte{"widget-api": serviceYAML()}},
+		CloudRun:      cr,
+		Preconditions: &fakePreconditions{},
+	}
+
+	unit := expander.SyncUnit{App: "widget-api", Project: "example-prod-us", Sync: manualSync()}
+	res := r.DryRun(context.Background(), unit)
+
+	if res.Status != string(diff.OutOfSync) {
+		t.Fatalf("expected the preview to report OutOfSync, got %+v", res)
+	}
+	if got := liveServiceDigest(t, cr, "example-prod-us/widget-api"); got != oldDigest {
+		t.Fatalf("dry run must never deploy, but live digest changed to %q", got)
+	}
+
+	var appCount, lockCount, eventCount int
+	if err := db.QueryRowContext(context.Background(), `SELECT count(*) FROM applications`).Scan(&appCount); err != nil {
+		t.Fatalf("query applications: %v", err)
+	}
+	if err := db.QueryRowContext(context.Background(), `SELECT count(*) FROM sync_locks`).Scan(&lockCount); err != nil {
+		t.Fatalf("query sync_locks: %v", err)
+	}
+	if err := db.QueryRowContext(context.Background(), `SELECT count(*) FROM sync_events`).Scan(&eventCount); err != nil {
+		t.Fatalf("query sync_events: %v", err)
+	}
+	if appCount != 0 || lockCount != 0 || eventCount != 0 {
+		t.Fatalf("expected no persisted rows from a dry run, got applications=%d sync_locks=%d sync_events=%d", appCount, lockCount, eventCount)
+	}
+}
+
+// TestDryRun_DoesNotBlockAConcurrentRealSync is the concrete version of "no
+// sync_locks row": a dry run running against a unit a real manual sync is
+// about to touch must not contend for that unit's lock at all.
+func TestDryRun_DoesNotBlockAConcurrentRealSync(t *testing.T) {
+	db := testutil.NewPostgres(t)
+	cr := &fakeCloudRun{services: map[string]*cloudrun.LiveService{
+		"example-prod-us/widget-api": {
+			ServiceState:                cloudrun.ServiceState{ImageDigest: validDigest},
+			HasRevisionForDesiredDigest: true,
+			LatestRevisionReady:         true,
+		},
+	}}
+	r := &Reconciler{
+		DB:            db,
+		ManagedFields: []string{"image"},
+		Manifests:     &fakeManifests{byApp: map[string][]byte{"widget-api": serviceYAML()}},
+		CloudRun:      cr,
+		Preconditions: &fakePreconditions{},
+	}
+	unit := expander.SyncUnit{App: "widget-api", Project: "example-prod-us", Sync: manualSync()}
+
+	r.DryRun(context.Background(), unit)
+
+	res, err := r.ManualSync(context.Background(), unit, "alice@company.com")
+	if err != nil {
+		t.Fatalf("ManualSync: %v", err)
+	}
+	if errors.Is(res.Err, ErrSyncInProgress) {
+		t.Fatalf("a prior dry run must not leave a lock behind, got %+v", res)
 	}
 }

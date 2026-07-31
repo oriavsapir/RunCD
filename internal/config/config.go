@@ -18,10 +18,11 @@ type RetryPolicy struct {
 // per environment, Retry/SelfHeal are inherited from defaults unless
 // overridden (§5.1).
 type SyncPolicy struct {
-	Auto     *bool        `yaml:"auto,omitempty"`
-	Interval *int         `yaml:"interval,omitempty"`
-	Retry    *RetryPolicy `yaml:"retry,omitempty"`
-	SelfHeal *bool        `yaml:"selfHeal,omitempty"`
+	Auto        *bool        `yaml:"auto,omitempty"`
+	Interval    *int         `yaml:"interval,omitempty"`
+	Retry       *RetryPolicy `yaml:"retry,omitempty"`
+	SelfHeal    *bool        `yaml:"selfHeal,omitempty"`
+	SyncWindows []SyncWindow `yaml:"syncWindows,omitempty"`
 }
 
 // Merge returns a copy of base with any field set on override replacing it.
@@ -39,7 +40,52 @@ func (base SyncPolicy) Merge(override SyncPolicy) SyncPolicy {
 	if override.SelfHeal != nil {
 		merged.SelfHeal = override.SelfHeal
 	}
+	if override.SyncWindows != nil {
+		merged.SyncWindows = override.SyncWindows
+	}
 	return merged
+}
+
+type SyncWindowKind string
+
+const (
+	SyncWindowAllow SyncWindowKind = "allow"
+	SyncWindowDeny  SyncWindowKind = "deny"
+)
+
+// SyncWindow gates auto-sync (never a manual/forced sync — §5.10-style
+// "force always deploys") to specific days and UTC hours, ArgoCD's
+// AppProject.syncWindows without a cron dependency. Deny always wins over
+// allow; if no allow window is declared at all, auto-sync is permitted
+// everywhere a deny window doesn't match.
+type SyncWindow struct {
+	Kind SyncWindowKind `yaml:"kind"`
+	// Days is a subset of Mon/Tue/Wed/Thu/Fri/Sat/Sun; empty means every day.
+	Days []string `yaml:"days,omitempty"`
+	// StartHour/EndHour are UTC hours in [0,24]. Equal (including the zero
+	// value) means "all day". StartHour > EndHour wraps past midnight, e.g.
+	// 22/6 covers 22:00-06:00 UTC.
+	StartHour int `yaml:"startHour,omitempty"`
+	EndHour   int `yaml:"endHour,omitempty"`
+}
+
+var validSyncWindowDays = map[string]bool{
+	"Mon": true, "Tue": true, "Wed": true, "Thu": true, "Fri": true, "Sat": true, "Sun": true,
+}
+
+func (w SyncWindow) validate() error {
+	if w.Kind != SyncWindowAllow && w.Kind != SyncWindowDeny {
+		return fmt.Errorf("syncWindows: kind %q must be \"allow\" or \"deny\"", w.Kind)
+	}
+	for _, d := range w.Days {
+		if !validSyncWindowDays[d] {
+			return fmt.Errorf("syncWindows: %q is not a valid day (Mon..Sun)", d)
+		}
+	}
+	if w.StartHour < 0 || w.StartHour > 24 || w.EndHour < 0 || w.EndHour > 24 {
+		return fmt.Errorf("syncWindows: startHour/endHour must be within [0,24], got %d/%d", w.StartHour, w.EndHour)
+	}
+	return nil
 }
 
 type Environment struct {
@@ -130,6 +176,18 @@ func Parse(data []byte) (*Root, error) {
 	for _, f := range root.Defaults.ManagedFields {
 		if !validManagedFields[f] {
 			return nil, fmt.Errorf("defaults.managedFields: %q is not a field runcd knows how to manage (image, traffic)", f)
+		}
+	}
+	for _, w := range root.Defaults.Sync.SyncWindows {
+		if err := w.validate(); err != nil {
+			return nil, fmt.Errorf("defaults.sync: %w", err)
+		}
+	}
+	for envName, env := range root.Environments {
+		for _, w := range env.Sync.SyncWindows {
+			if err := w.validate(); err != nil {
+				return nil, fmt.Errorf("environments[%q].sync: %w", envName, err)
+			}
 		}
 	}
 	for _, rule := range root.Notify.Rules {

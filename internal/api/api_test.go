@@ -599,6 +599,54 @@ func TestHandleUnitDetail_UnknownUnitRejected(t *testing.T) {
 	}
 }
 
+// TestHandleDryRun_ReportsOutOfSyncWithoutDeployingOrPersisting is the API
+// counterpart to reconcile.TestDryRun_ComputesResultWithoutDeployingOrPersisting:
+// the same guarantee has to hold end-to-end through the HTTP handler, not
+// just at the Reconciler method.
+func TestHandleDryRun_ReportsOutOfSyncWithoutDeployingOrPersisting(t *testing.T) {
+	h, cr := newTestHandler(t)
+	srv := httptest.NewServer(NewMux(h))
+	defer srv.Close()
+
+	resp := getWithBearer(t, srv.URL+"/api/units/example-prod-eu/widget-api/dry-run", "admin-token")
+	defer func() { _ = resp.Body.Close() }()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("expected 200, got %d", resp.StatusCode)
+	}
+	var v dryRunView
+	if err := json.NewDecoder(resp.Body).Decode(&v); err != nil {
+		t.Fatalf("decode dry-run response: %v", err)
+	}
+	if v.Status != "OutOfSync" {
+		t.Fatalf("expected OutOfSync, got %+v", v)
+	}
+	if got := cr.services["example-prod-eu/widget-api"].ImageDigest; got == validDigest {
+		t.Fatalf("dry run must never deploy, but live digest changed to %q", got)
+	}
+
+	histResp := getWithBearer(t, srv.URL+"/api/units/example-prod-eu/widget-api/history", "admin-token")
+	defer func() { _ = histResp.Body.Close() }()
+	var events []syncEventView
+	if err := json.NewDecoder(histResp.Body).Decode(&events); err != nil {
+		t.Fatalf("decode history response: %v", err)
+	}
+	if len(events) != 0 {
+		t.Fatalf("expected no sync_events written by a dry run, got %d", len(events))
+	}
+}
+
+func TestHandleDryRun_UnknownUnitRejected(t *testing.T) {
+	h, _ := newTestHandler(t)
+	srv := httptest.NewServer(NewMux(h))
+	defer srv.Close()
+
+	resp := getWithBearer(t, srv.URL+"/api/units/example-prod-eu/nonexistent-app/dry-run", "admin-token")
+	defer func() { _ = resp.Body.Close() }()
+	if resp.StatusCode != http.StatusNotFound {
+		t.Fatalf("expected 404, got %d", resp.StatusCode)
+	}
+}
+
 // TestHandleUnitHistory_ReturnsSyncEventAfterSync checks the history
 // endpoint surfaces the audit trail a manual sync writes to sync_events.
 func TestHandleUnitHistory_ReturnsSyncEventAfterSync(t *testing.T) {

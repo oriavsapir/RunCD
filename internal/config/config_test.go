@@ -212,3 +212,95 @@ notify:
 		t.Fatal("expected error for a malformed slackWebhookUrl")
 	}
 }
+
+func TestParse_SyncWindowsValid(t *testing.T) {
+	yaml := []byte(`
+environments:
+  prd:
+    projects: [example-prod-us]
+    sync:
+      auto: true
+      syncWindows:
+        - kind: deny
+          days: [Sat, Sun]
+        - kind: allow
+          days: [Mon, Tue, Wed, Thu, Fri]
+          startHour: 9
+          endHour: 17
+defaults:
+  region: us-central1
+`)
+	root, err := Parse(yaml)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	windows := root.Environments["prd"].Sync.SyncWindows
+	if len(windows) != 2 || windows[0].Kind != SyncWindowDeny || windows[1].Kind != SyncWindowAllow {
+		t.Fatalf("syncWindows not parsed correctly: %+v", windows)
+	}
+}
+
+func TestParse_SyncWindowsRejectUnknownKind(t *testing.T) {
+	yaml := []byte(`
+environments:
+  prd:
+    projects: [example-prod-us]
+    sync:
+      syncWindows:
+        - kind: block
+defaults:
+  region: us-central1
+`)
+	if _, err := Parse(yaml); err == nil {
+		t.Fatal("expected error for an unknown syncWindows kind")
+	}
+}
+
+func TestParse_SyncWindowsRejectInvalidDay(t *testing.T) {
+	yaml := []byte(`
+environments:
+  prd:
+    projects: [example-prod-us]
+    sync:
+      syncWindows:
+        - kind: deny
+          days: [Someday]
+defaults:
+  region: us-central1
+`)
+	if _, err := Parse(yaml); err == nil {
+		t.Fatal("expected error for an invalid syncWindows day")
+	}
+}
+
+func TestParse_SyncWindowsRejectOutOfRangeHour(t *testing.T) {
+	yaml := []byte(`
+environments:
+  prd:
+    projects: [example-prod-us]
+    sync:
+      syncWindows:
+        - kind: allow
+          startHour: 25
+defaults:
+  region: us-central1
+`)
+	if _, err := Parse(yaml); err == nil {
+		t.Fatal("expected error for an out-of-range syncWindows hour")
+	}
+}
+
+func TestSyncPolicyMerge_SyncWindowsReplacedWholesaleWhenOverridden(t *testing.T) {
+	base := SyncPolicy{SyncWindows: []SyncWindow{{Kind: SyncWindowDeny, Days: []string{"Sat"}}}}
+	override := SyncPolicy{SyncWindows: []SyncWindow{{Kind: SyncWindowAllow}}}
+	merged := base.Merge(override)
+	if len(merged.SyncWindows) != 1 || merged.SyncWindows[0].Kind != SyncWindowAllow {
+		t.Fatalf("expected override's syncWindows to replace base's entirely, got %+v", merged.SyncWindows)
+	}
+
+	unset := SyncPolicy{}
+	merged = base.Merge(unset)
+	if len(merged.SyncWindows) != 1 || merged.SyncWindows[0].Kind != SyncWindowDeny {
+		t.Fatalf("expected base's syncWindows to survive an override that doesn't set it, got %+v", merged.SyncWindows)
+	}
+}
