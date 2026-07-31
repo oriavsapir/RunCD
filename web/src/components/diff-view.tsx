@@ -1,4 +1,4 @@
-import { ArrowRight, GitCompare } from "lucide-react";
+import { ArrowRight, GitCompare, MapPin, Zap, ZapOff } from "lucide-react";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { StatusBadge } from "@/components/status-badge";
 import type { Unit } from "@/lib/types";
@@ -19,7 +19,7 @@ export function DiffView({ unit }: { unit: Unit }) {
     <Card>
       <CardHeader>
         <CardTitle className="flex items-center gap-2">
-          <GitCompare className="text-muted-foreground size-4" />
+          <GitCompare className="text-primary size-4" />
           Desired vs Live
         </CardTitle>
       </CardHeader>
@@ -57,10 +57,25 @@ export function DiffView({ unit }: { unit: Unit }) {
           )}
 
           <dt className="text-muted-foreground">Region</dt>
-          <dd>{unit.region}</dd>
+          <dd className="flex items-center gap-1.5">
+            <MapPin className="text-muted-foreground size-3.5" />
+            {unit.region}
+          </dd>
 
           <dt className="text-muted-foreground">Auto-sync</dt>
-          <dd>{unit.auto ? "enabled" : "gated (manual only)"}</dd>
+          <dd className="flex items-center gap-1.5">
+            {unit.auto ? (
+              <>
+                <Zap className="size-3.5 text-emerald-600 dark:text-emerald-400" />
+                enabled
+              </>
+            ) : (
+              <>
+                <ZapOff className="text-muted-foreground size-3.5" />
+                gated (manual only)
+              </>
+            )}
+          </dd>
 
           <dt className="text-muted-foreground">Last reconciled</dt>
           <dd>

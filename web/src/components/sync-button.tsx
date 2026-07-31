@@ -3,6 +3,11 @@
 import { useState } from "react";
 import { RefreshCw } from "lucide-react";
 import { Button } from "@/components/ui/button";
+import {
+  Tooltip,
+  TooltipContent,
+  TooltipTrigger,
+} from "@/components/ui/tooltip";
 import { ApiError, syncUnit } from "@/lib/api";
 import type { Unit } from "@/lib/types";
 
@@ -33,22 +38,32 @@ export function SyncButton({ unit, onSynced, size = "default" }: SyncButtonProps
     }
   }
 
+  const button = (
+    <Button
+      size={size}
+      variant="outline"
+      disabled={!unit.canSync || pending}
+      onClick={handleClick}
+    >
+      <RefreshCw className={pending ? "animate-spin" : undefined} />
+      Sync
+    </Button>
+  );
+
   return (
     <div className="flex flex-col items-end gap-1">
-      <Button
-        size={size}
-        variant="outline"
-        disabled={!unit.canSync || pending}
-        onClick={handleClick}
-        title={
-          unit.canSync
-            ? undefined
-            : "You don't have permission to sync this app/project"
-        }
-      >
-        <RefreshCw className={pending ? "animate-spin" : undefined} />
-        Sync
-      </Button>
+      {unit.canSync ? (
+        button
+      ) : (
+        <Tooltip>
+          <TooltipTrigger render={<span tabIndex={0} />}>
+            {button}
+          </TooltipTrigger>
+          <TooltipContent>
+            You don&apos;t have permission to sync this app/project
+          </TooltipContent>
+        </Tooltip>
+      )}
       {error && <p className="text-destructive text-xs">{error}</p>}
     </div>
   );

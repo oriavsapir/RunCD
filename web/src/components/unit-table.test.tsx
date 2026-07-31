@@ -20,7 +20,7 @@ function unit(overrides: Partial<Unit>): Unit {
 describe("UnitTable", () => {
   it("shows an empty-state message when there are no units", () => {
     render(<UnitTable units={[]} />);
-    expect(screen.getByText(/no sync units configured/i)).toBeInTheDocument();
+    expect(screen.getByText(/no sync units match/i)).toBeInTheDocument();
   });
 
   it("groups units by environment, per §5.11", () => {

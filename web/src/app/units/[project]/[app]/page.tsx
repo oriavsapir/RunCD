@@ -42,6 +42,14 @@ export default function UnitDetailPage() {
     };
   }, [project, app, refreshKey]);
 
+  const degraded =
+    !!unit &&
+    (unit.status === "Degraded" ||
+      unit.status === "Invalid" ||
+      unit.health === "Degraded" ||
+      unit.health === "Invalid");
+  const lastFailure = events?.find((e) => e.result === "failed");
+
   return (
     <main className="mx-auto flex w-full max-w-3xl flex-1 flex-col gap-6 p-6">
       <div>
@@ -71,6 +79,21 @@ export default function UnitDetailPage() {
           <AlertCircle />
           <AlertTitle>Failed to load unit</AlertTitle>
           <AlertDescription>{error}</AlertDescription>
+        </Alert>
+      )}
+
+      {!error && degraded && (
+        <Alert variant="destructive">
+          <AlertCircle />
+          <AlertTitle>
+            {unit!.status === "Degraded" || unit!.status === "Invalid"
+              ? `Sync status: ${unit!.status}`
+              : `Health: ${unit!.health}`}
+          </AlertTitle>
+          <AlertDescription>
+            {lastFailure?.error ??
+              "This unit is out of a healthy, synced state. See the diff and sync history below."}
+          </AlertDescription>
         </Alert>
       )}
 
