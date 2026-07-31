@@ -73,6 +73,24 @@ func CanSync(cfg *Config, subject string, unit expander.SyncUnit) bool {
 	return false
 }
 
+// HasAnyGrant reports whether subject has any admin/syncer rule at all,
+// regardless of scope — for an endpoint like orphan detection that isn't
+// scoped to one specific unit (it fans out across every project/region the
+// whole config touches, making real GCP calls along the way), so there's no
+// single unit to check CanSync against. A caller with no sync grant
+// anywhere has no legitimate reason to burn that quota.
+func HasAnyGrant(cfg *Config, subject string) bool {
+	if cfg == nil {
+		return false
+	}
+	for _, rule := range cfg.Roles {
+		if rule.Subject == subject {
+			return true
+		}
+	}
+	return false
+}
+
 // Store holds a *Config that can be swapped out for a freshly-loaded one
 // without disrupting concurrent readers — config hot-reload (§8: RBAC
 // changes take effect on the next config poll, no controller restart)

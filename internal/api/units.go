@@ -210,10 +210,18 @@ type orphanView struct {
 
 // handleOrphans runs a live prune/orphan-detection scan (§ prune) over
 // every currently-configured unit's project/region and reports what's
-// found — open to any authenticated caller, like every other read view;
-// this only flags, it never deletes anything.
+// found. RBAC-checked like handleSync/handleDryRun, unlike the rest of the
+// read views: it fans out real Cloud Run calls across every project/region
+// the whole config touches, not just one unit, so there's no single unit
+// to scope a check against — HasAnyGrant requires the caller to have some
+// sync grant at all, rather than opening this to any authenticated caller.
 func (h *Handler) handleOrphans(w http.ResponseWriter, r *http.Request) {
-	if _, ok := verify(w, r, h.Auth); !ok {
+	email, ok := verify(w, r, h.Auth)
+	if !ok {
+		return
+	}
+	if !rbac.HasAnyGrant(h.RBAC.Get(), email) {
+		http.Error(w, "forbidden: no role grants sync access", http.StatusForbidden)
 		return
 	}
 
@@ -223,11 +231,17 @@ func (h *Handler) handleOrphans(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// DetectOrphans returns partial results alongside a non-nil err when
+	// only some project/region scans failed — serve what it found rather
+	// than discarding a fleet-wide scan over one bad project (same "one bad
+	// unit can't take down the fleet" principle RunOnce follows).
 	orphans, err := h.Reconciler.Load().DetectOrphans(r.Context(), lister.List())
 	if err != nil {
 		slog.Error("detect orphans", "error", err)
-		http.Error(w, "failed to detect orphans", http.StatusInternalServerError)
-		return
+		if orphans == nil {
+			http.Error(w, "failed to detect orphans", http.StatusInternalServerError)
+			return
+		}
 	}
 
 	views := make([]orphanView, len(orphans))

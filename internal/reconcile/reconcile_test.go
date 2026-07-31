@@ -43,10 +43,11 @@ func (f *fakeManifests) Get(_ context.Context, unit expander.SyncUnit) ([]byte, 
 }
 
 type fakeCloudRun struct {
-	services        map[string]*cloudrun.LiveService // key: project/app
-	jobs            map[string]*cloudrun.LiveJob     // key: project/app
-	deployErr       map[string]error                 // key: project/app — forces DeployService/DeployJob to fail
-	getServiceCalls atomic.Int64                     // counts GetService invocations, to prove a genuine re-fetch happens; RunOnce calls this concurrently
+	services            map[string]*cloudrun.LiveService // key: project/app
+	jobs                map[string]*cloudrun.LiveJob     // key: project/app
+	deployErr           map[string]error                 // key: project/app — forces DeployService/DeployJob to fail
+	listServiceNamesErr map[string]error                 // key: project — forces ListServiceNames to fail
+	getServiceCalls     atomic.Int64                     // counts GetService invocations, to prove a genuine re-fetch happens; RunOnce calls this concurrently
 }
 
 func (f *fakeCloudRun) GetService(_ context.Context, project, _, name, _ string) (*cloudrun.LiveService, error) {
@@ -105,8 +106,12 @@ func (f *fakeCloudRun) DeployJob(_ context.Context, project, _, name string, des
 
 // ListServiceNames derives its answer from the same services map every
 // other method here reads/writes, keyed "project/app" — no separate state
-// to keep in sync.
+// to keep in sync. listServiceNamesErr (keyed by project) lets a test force
+// one specific project's scan to fail without affecting any other.
 func (f *fakeCloudRun) ListServiceNames(_ context.Context, project, _ string) ([]string, error) {
+	if err, ok := f.listServiceNamesErr[project]; ok {
+		return nil, err
+	}
 	var names []string
 	prefix := project + "/"
 	for key := range f.services {
@@ -1583,5 +1588,37 @@ func TestFilterPreconditions(t *testing.T) {
 	got := filterPreconditions(requires, []string{"pubsubTopic:orders-events"})
 	if len(got) != 1 || got[0].Name != "shipping-events" {
 		t.Fatalf("expected only the named precondition removed, got %+v", got)
+	}
+}
+
+// TestManualSync_IgnoreFieldsImage_ForcedSyncDoesNotChangeLiveImage is the
+// regression test for a real bug: force (manual sync) always calls deploy
+// regardless of diff status, so a unit with ignoreFields: [image] must
+// still never actually change the live image — the deploy payload has to
+// substitute the live digest for the ignored field, not the manifest's.
+func TestManualSync_IgnoreFieldsImage_ForcedSyncDoesNotChangeLiveImage(t *testing.T) {
+	db := testutil.NewPostgres(t)
+	liveDigest := "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+	cr := &fakeCloudRun{services: map[string]*cloudrun.LiveService{
+		"example-prod-us/widget-api": {ServiceState: cloudrun.ServiceState{ImageDigest: liveDigest}, LatestRevisionReady: true},
+	}}
+	r := &Reconciler{
+		DB:            db,
+		ManagedFields: []string{"image"},
+		Manifests:     &fakeManifests{byApp: map[string][]byte{"widget-api": serviceYAML()}}, // manifest wants validDigest
+		CloudRun:      cr,
+		Preconditions: &fakePreconditions{},
+	}
+
+	unit := expander.SyncUnit{App: "widget-api", Project: "example-prod-us", Sync: manualSync(), IgnoreFields: []string{"image"}}
+	res, err := r.ManualSync(context.Background(), unit, "alice@company.com")
+	if err != nil {
+		t.Fatalf("ManualSync: %v", err)
+	}
+	if res.Err != nil {
+		t.Fatalf("unexpected error: %v", res.Err)
+	}
+	if got := liveServiceDigest(t, cr, "example-prod-us/widget-api"); got != liveDigest {
+		t.Fatalf("ignoreFields: [image] must make a forced sync a no-op for image, but live digest changed to %q (manifest wanted %q)", got, validDigest)
 	}
 }

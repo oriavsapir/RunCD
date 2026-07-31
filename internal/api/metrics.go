@@ -39,12 +39,21 @@ type metricsCache struct {
 	snapshot  metricsSnapshot
 }
 
+// metricsQueryTimeout bounds the underlying Postgres queries — without
+// this, a single wedged connection would hold metricsCache's mutex
+// indefinitely, blocking every future scrape (even after the cache TTL
+// expires), not just the one that hit the hang.
+const metricsQueryTimeout = 10 * time.Second
+
 func (c *metricsCache) get(ctx context.Context, status StatusStore) (metricsSnapshot, error) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	if time.Now().Before(c.expiresAt) {
 		return c.snapshot, nil
 	}
+
+	ctx, cancel := context.WithTimeout(ctx, metricsQueryTimeout)
+	defer cancel()
 
 	rows, err := status.ListApplications(ctx)
 	if err != nil {

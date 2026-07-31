@@ -150,6 +150,7 @@ roles:
 		Auth: &fakeAuth{tokenToEmail: map[string]string{
 			"admin-token":    "admin@company.com",
 			"dev-only-token": "dev-only@company.com",
+			"no-role-token":  "no-role@company.com",
 		}},
 		RBAC:    rbac.NewStore(rbacCfg),
 		Units:   StaticUnits{"widget-api/example-prod-eu": unit},
@@ -637,6 +638,22 @@ func TestHandleOrphans_FlagsLiveServiceAbsentFromConfig(t *testing.T) {
 	}
 	if len(orphans) != 1 || orphans[0].App != "leftover-app" || orphans[0].Project != "example-prod-eu" {
 		t.Fatalf("expected exactly one orphan (leftover-app), got %+v", orphans)
+	}
+}
+
+// TestHandleOrphans_NoRBACGrantForbidden guards the review finding: orphan
+// detection fans out real Cloud Run calls with no per-unit scope to check,
+// so it requires the caller to have some sync grant at all rather than
+// being open to any authenticated caller like the rest of the read views.
+func TestHandleOrphans_NoRBACGrantForbidden(t *testing.T) {
+	h, _ := newTestHandler(t)
+	srv := httptest.NewServer(NewMux(h))
+	defer srv.Close()
+
+	resp := getWithBearer(t, srv.URL+"/api/orphans", "no-role-token")
+	defer func() { _ = resp.Body.Close() }()
+	if resp.StatusCode != http.StatusForbidden {
+		t.Fatalf("expected 403, got %d", resp.StatusCode)
 	}
 }
 

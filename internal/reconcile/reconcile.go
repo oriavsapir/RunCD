@@ -283,12 +283,7 @@ func (r *Reconciler) reconcile(ctx context.Context, unit expander.SyncUnit, opts
 	managedFields := effectiveManagedFields(r.ManagedFields, unit.IgnoreFields)
 
 	desired := cloudrun.ServiceState{ImageDigest: sd.Image.Digest}
-	trafficManaged := false
-	for _, f := range managedFields {
-		if f == "traffic" {
-			trafficManaged = true
-		}
-	}
+	trafficManaged := fieldManaged(managedFields, "traffic")
 	if trafficManaged && sd.Traffic != nil {
 		desired.TrafficLatestRevisionPercent = sd.Traffic.LatestRevisionPercent
 	}
@@ -391,6 +386,16 @@ func autoSyncEnabled(sync config.SyncPolicy) bool {
 	return sync.Auto != nil && *sync.Auto
 }
 
+// fieldManaged reports whether name is in managedFields.
+func fieldManaged(managedFields []string, name string) bool {
+	for _, f := range managedFields {
+		if f == name {
+			return true
+		}
+	}
+	return false
+}
+
 // effectiveManagedFields subtracts ignore from base, preserving base's
 // order — the diff/traffic-managed logic downstream doesn't care about
 // order, but a stable result makes this deterministic to test.
@@ -450,6 +455,20 @@ func filterPreconditions(requires []manifest.Precondition, ignore []string) []ma
 // digest is a no-op"), which is why any real DeployService/DeployJob must
 // itself be idempotent for an unchanged desired digest.
 func (r *Reconciler) deploySyncUnit(ctx context.Context, res Result, unit expander.SyncUnit, desired, live cloudrun.ServiceState, resourceType string, deploy func(context.Context, cloudrun.ServiceState) error, fetch func(context.Context) (cloudrun.ServiceState, string, error), opts syncOptions, managedFields []string) Result {
+	// Unlike traffic (whose "unmanaged" state is representable as nil and
+	// DeployService/DeployJob skip touching it entirely), image has no such
+	// representation — the real GCP client always writes desired.ImageDigest
+	// into the container spec unconditionally. So when "image" isn't in
+	// this unit's effective managedFields (config.App.IgnoreFields), the
+	// only way to make the deploy call a genuine no-op for that field is to
+	// substitute the *live* digest here — otherwise a force/manual sync (or
+	// any deploy triggered by some other field's drift) would silently
+	// redeploy the manifest's image despite the app opting out of managing
+	// it.
+	if !fieldManaged(managedFields, "image") {
+		desired.ImageDigest = live.ImageDigest
+	}
+
 	// A per-attempt token, not r's holder identity: two concurrent attempts
 	// from the very same replica must be just as mutually exclusive as two
 	// from different replicas, so the lock can't be keyed on anything

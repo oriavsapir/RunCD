@@ -168,3 +168,24 @@ roles:
 		t.Fatal("expected bob to be granted access from the reloaded config")
 	}
 }
+
+func TestHasAnyGrant(t *testing.T) {
+	cfg, err := Parse([]byte(`
+roles:
+  - subject: dev-only@company.com
+    role: syncer
+    scope: ["env:dev"]
+`))
+	if err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+	if !HasAnyGrant(cfg, "dev-only@company.com") {
+		t.Fatal("expected a subject with a scoped rule to have some grant")
+	}
+	if HasAnyGrant(cfg, "nobody@company.com") {
+		t.Fatal("expected a subject with no rule at all to have no grant")
+	}
+	if HasAnyGrant(nil, "dev-only@company.com") {
+		t.Fatal("expected a nil config to fail closed")
+	}
+}

@@ -38,9 +38,10 @@ interface EnvSummary {
   projects: Set<string>;
   regions: Set<string>;
   auto: number;
+  units: number;
 }
 
-function groupEnvironments(units: Unit[]): Map<string, EnvSummary> {
+export function groupEnvironments(units: Unit[]): Map<string, EnvSummary> {
   const byEnv = new Map<string, EnvSummary>();
   for (const u of units) {
     const g = byEnv.get(u.env) ?? {
@@ -48,10 +49,12 @@ function groupEnvironments(units: Unit[]): Map<string, EnvSummary> {
       projects: new Set<string>(),
       regions: new Set<string>(),
       auto: 0,
+      units: 0,
     };
     g.apps.add(u.app);
     g.projects.add(u.project);
     g.regions.add(u.region);
+    g.units += 1;
     if (u.auto) g.auto += 1;
     byEnv.set(u.env, g);
   }
@@ -262,7 +265,7 @@ export default function SettingsPage() {
                         {[...g.regions].join(", ")}
                       </TableCell>
                       <TableCell>
-                        {g.auto}/{g.apps.size}
+                        {g.auto}/{g.units}
                       </TableCell>
                     </TableRow>
                   );
