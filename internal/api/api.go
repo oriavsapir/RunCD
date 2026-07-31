@@ -55,7 +55,8 @@ type Handler struct {
 	// so the controller can hot-swap it (new Notifier/ManagedFields after a
 	// config reload — see cmd/controller/main.go's reconcileLoop) without a
 	// data race against a manual sync reading it concurrently.
-	Reconciler *atomic.Pointer[reconcile.Reconciler]
+	Reconciler  *atomic.Pointer[reconcile.Reconciler]
+	RuntimeInfo RuntimeInfo
 }
 
 // NewMux registers the API's routes on a fresh http.ServeMux.
@@ -65,6 +66,7 @@ func NewMux(h *Handler) *http.ServeMux {
 	mux.HandleFunc("GET /api/units/{project}/{app}", h.handleUnitDetail)
 	mux.HandleFunc("GET /api/units/{project}/{app}/history", h.handleUnitHistory)
 	mux.HandleFunc("GET /api/rbac", h.handleListRBAC)
+	mux.HandleFunc("GET /api/config", h.handleConfig)
 	mux.HandleFunc("POST /api/sync/{project}/{app}", h.handleSync)
 	return mux
 }

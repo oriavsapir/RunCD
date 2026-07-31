@@ -60,3 +60,13 @@ export interface RbacRule {
   role: RbacRole;
   scope: string[];
 }
+
+export interface RuntimeConfig {
+  configRepo: string;
+  configBranch: string;
+  configPath: string;
+  rbacPath: string;
+  reconcileIntervalSeconds: number;
+  managedFields: string[];
+  notificationsEnabled: boolean;
+}

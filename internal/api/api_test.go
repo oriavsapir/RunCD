@@ -97,6 +97,10 @@ func (f *fakeCloudRun) DeployJob(context.Context, string, string, string, cloudr
 	return cloudrun.ErrNotProvisioned
 }
 
+type fakeNotifier struct{}
+
+func (fakeNotifier) Evaluate(context.Context, reconcile.Result) error { return nil }
+
 type fakePreconditions struct{}
 
 func (fakePreconditions) TopicExists(context.Context, string, string) (bool, error) { return true, nil }
@@ -419,6 +423,72 @@ func TestHandleListRBAC_ReturnsConfiguredRoles(t *testing.T) {
 	}
 	if len(roles) != 2 {
 		t.Fatalf("expected 2 roles, got %d: %+v", len(roles), roles)
+	}
+}
+
+func TestHandleConfig_RequiresAuth(t *testing.T) {
+	h, _ := newTestHandler(t)
+	srv := httptest.NewServer(NewMux(h))
+	defer srv.Close()
+
+	resp := getWithBearer(t, srv.URL+"/api/config", "")
+	defer func() { _ = resp.Body.Close() }()
+	if resp.StatusCode != http.StatusUnauthorized {
+		t.Fatalf("expected 401, got %d", resp.StatusCode)
+	}
+}
+
+// TestHandleConfig_ReturnsRuntimeInfo checks the static fields (set at
+// Handler construction) and the dynamic ones (read live off the current
+// Reconciler) both come through, and that the Slack webhook URL itself
+// never does — only whether one's configured.
+func TestHandleConfig_ReturnsRuntimeInfo(t *testing.T) {
+	h, _ := newTestHandler(t)
+	h.RuntimeInfo = RuntimeInfo{
+		ConfigRepo:               "acme/deployment",
+		ConfigBranch:             "main",
+		ConfigPath:               "runcd.yaml",
+		RBACPath:                 "rbac.yaml",
+		ReconcileIntervalSeconds: 30,
+	}
+	h.Reconciler.Load().Notifier = fakeNotifier{}
+
+	srv := httptest.NewServer(NewMux(h))
+	defer srv.Close()
+
+	resp := getWithBearer(t, srv.URL+"/api/config", "dev-only-token")
+	defer func() { _ = resp.Body.Close() }()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("expected 200, got %d", resp.StatusCode)
+	}
+
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		t.Fatalf("read body: %v", err)
+	}
+	if strings.Contains(string(body), "hooks.slack.com") {
+		t.Fatalf("response leaked a webhook URL: %s", body)
+	}
+
+	var got configView
+	if err := json.Unmarshal(body, &got); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	want := configView{
+		ConfigRepo:               "acme/deployment",
+		ConfigBranch:             "main",
+		ConfigPath:               "runcd.yaml",
+		RBACPath:                 "rbac.yaml",
+		ReconcileIntervalSeconds: 30,
+		ManagedFields:            []string{"image"},
+		NotificationsEnabled:     true,
+	}
+	if got.ConfigRepo != want.ConfigRepo || got.ConfigBranch != want.ConfigBranch ||
+		got.ConfigPath != want.ConfigPath || got.RBACPath != want.RBACPath ||
+		got.ReconcileIntervalSeconds != want.ReconcileIntervalSeconds ||
+		got.NotificationsEnabled != want.NotificationsEnabled ||
+		len(got.ManagedFields) != 1 || got.ManagedFields[0] != "image" {
+		t.Fatalf("got %+v, want %+v", got, want)
 	}
 }
 

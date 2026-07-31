@@ -53,6 +53,7 @@ export default function RootLayout({
               <Button
                 variant="outline"
                 size="icon"
+                nativeButton={false}
                 render={<Link href="/settings" aria-label="Settings" />}
               >
                 <Settings className="size-4" />

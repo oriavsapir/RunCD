@@ -230,6 +230,13 @@ func run() error {
 		Units:      dynUnits,
 		Status:     &api.PostgresStatusStore{DB: db},
 		Reconciler: reconcilerPtr,
+		RuntimeInfo: api.RuntimeInfo{
+			ConfigRepo:               configRepo,
+			ConfigBranch:             configBranch,
+			ConfigPath:               configPath,
+			RBACPath:                 rbacPath,
+			ReconcileIntervalSeconds: int(reconcileInterval.Seconds()),
+		},
 	}
 	srv := &http.Server{Addr: httpAddr, Handler: api.NewMux(handler), ReadHeaderTimeout: 10 * time.Second}
 
