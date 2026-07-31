@@ -46,7 +46,7 @@ function ResultBadge({ result }: { result: SyncResult }) {
 function shortDigest(digest?: string): string {
   if (!digest) return "—";
   const i = digest.indexOf(":");
-  return i === -1 ? digest.slice(0, 12) : digest.slice(0, i + 8);
+  return i === -1 ? digest.slice(0, 12) : digest.slice(0, i + 9);
 }
 
 // Sync-history view backed by sync_events, per §5.11.

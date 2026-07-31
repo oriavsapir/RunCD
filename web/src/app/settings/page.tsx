@@ -184,7 +184,9 @@ export default function SettingsPage() {
               </TableHeader>
               <TableBody>
                 {roles!.map((rule) => (
-                  <TableRow key={rule.subject}>
+                  <TableRow
+                    key={`${rule.subject}-${rule.role}-${rule.scope.join(",")}`}
+                  >
                     <TableCell className="font-medium">
                       {rule.subject}
                     </TableCell>
