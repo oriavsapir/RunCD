@@ -7,7 +7,7 @@ package api
 import (
 	"encoding/json"
 	"errors"
-	"log"
+	"log/slog"
 	"net/http"
 	"sync/atomic"
 
@@ -57,6 +57,10 @@ type Handler struct {
 	// data race against a manual sync reading it concurrently.
 	Reconciler  *atomic.Pointer[reconcile.Reconciler]
 	RuntimeInfo RuntimeInfo
+	// Metrics is optional — nil skips registering GET /metrics entirely
+	// (e.g. a test fixture that has no need for it). Build one via
+	// NewMetricsHandler.
+	Metrics http.Handler
 }
 
 // NewMux registers the API's routes on a fresh http.ServeMux.
@@ -69,6 +73,9 @@ func NewMux(h *Handler) *http.ServeMux {
 	mux.HandleFunc("GET /api/rbac", h.handleListRBAC)
 	mux.HandleFunc("GET /api/config", h.handleConfig)
 	mux.HandleFunc("POST /api/sync/{project}/{app}", h.handleSync)
+	if h.Metrics != nil {
+		mux.Handle("GET /metrics", h.Metrics)
+	}
 	return mux
 }
 
@@ -86,12 +93,7 @@ type syncResponse struct {
 func verify(w http.ResponseWriter, r *http.Request, a auth.Authenticator) (string, bool) {
 	email, err := a.Verify(r)
 	if err != nil {
-		// %q, not %v: err can wrap a JWT/token-library error whose text may
-		// echo back raw request-derived bytes (a malformed token, header
-		// content) — the same log-injection concern logSensitive below
-		// guards against for app/project/email, just applied here to the
-		// error text itself rather than only the plain string fields.
-		log.Printf("auth: %q", err) //nolint:gosec
+		slog.Error("auth", "error", err)
 		http.Error(w, "invalid token", http.StatusUnauthorized)
 		return "", false
 	}
@@ -153,13 +155,11 @@ func (h *Handler) handleSync(w http.ResponseWriter, r *http.Request) {
 	_ = json.NewEncoder(w).Encode(resp)
 }
 
-// logSensitive logs a manual-sync failure server-side only. %q (not %s) on
-// the request-controlled fields — app/project come from the URL path and
-// email from a verified ID token, but none of the three are sanitized
-// against CRLF — neutralizes a log-injection attempt by escaping control
-// characters into a literal "\n" rather than an actual newline byte.
-// gosec's taint check flags any tainted value reaching Printf regardless
-// of verb — it can't see that %q already defeats the injection.
+// logSensitive logs a manual-sync failure server-side only. app/project
+// come from the URL path and email from a verified ID token — none of the
+// three are sanitized against CRLF, but slog's JSON handler encodes every
+// field as a JSON string value, which already neutralizes any log
+// injection attempt (unlike a plain Printf format string).
 func logSensitive(app, project, email string, err error) {
-	log.Printf("manual sync %q/%q by %q: %v", app, project, email, err) //nolint:gosec
+	slog.Error("manual sync", "app", app, "project", project, "email", email, "error", err)
 }

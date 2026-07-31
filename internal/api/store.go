@@ -40,12 +40,23 @@ type SyncEvent struct {
 	Error      string
 }
 
+// SyncEventCount is one (trigger, result) bucket's total from sync_events —
+// the /metrics endpoint's source for a cumulative counter, aggregated in
+// SQL rather than fetching the full (never-pruned, §5.2) audit trail into
+// memory just to group it in Go.
+type SyncEventCount struct {
+	Trigger string
+	Result  string
+	Count   int64
+}
+
 // StatusStore reads persisted reconcile state for the dashboard's
 // read-only views.
 type StatusStore interface {
 	ListApplications(ctx context.Context) ([]ApplicationRow, error)
 	GetApplication(ctx context.Context, app, project string) (row ApplicationRow, found bool, err error)
 	SyncHistory(ctx context.Context, app, project string, limit int) ([]SyncEvent, error)
+	SyncEventCounts(ctx context.Context) ([]SyncEventCount, error)
 }
 
 // PostgresStatusStore is the real StatusStore, backed by the same
@@ -114,6 +125,27 @@ func (s *PostgresStatusStore) SyncHistory(ctx context.Context, app, project stri
 	}
 	if err := rows.Err(); err != nil {
 		return nil, fmt.Errorf("sync history for %s/%s: %w", app, project, err)
+	}
+	return out, nil
+}
+
+func (s *PostgresStatusStore) SyncEventCounts(ctx context.Context) ([]SyncEventCount, error) {
+	rows, err := s.DB.QueryContext(ctx, `SELECT trigger, result, count(*) FROM sync_events GROUP BY trigger, result`)
+	if err != nil {
+		return nil, fmt.Errorf("sync event counts: %w", err)
+	}
+	defer func() { _ = rows.Close() }()
+
+	var out []SyncEventCount
+	for rows.Next() {
+		var c SyncEventCount
+		if err := rows.Scan(&c.Trigger, &c.Result, &c.Count); err != nil {
+			return nil, fmt.Errorf("scan sync event count: %w", err)
+		}
+		out = append(out, c)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("sync event counts: %w", err)
 	}
 	return out, nil
 }

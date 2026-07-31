@@ -8,7 +8,7 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
-	"log"
+	"log/slog"
 	"net"
 	"net/http"
 	"os"
@@ -39,8 +39,14 @@ import (
 )
 
 func main() {
+	// JSON, not text: Cloud Logging ingests stdout/stderr as jsonPayload
+	// when it's valid JSON, giving structured fields and correct severity
+	// levels instead of an opaque textPayload line.
+	slog.SetDefault(slog.New(slog.NewJSONHandler(os.Stderr, nil)))
+
 	if err := run(); err != nil {
-		log.Fatal(err)
+		slog.Error("controller exited", "error", err)
+		os.Exit(1)
 	}
 }
 
@@ -200,7 +206,7 @@ func run() error {
 	}
 	rbacCfg, err := loadRBAC(ctx, ghClient, cfgSrc)
 	if err != nil {
-		log.Printf("startup: %v — manual sync will be denied until %s exists", err, rbacPath)
+		slog.Error("startup: manual sync will be denied until rbac.yaml exists", "error", err, "rbacPath", rbacPath)
 		rbacCfg = &rbac.Config{}
 	}
 	rbacStore := rbac.NewStore(rbacCfg)
@@ -224,11 +230,18 @@ func run() error {
 	dynUnits := &dynamicUnits{}
 	dynUnits.set(units)
 
+	statusStore := &api.PostgresStatusStore{DB: db}
+	metricsHandler, err := api.NewMetricsHandler(statusStore)
+	if err != nil {
+		return fmt.Errorf("build metrics handler: %w", err)
+	}
+
 	handler := &api.Handler{
 		Auth:       iapAuth,
 		RBAC:       rbacStore,
 		Units:      dynUnits,
-		Status:     &api.PostgresStatusStore{DB: db},
+		Status:     statusStore,
+		Metrics:    metricsHandler,
 		Reconciler: reconcilerPtr,
 		RuntimeInfo: api.RuntimeInfo{
 			ConfigRepo:               configRepo,
@@ -309,9 +322,7 @@ func runLeaderElection(ctx context.Context, lease *leader.Lease, lc *leadershipC
 		start := time.Now()
 		err := lease.Run(ctx, func(leading bool) {
 			lc.set(ctx, leading)
-			// holderID is HOSTNAME/os.Hostname(), operator-controlled, not
-			// external input.
-			log.Printf("leadership changed: leading=%v holder=%s", leading, holderID) //nolint:gosec
+			slog.Info("leadership changed", "leading", leading, "holder", holderID)
 		})
 		if ctx.Err() != nil {
 			return
@@ -319,7 +330,7 @@ func runLeaderElection(ctx context.Context, lease *leader.Lease, lc *leadershipC
 		if time.Since(start) >= resetBackoffAfter {
 			backoff = initialBackoff
 		}
-		log.Printf("leader election stopped, retrying in %s: %v", backoff, err)
+		slog.Error("leader election stopped, retrying", "backoff", backoff, "error", err)
 		select {
 		case <-ctx.Done():
 			return
@@ -476,7 +487,7 @@ func reconcileLoop(ctx context.Context, interval time.Duration, lc *leadershipCo
 		case <-ticker.C:
 			root, expanded, err := loadUnits(ctx, gh, cs)
 			if err != nil {
-				log.Printf("reconcile: reload config: %v", err)
+				slog.Error("reconcile: reload config", "error", err)
 				continue
 			}
 			units.set(expanded)
@@ -494,7 +505,7 @@ func reconcileLoop(ctx context.Context, interval time.Duration, lc *leadershipCo
 			// existing grant on a transient fetch error. Keep serving the
 			// last-known-good rules and just log it.
 			if newRBAC, err := loadRBAC(ctx, gh, cs); err != nil {
-				log.Printf("reconcile: reload %s: %v", cs.rbacPath, err)
+				slog.Error("reconcile: reload rbac", "rbacPath", cs.rbacPath, "error", err)
 			} else {
 				rbacStore.Set(newRBAC)
 			}
@@ -508,7 +519,7 @@ func reconcileLoop(ctx context.Context, interval time.Duration, lc *leadershipCo
 			}
 			results, err := reconcilerPtr.Load().RunOnce(passCtx, expanded)
 			if err != nil {
-				log.Printf("reconcile: run once: %v", err)
+				slog.Error("reconcile: run once", "error", err)
 			}
 			// RunOnce's own error is just the first of possibly several
 			// concurrent failures with no unit attribution (see its comment) —
@@ -517,7 +528,7 @@ func reconcileLoop(ctx context.Context, interval time.Duration, lc *leadershipCo
 			// status column, never in the logs.
 			for _, res := range results {
 				if res.Err != nil {
-					log.Printf("reconcile %s/%s: %v", res.Unit.App, res.Unit.Project, res.Err)
+					slog.Error("reconcile", "app", res.Unit.App, "project", res.Unit.Project, "error", res.Err)
 				}
 			}
 		}

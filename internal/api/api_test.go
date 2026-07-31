@@ -130,15 +130,21 @@ roles:
 	}
 
 	unit := expander.SyncUnit{App: "widget-api", Project: "example-prod-eu", Env: "prd"}
+	status := &PostgresStatusStore{DB: db}
+	metricsHandler, err := NewMetricsHandler(status)
+	if err != nil {
+		t.Fatalf("NewMetricsHandler: %v", err)
+	}
 
 	h := &Handler{
 		Auth: &fakeAuth{tokenToEmail: map[string]string{
 			"admin-token":    "admin@company.com",
 			"dev-only-token": "dev-only@company.com",
 		}},
-		RBAC:   rbac.NewStore(rbacCfg),
-		Units:  StaticUnits{"widget-api/example-prod-eu": unit},
-		Status: &PostgresStatusStore{DB: db},
+		RBAC:    rbac.NewStore(rbacCfg),
+		Units:   StaticUnits{"widget-api/example-prod-eu": unit},
+		Status:  status,
+		Metrics: metricsHandler,
 		Reconciler: newReconcilerPointer(&reconcile.Reconciler{
 			DB:            db,
 			ManagedFields: []string{"image"},
@@ -644,6 +650,76 @@ func TestHandleDryRun_UnknownUnitRejected(t *testing.T) {
 	defer func() { _ = resp.Body.Close() }()
 	if resp.StatusCode != http.StatusNotFound {
 		t.Fatalf("expected 404, got %d", resp.StatusCode)
+	}
+}
+
+// TestHandleMetrics_ReflectsSyncedUnitAndSyncEvent checks the /metrics
+// endpoint against the same data a manual sync just persisted — the
+// dashboard's own read views already prove ListApplications/SyncHistory
+// work, this proves the metrics aggregation on top of that data.
+func TestHandleMetrics_ReflectsSyncedUnitAndSyncEvent(t *testing.T) {
+	h, _ := newTestHandler(t)
+	srv := httptest.NewServer(NewMux(h))
+	defer srv.Close()
+
+	syncResp := postSync(t, srv.URL+"/api/sync/example-prod-eu/widget-api", "admin-token")
+	defer func() { _ = syncResp.Body.Close() }()
+	if syncResp.StatusCode != http.StatusOK {
+		t.Fatalf("expected sync to succeed, got %d", syncResp.StatusCode)
+	}
+
+	resp, err := http.Get(srv.URL + "/metrics") //nolint:noctx // test-only, no context needed
+	if err != nil {
+		t.Fatalf("GET /metrics: %v", err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("expected 200, got %d", resp.StatusCode)
+	}
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		t.Fatalf("read metrics body: %v", err)
+	}
+	text := string(body)
+
+	// The OTel Prometheus exporter adds its own otel_scope_* labels to
+	// every line, so this checks substrings (name, labels, trailing value)
+	// rather than an exact line match.
+	if !metricLineHasValue(text, "runcd_sync_status_total", `status="Synced"`, "1") {
+		t.Fatalf("expected a Synced status counter of 1, got:\n%s", text)
+	}
+	if !metricLineHasValue(text, "runcd_sync_events_total", `result="succeeded",trigger="manual"`, "1") {
+		t.Fatalf("expected a manual/succeeded sync_events counter of 1, got:\n%s", text)
+	}
+}
+
+// metricLineHasValue reports whether text has a line starting with metric,
+// containing labelSubstr somewhere in its label set, and ending with the
+// given value — tolerant of the OTel Prometheus exporter's extra
+// otel_scope_* labels and their arbitrary ordering.
+func metricLineHasValue(text, metric, labelSubstr, value string) bool {
+	for _, line := range strings.Split(text, "\n") {
+		if strings.HasPrefix(line, metric+"{") && strings.Contains(line, labelSubstr) && strings.HasSuffix(line, " "+value) {
+			return true
+		}
+	}
+	return false
+}
+
+// TestHandleMetrics_RequiresNoAuth confirms /metrics is deliberately open —
+// a scraper generally carries no IAP/OAuth identity.
+func TestHandleMetrics_RequiresNoAuth(t *testing.T) {
+	h, _ := newTestHandler(t)
+	srv := httptest.NewServer(NewMux(h))
+	defer srv.Close()
+
+	resp, err := http.Get(srv.URL + "/metrics") //nolint:noctx // test-only, no context needed
+	if err != nil {
+		t.Fatalf("GET /metrics: %v", err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("expected 200 with no Authorization header, got %d", resp.StatusCode)
 	}
 }
 

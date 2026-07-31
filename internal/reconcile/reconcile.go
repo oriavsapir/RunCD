@@ -11,7 +11,7 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
-	"log"
+	"log/slog"
 	"time"
 
 	"golang.org/x/sync/errgroup"
@@ -559,7 +559,7 @@ func (r *Reconciler) releaseLock(ctx context.Context, unit expander.SyncUnit, to
 	if _, err := r.DB.ExecContext(ctx, `
 		DELETE FROM sync_locks WHERE application = $1 AND target_gcp_project = $2 AND holder = $3`,
 		unit.App, unit.Project, token); err != nil {
-		log.Printf("reconcile: release sync lock for %s/%s: %v", unit.App, unit.Project, err)
+		slog.Error("reconcile: release sync lock", "app", unit.App, "project", unit.Project, "error", err)
 	}
 }
 

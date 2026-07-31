@@ -2,7 +2,7 @@ package api
 
 import (
 	"encoding/json"
-	"log"
+	"log/slog"
 	"net/http"
 	"time"
 
@@ -87,7 +87,7 @@ func (h *Handler) handleListUnits(w http.ResponseWriter, r *http.Request) {
 
 	rows, err := h.Status.ListApplications(r.Context())
 	if err != nil {
-		log.Printf("list applications: %v", err)
+		slog.Error("list applications", "error", err)
 		http.Error(w, "failed to list units", http.StatusInternalServerError)
 		return
 	}
@@ -128,10 +128,7 @@ func (h *Handler) handleUnitDetail(w http.ResponseWriter, r *http.Request) {
 	v := unitViewFrom(unit, h.RBAC.Get(), email)
 	row, found, err := h.Status.GetApplication(r.Context(), app, project)
 	if err != nil {
-		// %q escapes control characters, defeating log injection from
-		// these path-derived values — see the identical note on
-		// logSensitive in api.go; gosec's taint check can't see that.
-		log.Printf("get application %q/%q: %v", app, project, err) //nolint:gosec
+		slog.Error("get application", "app", app, "project", project, "error", err)
 		http.Error(w, "failed to load unit", http.StatusInternalServerError)
 		return
 	}
@@ -176,7 +173,7 @@ func (h *Handler) handleDryRun(w http.ResponseWriter, r *http.Request) {
 
 	res := h.Reconciler.Load().DryRun(r.Context(), unit)
 	if res.Err != nil {
-		log.Printf("dry run %q/%q: %v", app, project, res.Err) //nolint:gosec // %q escapes control chars, see the note on logSensitive in api.go
+		slog.Error("dry run", "app", app, "project", project, "error", res.Err)
 	}
 
 	v := dryRunView{
@@ -223,7 +220,7 @@ func (h *Handler) handleUnitHistory(w http.ResponseWriter, r *http.Request) {
 
 	events, err := h.Status.SyncHistory(r.Context(), app, project, defaultHistoryLimit)
 	if err != nil {
-		log.Printf("sync history for %q/%q: %v", app, project, err) //nolint:gosec // %q escapes control chars, see the note above
+		slog.Error("sync history", "app", app, "project", project, "error", err)
 		http.Error(w, "failed to load sync history", http.StatusInternalServerError)
 		return
 	}
