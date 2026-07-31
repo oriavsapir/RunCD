@@ -23,6 +23,22 @@ export class ApiError extends Error {
   }
 }
 
+// errorMessage turns a failed response's body into something worth showing
+// a user. The backend's own errors are plain text (e.g. "forbidden: no
+// role grants sync access") and pass through unchanged — but an expired
+// IAP session redirects to an HTML sign-in page before the request ever
+// reaches the backend at all, and that HTML (or any other non-JSON,
+// non-plain-text body) is not something to show verbatim.
+function errorMessage(status: number, contentType: string | null, body: string): string {
+  const trimmed = body.trim();
+  const looksLikeHtml =
+    (contentType?.includes("text/html") ?? false) || trimmed.startsWith("<");
+  if (!trimmed || looksLikeHtml) {
+    return `Session expired or an unexpected server response (HTTP ${status}) — try refreshing the page.`;
+  }
+  return trimmed;
+}
+
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
   const res = await fetch(`${API_BASE_URL}${path}`, {
     ...init,
@@ -34,7 +50,10 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
   });
   if (!res.ok) {
     const body = await res.text().catch(() => "");
-    throw new ApiError(body || res.statusText, res.status);
+    throw new ApiError(
+      errorMessage(res.status, res.headers.get("content-type"), body),
+      res.status,
+    );
   }
   if (res.status === 204) {
     return undefined as T;

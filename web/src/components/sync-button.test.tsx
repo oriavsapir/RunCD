@@ -12,7 +12,7 @@ describe("SyncButton", () => {
     expect(screen.getByRole("button", { name: /sync/i })).toBeDisabled();
   });
 
-  it("is enabled and calls syncUnit when canSync is true", async () => {
+  it("shows a confirmation dialog before syncing, and calls syncUnit only after confirming", async () => {
     const spy = vi.spyOn(api, "syncUnit").mockResolvedValue({
       app: "widget-api",
       project: "example-prod-eu",
@@ -31,8 +31,30 @@ describe("SyncButton", () => {
     expect(button).toBeEnabled();
     await userEvent.click(button);
 
+    expect(spy).not.toHaveBeenCalled();
+    const confirm = await screen.findByRole("button", { name: /sync now/i });
+    await userEvent.click(confirm);
+
     await waitFor(() => expect(onSynced).toHaveBeenCalledTimes(1));
     expect(spy).toHaveBeenCalledWith("example-prod-eu", "widget-api");
+    expect(await screen.findByText(/synced/i)).toBeInTheDocument();
+  });
+
+  it("cancelling the confirmation never calls syncUnit", async () => {
+    const spy = vi.spyOn(api, "syncUnit").mockResolvedValue({
+      app: "widget-api",
+      project: "example-prod-eu",
+      status: "Synced",
+      health: "Healthy",
+    });
+    render(
+      <SyncButton unit={{ app: "widget-api", project: "example-prod-eu", canSync: true }} />,
+    );
+
+    await userEvent.click(screen.getByRole("button", { name: /sync/i }));
+    await userEvent.click(await screen.findByRole("button", { name: /cancel/i }));
+
+    expect(spy).not.toHaveBeenCalled();
   });
 
   it("shows the server error inline instead of silently failing", async () => {
@@ -44,6 +66,7 @@ describe("SyncButton", () => {
     );
 
     await userEvent.click(screen.getByRole("button", { name: /sync/i }));
+    await userEvent.click(await screen.findByRole("button", { name: /sync now/i }));
 
     await waitFor(() =>
       expect(
