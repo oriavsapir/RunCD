@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useMemo, useState } from "react";
+import { Suspense, useEffect, useMemo, useState } from "react";
 import {
   AlertCircle,
   AlertTriangle,
@@ -17,6 +17,7 @@ import {
   XCircle,
 } from "lucide-react";
 import Link from "next/link";
+import { usePathname, useRouter, useSearchParams } from "next/navigation";
 import { ProjectGrid } from "@/components/project-grid";
 import { UnitTable, UnitTree } from "@/components/unit-table";
 import { Skeleton } from "@/components/ui/skeleton";
@@ -30,6 +31,7 @@ import type { Unit } from "@/lib/types";
 import { usePolling } from "@/lib/use-polling";
 
 type ViewMode = "projects" | "table" | "tree";
+const VIEW_MODES: ViewMode[] = ["projects", "table", "tree"];
 
 // Without this, a live rollout (or another operator's sync) looks frozen
 // until someone happens to click Refresh — this is a silent background
@@ -75,6 +77,18 @@ const STAT_TILES: Array<{
 ];
 
 export default function Home() {
+  return (
+    <Suspense fallback={null}>
+      <SyncUnitsPage />
+    </Suspense>
+  );
+}
+
+function SyncUnitsPage() {
+  const router = useRouter();
+  const pathname = usePathname();
+  const searchParams = useSearchParams();
+
   const [units, setUnits] = useState<Unit[] | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [refreshKey, setRefreshKey] = useState(0);
@@ -88,12 +102,29 @@ export default function Home() {
   // means "only this exact project," not "anything containing this
   // string" — reusing query's substring match would also show, say,
   // "acme-staging" when the user clicked "acme".
-  const [selectedProject, setSelectedProject] = useState<string | null>(null);
+  //
+  // Both seeded from the URL (and kept in sync with it below) so a
+  // refresh — or a shared link — lands back on the same drill-down
+  // instead of always resetting to the project-grid default.
+  const [selectedProject, setSelectedProject] = useState<string | null>(() =>
+    searchParams.get("project"),
+  );
   // Projects first: at real scale (many projects, each with a handful of
   // apps) a flat table/tree of every sync unit stops being scannable —
   // this is "which project needs my attention," with table/tree reachable
   // by drilling into one project or switching manually.
-  const [view, setView] = useState<ViewMode>("projects");
+  const [view, setView] = useState<ViewMode>(() => {
+    const v = searchParams.get("view");
+    return VIEW_MODES.includes(v as ViewMode) ? (v as ViewMode) : "projects";
+  });
+
+  useEffect(() => {
+    const params = new URLSearchParams();
+    if (view !== "projects") params.set("view", view);
+    if (selectedProject) params.set("project", selectedProject);
+    const qs = params.toString();
+    router.replace(qs ? `${pathname}?${qs}` : pathname, { scroll: false });
+  }, [view, selectedProject, pathname, router]);
 
   useEffect(() => {
     let cancelled = false;

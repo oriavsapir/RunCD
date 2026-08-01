@@ -5,6 +5,12 @@ import Home from "./page";
 import * as api from "@/lib/api";
 import type { Unit } from "@/lib/types";
 
+vi.mock("next/navigation", () => ({
+  useRouter: () => ({ replace: vi.fn() }),
+  usePathname: () => "/",
+  useSearchParams: () => new URLSearchParams(),
+}));
+
 function unit(overrides: Partial<Unit>): Unit {
   return {
     app: "widget-api",
