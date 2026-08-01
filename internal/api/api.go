@@ -154,6 +154,15 @@ func (h *Handler) handleSync(w http.ResponseWriter, r *http.Request) {
 
 	resp := syncResponse{App: app, Project: project, Status: res.Status, Health: res.Health}
 	w.Header().Set("Content-Type", "application/json")
+	if res.DeployFailed {
+		// A blocked-before-deploy sync (bad manifest, failed precondition)
+		// still gets 200 — res.Status already says Invalid, and nothing
+		// was actually attempted against Cloud Run. A deploy that was
+		// actually attempted and failed is different: a caller gating on
+		// exit code/2xx (the CLI, CI) must not read that as success just
+		// because a JSON body got encoded.
+		w.WriteHeader(http.StatusUnprocessableEntity)
+	}
 	_ = json.NewEncoder(w).Encode(resp)
 }
 

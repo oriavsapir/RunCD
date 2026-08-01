@@ -138,7 +138,10 @@ func run(args []string, stdout, stderr io.Writer) error {
 			return err
 		}
 		if dryRun {
-			ctx, cancel := context.WithTimeout(background, readTimeout)
+			// dry-run makes the same real Cloud Run/Pub-Sub calls a sync
+			// does (just without deploying), so it needs the same generous
+			// timeout as orphans/sync, not the fast read-only budget.
+			ctx, cancel := context.WithTimeout(background, syncTimeout)
 			defer cancel()
 			res, err := c.dryRun(ctx, project, app)
 			if err != nil {

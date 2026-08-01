@@ -237,7 +237,8 @@ func (h *Handler) handleOrphans(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	if !rbac.HasAnyGrant(h.RBAC.Get(), email) {
+	cfg := h.RBAC.Get()
+	if !rbac.HasAnyGrant(cfg, email) {
 		http.Error(w, "forbidden: no role grants sync access", http.StatusForbidden)
 		return
 	}
@@ -247,12 +248,13 @@ func (h *Handler) handleOrphans(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "unit listing not supported", http.StatusNotImplemented)
 		return
 	}
+	units := lister.List()
 
 	// DetectOrphans returns partial results alongside a non-nil err when
 	// only some project/region scans failed — serve what it found rather
 	// than discarding a fleet-wide scan over one bad project (same "one bad
 	// unit can't take down the fleet" principle RunOnce follows).
-	orphans, err := h.Reconciler.Load().DetectOrphans(r.Context(), lister.List())
+	orphans, err := h.Reconciler.Load().DetectOrphans(r.Context(), units)
 	if err != nil {
 		slog.Error("detect orphans", "error", err)
 		if orphans == nil {
@@ -261,12 +263,36 @@ func (h *Handler) handleOrphans(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	views := make([]orphanView, len(orphans))
-	for i, o := range orphans {
-		views[i] = orphanView{Project: o.Project, Region: o.Region, App: o.App}
+	// HasAnyGrant only proved the caller has *some* sync grant somewhere —
+	// scanning is fleet-wide (no single unit to scope the check above
+	// against), but the response must not leak every project's orphans to
+	// a caller only scoped to, say, one env. A project counts as visible
+	// here if the caller can sync at least one currently-configured unit in
+	// it — the same set of projects DetectOrphans itself scanned.
+	folderMembership := h.RBAC.FolderMembership()
+	allowedProjects := make(map[string]bool)
+	for _, u := range units {
+		if rbac.CanSyncFolders(cfg, folderMembership, email, u) {
+			allowedProjects[u.Project] = true
+		}
+	}
+
+	views := make([]orphanView, 0, len(orphans))
+	for _, o := range orphans {
+		if !allowedProjects[o.Project] {
+			continue
+		}
+		views = append(views, orphanView{Project: o.Project, Region: o.Region, App: o.App})
 	}
 
 	w.Header().Set("Content-Type", "application/json")
+	if err != nil {
+		// orphans != nil here (the err/nil-orphans case already returned
+		// above) — some but not all project/region scans failed. 206 says
+		// "this list may be incomplete" rather than a plain 200 a caller
+		// would otherwise read as "these are definitively all the orphans."
+		w.WriteHeader(http.StatusPartialContent)
+	}
 	_ = json.NewEncoder(w).Encode(views)
 }
 

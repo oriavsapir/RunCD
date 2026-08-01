@@ -34,6 +34,13 @@ type Resolver interface {
 // resolved twice per tick for identical, still-fresh data.
 const DefaultCacheTTL = 60 * time.Second
 
+// resolveTimeout bounds the real Resource Manager call — WithoutCancel
+// below deliberately detaches it from the caller's context (so one
+// reconcile tick's cancellation can't spuriously fail a concurrent tick's
+// singleflight-shared call), but that means it needs its own deadline or a
+// hung API call would wedge every tick sharing this folder ID forever.
+const resolveTimeout = 30 * time.Second
+
 type folderCacheEntry struct {
 	projects  []string
 	fetchedAt time.Time
@@ -87,8 +94,24 @@ func (r *GCPResolver) ProjectsInFolder(ctx context.Context, folderID string) ([]
 		}
 		r.mu.Unlock()
 
-		ids, err := r.listProjectsInFolder(context.WithoutCancel(ctx), folderID)
+		fetchCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), resolveTimeout)
+		defer cancel()
+		ids, err := r.listProjectsInFolder(fetchCtx, folderID)
 		if err != nil {
+			// Serve stale cached membership rather than propagating a
+			// transient failure as "this folder has zero projects" — a
+			// caller collapsing an error into an empty result (as
+			// ResolveConfig/ResolveMembership deliberately do, to keep one
+			// folder's outage from blocking everything else) would
+			// otherwise make every project previously known to be in this
+			// folder vanish from that tick's units, and DetectOrphans would
+			// then flag their still-live Cloud Run services as orphans.
+			r.mu.Lock()
+			entry, ok := r.cache[folderID]
+			r.mu.Unlock()
+			if ok {
+				return entry.projects, nil
+			}
 			return nil, err
 		}
 		r.mu.Lock()

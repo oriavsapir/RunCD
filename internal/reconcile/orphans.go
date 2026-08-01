@@ -39,6 +39,16 @@ type orphanScope struct{ project, region string }
 // environments[env].projects entry, not just ones a surviving app still
 // references), a larger change than this first cut; "even just flagging"
 // (the roadmap's own bar) is what this covers.
+// resourceType isn't checked: expander.SyncUnit doesn't carry it (that
+// lives in the per-app manifest, fetched from git — a call this function
+// deliberately doesn't make, to keep a scan cheap and git-independent).
+// Combined with ListServiceNames only ever listing Cloud Run *services*
+// (see its own doc comment), a declared job or workerPool unit's app name
+// still counts as "expected" here — so a live orphaned *service* sharing a
+// name with a declared job/workerPool (a real possibility: Cloud Run
+// services and jobs don't share a name namespace) would be hidden instead
+// of flagged. Same class of gap as the services-only narrowing already
+// accepted for v1's "even just flagging" bar, not a new one.
 func (r *Reconciler) DetectOrphans(ctx context.Context, units []expander.SyncUnit) ([]Orphan, error) {
 	expectedApps := make(map[orphanScope]map[string]bool)
 	for _, u := range units {

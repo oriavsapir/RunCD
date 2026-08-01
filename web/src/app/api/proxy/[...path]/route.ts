@@ -65,7 +65,14 @@ async function forward(req: NextRequest, path: string[]) {
       // request. internal/auth's IAPAuthenticator reads this same name.
       ...(iapAssertion ? { "x-runcd-iap-assertion": iapAssertion } : {}),
     },
-  });
+    // Only sync (POST) has ever sent a body, and it's always been empty,
+    // which silently masked this never being forwarded at all — any future
+    // POST/PUT/PATCH endpoint with a real request body would otherwise
+    // reach the API empty.
+    body: req.body,
+    // Required by Node's fetch whenever body is a stream.
+    duplex: req.body ? "half" : undefined,
+  } as RequestInit);
   const body = await res.text();
   return new NextResponse(body, {
     status: res.status,

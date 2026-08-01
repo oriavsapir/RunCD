@@ -79,12 +79,17 @@ type LiveJob struct {
 type AdminClient interface {
 	// GetService returns live state for the named service or workerPool,
 	// checked against desiredDigest to determine HasRevisionForDesiredDigest.
-	// Returns ErrNotProvisioned if the resource doesn't exist in the
-	// project at all.
+	// An empty desiredDigest means the caller doesn't manage image (e.g.
+	// ignoreFields:[image]) and any existing revision counts as present —
+	// checking against the manifest's digest in that case would report
+	// Missing forever, since not managing image means the running digest is
+	// deliberately not the manifest's. Returns ErrNotProvisioned if the
+	// resource doesn't exist in the project at all.
 	GetService(ctx context.Context, project, region, name, desiredDigest string) (*LiveService, error)
 
 	// GetJob returns live state for the named job, checked against
-	// desiredDigest to determine HasExecutionForDesiredDigest. Returns
+	// desiredDigest to determine HasExecutionForDesiredDigest — same
+	// empty-means-any-digest convention as GetService. Returns
 	// ErrNotProvisioned if the resource doesn't exist in the project at all.
 	GetJob(ctx context.Context, project, region, name, desiredDigest string) (*LiveJob, error)
 

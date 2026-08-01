@@ -5,7 +5,6 @@ import { Check, RefreshCw } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import {
   AlertDialog,
-  AlertDialogAction,
   AlertDialogCancel,
   AlertDialogContent,
   AlertDialogDescription,
@@ -43,6 +42,7 @@ const SUCCESS_MESSAGE_MS = 4000;
 // feedback afterward — a one-click sync with only a spinner as feedback
 // left no visible confirmation the sync actually happened.
 export function SyncButton({ unit, onSynced, size = "default" }: SyncButtonProps) {
+  const [open, setOpen] = useState(false);
   const [pending, setPending] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [justSynced, setJustSynced] = useState(false);
@@ -50,13 +50,20 @@ export function SyncButton({ unit, onSynced, size = "default" }: SyncButtonProps
   async function handleConfirm() {
     setPending(true);
     setError(null);
-    setJustSynced(false);
     try {
       await syncUnit(unit.project, unit.app);
+      // Only close on success — closing immediately regardless of outcome
+      // (the AlertDialogAction primitive's default behavior) meant a
+      // failed sync's error text appeared after the modal had already
+      // dismissed, easy to miss entirely.
+      setOpen(false);
       setJustSynced(true);
       onSynced?.();
       setTimeout(() => setJustSynced(false), SUCCESS_MESSAGE_MS);
     } catch (err) {
+      // Left open so the failure is seen where the user is already
+      // looking, not in small text below a button they've stopped
+      // watching.
       setError(err instanceof ApiError ? err.message : "Sync failed");
     } finally {
       setPending(false);
@@ -73,7 +80,14 @@ export function SyncButton({ unit, onSynced, size = "default" }: SyncButtonProps
   return (
     <div className="flex flex-col items-end gap-1">
       {unit.canSync ? (
-        <AlertDialog>
+        <AlertDialog
+          open={open}
+          onOpenChange={(next) => {
+            if (pending) return; // don't let Esc/backdrop close mid-request
+            setOpen(next);
+            if (!next) setError(null);
+          }}
+        >
           <AlertDialogTrigger render={button} />
           <AlertDialogContent>
             <AlertDialogHeader>
@@ -84,11 +98,13 @@ export function SyncButton({ unit, onSynced, size = "default" }: SyncButtonProps
                 there&apos;s no separate rollback here.
               </AlertDialogDescription>
             </AlertDialogHeader>
+            {error && <p className="text-destructive text-sm">{error}</p>}
             <AlertDialogFooter>
-              <AlertDialogCancel>Cancel</AlertDialogCancel>
-              <AlertDialogAction onClick={handleConfirm} disabled={pending}>
-                Sync now
-              </AlertDialogAction>
+              <AlertDialogCancel disabled={pending}>Cancel</AlertDialogCancel>
+              <Button onClick={handleConfirm} disabled={pending}>
+                {pending && <RefreshCw className="animate-spin" />}
+                {error ? "Retry" : "Sync now"}
+              </Button>
             </AlertDialogFooter>
           </AlertDialogContent>
         </AlertDialog>
@@ -102,13 +118,12 @@ export function SyncButton({ unit, onSynced, size = "default" }: SyncButtonProps
           </TooltipContent>
         </Tooltip>
       )}
-      {justSynced && !error && (
+      {justSynced && (
         <p className="flex items-center gap-1 text-xs text-emerald-600 dark:text-emerald-400">
           <Check className="size-3.5" />
           Synced
         </p>
       )}
-      {error && <p className="text-destructive text-xs">{error}</p>}
     </div>
   );
 }

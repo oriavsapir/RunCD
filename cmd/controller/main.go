@@ -40,6 +40,11 @@ import (
 	"github.com/runcd/runcd/internal/store"
 )
 
+// shutdownWaitTimeout bounds how long shutdown waits for the server/leader-
+// election/reconcile-loop goroutines to exit after ctx is cancelled, before
+// giving up and returning anyway — see its use in run().
+const shutdownWaitTimeout = 15 * time.Second
+
 func main() {
 	// JSON, not text: Cloud Logging ingests stdout/stderr as jsonPayload
 	// when it's valid JSON, giving structured fields and correct severity
@@ -326,7 +331,21 @@ func run() error {
 	shutdownCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 	_ = srv.Shutdown(shutdownCtx)
-	wg.Wait()
+
+	// wg.Wait() itself has no deadline — every goroutine it covers is
+	// ctx-cancellation-aware, but a bug or a wedged call ignoring ctx
+	// shouldn't hang process exit forever. Best-effort: log and return
+	// anyway rather than block indefinitely.
+	done := make(chan struct{})
+	go func() {
+		wg.Wait()
+		close(done)
+	}()
+	select {
+	case <-done:
+	case <-time.After(shutdownWaitTimeout):
+		slog.Error("shutdown: goroutines didn't exit within timeout, exiting anyway")
+	}
 	return runErr
 }
 
@@ -540,19 +559,24 @@ func reconcileLoop(ctx context.Context, interval time.Duration, lc *leadershipCo
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
-			root, expanded, err := loadUnits(ctx, gh, cs, folderResolver)
-			if err != nil {
-				slog.Error("reconcile: reload config", "error", err)
-				continue
-			}
-			units.set(expanded)
+			// config, RBAC, and notify reload independently (§8) — a
+			// transient config-fetch error must not also skip the RBAC/
+			// folder-membership reload below just because they happen to
+			// be fetched in the same tick; only the config-dependent steps
+			// (unit list, RunOnce) are skipped this tick.
+			root, expanded, configErr := loadUnits(ctx, gh, cs, folderResolver)
+			if configErr != nil {
+				slog.Error("reconcile: reload config", "error", configErr)
+			} else {
+				units.set(expanded)
 
-			if !reflect.DeepEqual(root.Notify, lastNotify) || !reflect.DeepEqual(root.Defaults.ManagedFields, lastManagedFields) {
-				next := *reconcilerPtr.Load() // shallow copy: DB/CloudRun/Preconditions/Manifests/Workers carry over unchanged
-				next.ManagedFields = root.Defaults.ManagedFields
-				next.Notifier = buildNotifier(db, root)
-				reconcilerPtr.Store(&next)
-				lastNotify, lastManagedFields = root.Notify, root.Defaults.ManagedFields
+				if !reflect.DeepEqual(root.Notify, lastNotify) || !reflect.DeepEqual(root.Defaults.ManagedFields, lastManagedFields) {
+					next := *reconcilerPtr.Load() // shallow copy: DB/CloudRun/Preconditions/Manifests/Workers carry over unchanged
+					next.ManagedFields = root.Defaults.ManagedFields
+					next.Notifier = buildNotifier(db, root)
+					reconcilerPtr.Store(&next)
+					lastNotify, lastManagedFields = root.Notify, root.Defaults.ManagedFields
+				}
 			}
 
 			// A missing/invalid rbac.yaml here doesn't fail closed to empty
@@ -572,6 +596,10 @@ func reconcileLoop(ctx context.Context, interval time.Duration, lc *leadershipCo
 				} else {
 					rbacStore.SetFolderMembership(membership)
 				}
+			}
+
+			if configErr != nil {
+				continue // no fresh unit list to run this tick's reconcile pass over
 			}
 
 			// passCtx is this leadership term's context, not the raw ctx —

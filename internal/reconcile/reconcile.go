@@ -283,6 +283,17 @@ func (r *Reconciler) reconcile(ctx context.Context, unit expander.SyncUnit, opts
 	managedFields := effectiveManagedFields(r.ManagedFields, unit.IgnoreFields)
 
 	desired := cloudrun.ServiceState{ImageDigest: sd.Image.Digest}
+	// fetchDigest is what GetService/GetJob check live revisions/executions
+	// against to decide HasRevisionForDesiredDigest/HasExecutionForDesiredDigest
+	// (health.Assess* reports Missing when that's false). When image isn't
+	// managed, the manifest's digest is deliberately not what's running —
+	// that's the whole point of ignoring it — so checking against it here
+	// would report Missing forever. Empty means "any digest counts as
+	// present" (see cloudrun.GCPAdminClient).
+	fetchDigest := sd.Image.Digest
+	if !fieldManaged(managedFields, "image") {
+		fetchDigest = ""
+	}
 	trafficManaged := fieldManaged(managedFields, "traffic")
 	if trafficManaged && sd.Traffic != nil {
 		desired.TrafficLatestRevisionPercent = sd.Traffic.LatestRevisionPercent
@@ -306,6 +317,19 @@ func (r *Reconciler) reconcile(ctx context.Context, unit expander.SyncUnit, opts
 		}
 	}
 
+	// diff.Compute deliberately skips "env" for resourceType=job (jobs' env
+	// vars live on the task template vs. the last execution, a distinction
+	// not reconciled yet — see diff.go), and DeployJob never applies
+	// desired.EnvVars/SecretRefs either. Managing env for a job would
+	// therefore silently do nothing and always diff as Synced — fail
+	// loudly here instead, the same "surface it at config/manifest time,
+	// not as silent inertness forever" call this repo already made for the
+	// traffic-percent validation.
+	if sd.ResourceType == manifest.ResourceJob && fieldManaged(managedFields, "env") {
+		res.Status, res.Health, res.Err = StatusInvalid, StatusInvalid, fmt.Errorf("managed field %q is not supported for resourceType %q", "env", sd.ResourceType)
+		return res
+	}
+
 	// Per §5.7: service and workerPool are both revision-based (workerPool
 	// just has no traffic concept); job is execution-based. Only the
 	// per-resourceType fetch/assess/deploy calls differ — the rest of the
@@ -316,7 +340,7 @@ func (r *Reconciler) reconcile(ctx context.Context, unit expander.SyncUnit, opts
 	switch sd.ResourceType {
 	case manifest.ResourceService:
 		fetch := func(ctx context.Context) (cloudrun.ServiceState, string, error) {
-			live, err := r.CloudRun.GetService(ctx, unit.Project, unit.Region, unit.App, sd.Image.Digest)
+			live, err := r.CloudRun.GetService(ctx, unit.Project, unit.Region, unit.App, fetchDigest)
 			if err != nil {
 				return cloudrun.ServiceState{}, "", err
 			}
@@ -328,7 +352,7 @@ func (r *Reconciler) reconcile(ctx context.Context, unit expander.SyncUnit, opts
 		return r.applyLiveState(ctx, res, unit, desired, fetch, string(sd.ResourceType), deploy, opts, managedFields)
 	case manifest.ResourceWorkerPool:
 		fetch := func(ctx context.Context) (cloudrun.ServiceState, string, error) {
-			live, err := r.CloudRun.GetService(ctx, unit.Project, unit.Region, unit.App, sd.Image.Digest)
+			live, err := r.CloudRun.GetService(ctx, unit.Project, unit.Region, unit.App, fetchDigest)
 			if err != nil {
 				return cloudrun.ServiceState{}, "", err
 			}
@@ -340,7 +364,7 @@ func (r *Reconciler) reconcile(ctx context.Context, unit expander.SyncUnit, opts
 		return r.applyLiveState(ctx, res, unit, desired, fetch, string(sd.ResourceType), deploy, opts, managedFields)
 	case manifest.ResourceJob:
 		fetch := func(ctx context.Context) (cloudrun.ServiceState, string, error) {
-			live, err := r.CloudRun.GetJob(ctx, unit.Project, unit.Region, unit.App, sd.Image.Digest)
+			live, err := r.CloudRun.GetJob(ctx, unit.Project, unit.Region, unit.App, fetchDigest)
 			if err != nil {
 				return cloudrun.ServiceState{}, "", err
 			}
@@ -473,6 +497,15 @@ func filterPreconditions(requires []manifest.Precondition, ignore []string) []ma
 // digest is a no-op"), which is why any real DeployService/DeployJob must
 // itself be idempotent for an unchanged desired digest.
 func (r *Reconciler) deploySyncUnit(ctx context.Context, res Result, unit expander.SyncUnit, desired, live cloudrun.ServiceState, resourceType string, deploy func(context.Context, cloudrun.ServiceState) error, fetch func(context.Context) (cloudrun.ServiceState, string, error), opts syncOptions, managedFields []string) Result {
+	// The whole acquire-lock/deploy/release-lock section below must fit
+	// inside lockTTL — otherwise Postgres's own "expires_at < now()" check
+	// could let a second attempt reclaim this lock's row while this one is
+	// still mid-deploy, racing two concurrent deploys of the same unit.
+	// releaseLock's own cleanup uses context.WithoutCancel, so it's
+	// unaffected by this deadline.
+	ctx, cancel := context.WithTimeout(ctx, lockTTL)
+	defer cancel()
+
 	// Unlike traffic (whose "unmanaged" state is representable as nil and
 	// DeployService/DeployJob skip touching it entirely), image has no such
 	// representation — the real GCP client always writes desired.ImageDigest

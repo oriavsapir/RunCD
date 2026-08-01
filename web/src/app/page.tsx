@@ -61,6 +61,7 @@ export default function Home() {
   const [units, setUnits] = useState<Unit[] | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [refreshKey, setRefreshKey] = useState(0);
+  const [refreshing, setRefreshing] = useState(false);
   const [query, setQuery] = useState("");
   const [view, setView] = useState<ViewMode>("table");
 
@@ -79,6 +80,9 @@ export default function Home() {
             err instanceof Error ? err.message : "Failed to load sync units",
           );
         }
+      })
+      .finally(() => {
+        if (!cancelled) setRefreshing(false);
       });
     return () => {
       cancelled = true;
@@ -121,9 +125,13 @@ export default function Home() {
         <Button
           variant="outline"
           size="sm"
-          onClick={() => setRefreshKey((k) => k + 1)}
+          disabled={refreshing}
+          onClick={() => {
+            setRefreshing(true);
+            setRefreshKey((k) => k + 1);
+          }}
         >
-          <RefreshCw className="size-3.5" />
+          <RefreshCw className={refreshing ? "size-3.5 animate-spin" : "size-3.5"} />
           Refresh
         </Button>
       </div>

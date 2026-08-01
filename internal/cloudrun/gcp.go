@@ -406,7 +406,7 @@ func (c *GCPAdminClient) GetJob(ctx context.Context, project, region, name, desi
 	digest := digestSuffix(containerImage(exec.GetTemplate().GetContainers()))
 	return &LiveJob{
 		ServiceState:                 ServiceState{ImageDigest: digest},
-		HasExecutionForDesiredDigest: digest == desiredDigest,
+		HasExecutionForDesiredDigest: desiredDigest == "" || digest == desiredDigest,
 		LatestExecutionStatus:        executionStatus(exec),
 	}, nil
 }
@@ -576,7 +576,7 @@ func liveServiceFromService(svc *runpb.Service, desiredDigest string) *LiveServi
 			EnvVars:                      envVars,
 			SecretRefs:                   secretRefs,
 		},
-		HasRevisionForDesiredDigest: digest == desiredDigest,
+		HasRevisionForDesiredDigest: desiredDigest == "" || digest == desiredDigest,
 		LatestRevisionReady:         ready,
 		LatestRevisionCreating:      creating,
 	}
@@ -592,7 +592,7 @@ func liveServiceFromWorkerPool(wp *runpb.WorkerPool, desiredDigest string) *Live
 			EnvVars:     envVars,
 			SecretRefs:  secretRefs,
 		},
-		HasRevisionForDesiredDigest: digest == desiredDigest,
+		HasRevisionForDesiredDigest: desiredDigest == "" || digest == desiredDigest,
 		LatestRevisionReady:         ready,
 		LatestRevisionCreating:      creating,
 	}

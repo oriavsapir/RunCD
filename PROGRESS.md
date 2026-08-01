@@ -1431,6 +1431,140 @@ source before fixing.
   flagged in-code (`ponytail:` comment) as a deliberate, deferred
   tradeoff; no `resourceType` hint is threaded through yet to skip it.
 
+## Bugs found and fixed in a tenth review pass
+
+- [x] **A failed sync returned HTTP 200, indistinguishable from success**
+  (`internal/api/api.go`) — a caller gating on exit code/2xx (CI, the CLI,
+  and the dashboard's own sync button) couldn't tell a genuinely failed
+  deploy from a successful one; both encoded the same `syncResponse` JSON
+  with a 200. Fixed: `Result.DeployFailed` (already tracked separately from
+  a merely-blocked-before-deploy `Result.Err`, e.g. a failed precondition)
+  now drives a `422` when a deploy was actually attempted and failed —
+  still with the same non-leaking JSON body, so a caller that only checks
+  status/health in the body is unaffected. A precondition-blocked sync
+  (never reached the deploy call) still gets 200, matching the existing
+  regression test's own stated intent.
+- [x] **Job env/secrets were computed but never applied or diffed**
+  (`internal/reconcile/reconcile.go`, `internal/diff/diff.go`) — `diff.Compute`
+  already deliberately skips `"env"` for `resourceType: job` (jobs' env
+  vars live on the task template vs. the last execution, not reconciled
+  yet) and `DeployJob` never wrote them either, so a job app with `env` in
+  its managed fields silently did nothing and always diffed as `Synced`.
+  Fixed: reconcile now rejects that combination loudly (`Status: Invalid`)
+  at manifest-parse time, the same "fail loudly once, not silently
+  forever" call already made for the traffic-percent bug.
+- [x] **`ignoreFields: [image]` could report `Health: Missing` forever**
+  (`internal/reconcile/reconcile.go`, `internal/cloudrun/gcp.go`) —
+  `GetService`/`GetJob`'s live-state fetch always checked the *manifest's*
+  digest to compute `HasRevisionForDesiredDigest`/`HasExecutionForDesiredDigest`,
+  even when image isn't managed — but not managing image means the
+  running digest is deliberately not the manifest's, so that check was
+  always false. Fixed: an empty digest now means "any digest counts as
+  present" in both the `AdminClient` contract and its real GCP
+  implementation, and reconcile passes that empty sentinel when image
+  isn't in a unit's effective managed fields.
+- [x] **`/api/orphans` leaked orphan data outside the caller's RBAC scope**
+  (`internal/api/units.go`) — `HasAnyGrant` only proved the caller has
+  *some* sync grant somewhere (there's no single unit to scope a check
+  against for a fleet-wide scan), but the response then returned every
+  scanned project's orphans regardless. Fixed: filtered to projects the
+  caller can actually sync at least one currently-configured unit in.
+- [x] **`folders.ProjectsInFolder`'s real Resource Manager call had no
+  timeout** (`internal/folders/folders.go`) — `context.WithoutCancel`
+  deliberately detaches the call from a caller's cancellation (so one
+  tick's cancel can't spuriously fail a concurrent tick's singleflight-
+  shared call), but that left it with no deadline of its own — a hung
+  call could wedge every reconcile tick sharing that folder ID
+  indefinitely. Fixed with a 30s `resolveTimeout`.
+- [x] **A slow deploy could race two concurrent deploys of the same unit**
+  (`internal/reconcile/reconcile.go`) — `sync_locks.expires_at` is a real,
+  DB-enforced deadline for when a lock becomes reclaimable, but nothing
+  bounded the in-process critical section (acquire → deploy → release) to
+  fit inside that same `lockTTL` — a slow chain of calls could still be
+  mid-deploy when a second attempt legitimately reclaimed the "expired"
+  lock. Fixed by wrapping `deploySyncUnit`'s context in
+  `context.WithTimeout(ctx, lockTTL)`.
+- [x] **`CREATE INDEX CONCURRENTLY` ran inside the boot-time schema
+  transaction** (`internal/store/schema.go`,
+  `migrations/0004_metrics_index.sql`) — a non-concurrent index build on an
+  already-populated `sync_events` table would block writes (the reconcile
+  loop's own in-flight deploys) for however long the build takes. Fixed by
+  switching the migration to `CREATE INDEX CONCURRENTLY` and applying it
+  as its own statement, separate from the rest of `Schema`'s transactional
+  blob (CONCURRENTLY can't run inside a transaction block) — which in turn
+  surfaced a real Postgres deadlock (two concurrent `Apply` callers, one
+  blocked acquiring the schema advisory lock while the other's CONCURRENTLY
+  build waited on that blocked session's still-open implicit transaction)
+  caught by `TestApply_ConcurrentCallersBothSucceed`. Fixed by serializing
+  the index migration with its own `pg_try_advisory_lock` poll loop instead
+  of a blocking lock call, so a losing replica never leaves a lingering
+  open statement for the other's build to wait on.
+- [x] **A transient folder-resolve error collapsed to zero projects, not
+  "unknown"** (`internal/folders/folders.go`) — `ResolveConfig`/
+  `ResolveMembership` already treat one folder's resolution error as
+  non-fatal (join the error, keep going), but that meant a transient
+  Resource Manager blip made every project previously known to be in that
+  folder vanish from that tick's units — and `DetectOrphans`, scanning
+  with that degraded unit list, would then flag their still-live Cloud Run
+  services as orphans. Fixed: `ProjectsInFolder` now serves the last
+  cached membership (even if past its TTL) on a fetch error instead of
+  propagating the error as "empty," and only genuinely errors when there's
+  no cache entry at all yet.
+- [x] **A config-fetch error also skipped that tick's independent RBAC/
+  notify reload** (`cmd/controller/main.go`) — `loadUnits` failing used to
+  `continue` immediately, skipping the RBAC/folder-membership reload below
+  it even though that's a separate GitHub fetch with its own already-
+  established "serve last-known-good on error" posture. Fixed: the RBAC/
+  notify reload now always runs regardless of that tick's config-fetch
+  outcome; only the config-dependent steps (unit list, `RunOnce`) are
+  skipped when it fails.
+- [x] **Shutdown's `wg.Wait()` had no deadline** (`cmd/controller/main.go`)
+  — every goroutine it covers is ctx-cancellation-aware, but a bug or a
+  wedged call ignoring ctx would hang process exit forever. Fixed with a
+  best-effort 15s timeout that logs and returns anyway.
+- [x] **The sync confirmation dialog closed immediately on click, before
+  the deploy call resolved** (`web/src/components/sync-button.tsx`) — the
+  `AlertDialogAction` primitive dismisses on click regardless of the async
+  result, so a failure's error text appeared as small text below a button
+  the user had already stopped watching. Fixed: the dialog is now
+  controlled (`open` state), the confirm button is a plain `Button` (not
+  the auto-closing `Close` primitive) that stays open and disabled while
+  pending, and only closes on success — an error keeps it open with the
+  message shown inline and the button relabeled "Retry."
+- [x] **The dashboard proxy never forwarded a POST body**
+  (`web/src/app/api/proxy/[...path]/route.ts`) — masked today since sync's
+  POST has always been bodiless, but silently would have dropped any
+  future endpoint's real request body. Fixed by forwarding `req.body`
+  (with the `duplex: "half"` Node fetch requires for a streamed body).
+- [x] **Partial `/api/orphans` scan failures were served as a clean 200**
+  (`internal/api/units.go`) — a caller couldn't tell "zero orphans" from
+  "scan partially failed, this list may be incomplete." Fixed with `206
+  Partial Content` on the same JSON body when some but not all
+  project/region scans failed.
+- [x] **`runcd sync --dry-run` used the 30s read timeout despite making
+  live GCP/Pub-Sub calls** (`cmd/runcd/main.go`) — `orphans` already got
+  the generous `syncTimeout` for the same reason; dry-run hadn't. Fixed to
+  match.
+- [x] **The dashboard's Refresh button had no loading state**
+  (`web/src/app/page.tsx`) — clicking it gave no feedback until the list
+  silently replaced itself. Fixed with a spinning icon and a disabled
+  button while the refresh is in flight.
+- **Documented, not fixed — a real, acknowledged limitation**: orphan
+  detection doesn't check resourceType (`internal/reconcile/orphans.go`) —
+  `expander.SyncUnit` doesn't carry it (that lives in the per-app manifest,
+  a git fetch this scan deliberately doesn't make), so a live orphaned
+  Cloud Run *service* sharing a name with a declared job/workerPool unit
+  would be hidden instead of flagged. Same class of gap as the
+  already-accepted services-only narrowing on `ListServiceNames` itself;
+  fixing it properly needs resourceType threaded from each unit's
+  manifest, a bigger change than this pass's scope.
+- **Checked, largely mitigated by the `/api/orphans` scoping fix above,
+  not separately fixed**: an unresolvable/typo'd `folder:<id>` scope still
+  counts as a "recognized" grant for `HasAnyGrant`
+  (`internal/rbac/rbac.go`) — but now that the orphans response is
+  filtered to projects the caller can actually sync, a grant that never
+  resolves to any real project just yields an empty result, not a leak.
+
 ## Infra / delivery
 
 - [x] **Dockerfile** — multi-stage (`golang:1.26-alpine` build →
