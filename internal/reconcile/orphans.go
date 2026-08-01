@@ -71,20 +71,31 @@ func (r *Reconciler) DetectOrphans(ctx context.Context, units []expander.SyncUni
 	}
 	_ = g.Wait() // g.Go above never returns a non-nil error, so Wait never does either
 
-	var orphans []Orphan
+	// orphans is deliberately non-nil from here on (even if it stays
+	// empty): a nil []Orphan and a nil error together is this function's
+	// only "every scope failed, no data at all is trustworthy" signal —
+	// []Orphan{} unambiguously means "at least one scope succeeded, and it
+	// found zero orphans," never conflated with total failure the way a
+	// bare `var orphans []Orphan` (nil either way) would be.
+	orphans := make([]Orphan, 0)
 	var errs []error
+	succeeded := 0
 	for i, key := range scopes {
 		res := results[i]
 		if res.err != nil {
 			errs = append(errs, fmt.Errorf("list services in %s/%s: %w", key.project, key.region, res.err))
 			continue
 		}
+		succeeded++
 		apps := expectedApps[key]
 		for _, name := range res.names {
 			if !apps[name] {
 				orphans = append(orphans, Orphan{Project: key.project, Region: key.region, App: name})
 			}
 		}
+	}
+	if len(scopes) > 0 && succeeded == 0 {
+		return nil, errors.Join(errs...)
 	}
 	return orphans, errors.Join(errs...)
 }

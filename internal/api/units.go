@@ -47,7 +47,7 @@ const (
 	pendingHealth = "Pending"
 )
 
-func unitViewFrom(u expander.SyncUnit, rbacCfg *rbac.Config, email string) unitView {
+func unitViewFrom(u expander.SyncUnit, rbacCfg *rbac.Config, folderMembership map[string][]string, email string) unitView {
 	return unitView{
 		App:     u.App,
 		Project: u.Project,
@@ -56,7 +56,7 @@ func unitViewFrom(u expander.SyncUnit, rbacCfg *rbac.Config, email string) unitV
 		Auto:    u.Sync.Auto != nil && *u.Sync.Auto,
 		Status:  pendingStatus,
 		Health:  pendingHealth,
-		CanSync: rbac.CanSync(rbacCfg, email, u),
+		CanSync: rbac.CanSyncFolders(rbacCfg, folderMembership, email, u),
 	}
 }
 
@@ -96,9 +96,10 @@ func (h *Handler) handleListUnits(w http.ResponseWriter, r *http.Request) {
 		byKey[row.App+"/"+row.Project] = row
 	}
 
+	folderMembership := h.RBAC.FolderMembership()
 	views := make([]unitView, 0, len(units))
 	for _, u := range units {
-		v := unitViewFrom(u, h.RBAC.Get(), email)
+		v := unitViewFrom(u, h.RBAC.Get(), folderMembership, email)
 		if row, ok := byKey[u.App+"/"+u.Project]; ok {
 			applyRow(&v, row)
 		}
@@ -125,7 +126,7 @@ func (h *Handler) handleUnitDetail(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	v := unitViewFrom(unit, h.RBAC.Get(), email)
+	v := unitViewFrom(unit, h.RBAC.Get(), h.RBAC.FolderMembership(), email)
 	row, found, err := h.Status.GetApplication(r.Context(), app, project)
 	if err != nil {
 		slog.Error("get application", "app", app, "project", project, "error", err)
@@ -178,7 +179,7 @@ func (h *Handler) handleDryRun(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if !rbac.CanSync(h.RBAC.Get(), email, unit) {
+	if !rbac.CanSyncFolders(h.RBAC.Get(), h.RBAC.FolderMembership(), email, unit) {
 		http.Error(w, "forbidden: no role grants sync access to this app/project", http.StatusForbidden)
 		return
 	}

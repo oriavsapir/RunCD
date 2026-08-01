@@ -28,6 +28,7 @@ import (
 	"github.com/runcd/runcd/internal/cloudrun"
 	"github.com/runcd/runcd/internal/config"
 	"github.com/runcd/runcd/internal/expander"
+	"github.com/runcd/runcd/internal/folders"
 	"github.com/runcd/runcd/internal/githubapp"
 	"github.com/runcd/runcd/internal/gitsource"
 	"github.com/runcd/runcd/internal/leader"
@@ -199,8 +200,14 @@ func run() error {
 		return fmt.Errorf("build IAP authenticator: %w", err)
 	}
 
+	folderResolver, err := folders.NewGCPResolver(ctx)
+	if err != nil {
+		return fmt.Errorf("build resource manager client: %w", err)
+	}
+	defer func() { _ = folderResolver.Close() }()
+
 	cfgSrc := configSource{repo: configRepo, branch: configBranch, path: configPath, rbacPath: rbacPath}
-	root, units, err := loadUnits(ctx, ghClient, cfgSrc)
+	root, units, err := loadUnits(ctx, ghClient, cfgSrc, folderResolver)
 	if err != nil {
 		return fmt.Errorf("initial config load: %w", err)
 	}
@@ -210,6 +217,11 @@ func run() error {
 		rbacCfg = &rbac.Config{}
 	}
 	rbacStore := rbac.NewStore(rbacCfg)
+	if membership, err := loadRBACFolderMembership(ctx, folderResolver, rbacCfg); err != nil {
+		slog.Error("startup: resolve rbac folder scopes", "error", err)
+	} else {
+		rbacStore.SetFolderMembership(membership)
+	}
 
 	cloudRun := cloudrun.NewGCPAdminClient()
 	defer func() { _ = cloudRun.Close() }()
@@ -277,7 +289,7 @@ func run() error {
 
 	go func() {
 		defer wg.Done()
-		reconcileLoop(ctx, reconcileInterval, lc, ghClient, cfgSrc, db, reconcilerPtr, dynUnits, rbacStore)
+		reconcileLoop(ctx, reconcileInterval, lc, ghClient, cfgSrc, db, reconcilerPtr, dynUnits, rbacStore, folderResolver)
 	}()
 
 	// A bind/serve failure (e.g. the port is already taken) is fatal, not a
@@ -390,7 +402,7 @@ type configSource struct {
 	repo, branch, path, rbacPath string
 }
 
-func loadUnits(ctx context.Context, gh *githubapp.Client, cs configSource) (*config.Root, []expander.SyncUnit, error) {
+func loadUnits(ctx context.Context, gh *githubapp.Client, cs configSource, resolver folders.Resolver) (*config.Root, []expander.SyncUnit, error) {
 	data, err := gh.GetFile(ctx, cs.repo, cs.branch, cs.path)
 	if err != nil {
 		return nil, nil, fmt.Errorf("fetch %s: %w", cs.path, err)
@@ -399,11 +411,28 @@ func loadUnits(ctx context.Context, gh *githubapp.Client, cs configSource) (*con
 	if err != nil {
 		return nil, nil, err
 	}
+	root, err = folders.ResolveConfig(ctx, resolver, root)
+	if err != nil {
+		return nil, nil, fmt.Errorf("resolve environments[].folders: %w", err)
+	}
 	units, err := expander.Expand(root)
 	if err != nil {
 		return nil, nil, err
 	}
 	return root, units, nil
+}
+
+// loadRBACFolderMembership resolves every folder ID rbacCfg's rules
+// reference via "folder:<id>" scopes into its member projects — a separate
+// resolution pass from loadUnits' own environments[].folders (a distinct
+// set of folder IDs, potentially overlapping but not assumed to), stored
+// via rbacStore.SetFolderMembership.
+func loadRBACFolderMembership(ctx context.Context, resolver folders.Resolver, rbacCfg *rbac.Config) (map[string][]string, error) {
+	ids := rbac.FolderScopes(rbacCfg)
+	if len(ids) == 0 {
+		return map[string][]string{}, nil
+	}
+	return folders.ResolveMembership(ctx, resolver, ids)
 }
 
 func loadRBAC(ctx context.Context, gh *githubapp.Client, cs configSource) (*rbac.Config, error) {
@@ -469,7 +498,7 @@ func (d *dynamicUnits) List() []expander.SyncUnit {
 	return out
 }
 
-func reconcileLoop(ctx context.Context, interval time.Duration, lc *leadershipContext, gh *githubapp.Client, cs configSource, db *sql.DB, reconcilerPtr *atomic.Pointer[reconcile.Reconciler], units *dynamicUnits, rbacStore *rbac.Store) {
+func reconcileLoop(ctx context.Context, interval time.Duration, lc *leadershipContext, gh *githubapp.Client, cs configSource, db *sql.DB, reconcilerPtr *atomic.Pointer[reconcile.Reconciler], units *dynamicUnits, rbacStore *rbac.Store, folderResolver folders.Resolver) {
 	ticker := time.NewTicker(interval)
 	defer ticker.Stop()
 	// lastNotify/lastManagedFields track what the currently-stored
@@ -485,7 +514,7 @@ func reconcileLoop(ctx context.Context, interval time.Duration, lc *leadershipCo
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
-			root, expanded, err := loadUnits(ctx, gh, cs)
+			root, expanded, err := loadUnits(ctx, gh, cs, folderResolver)
 			if err != nil {
 				slog.Error("reconcile: reload config", "error", err)
 				continue
@@ -508,6 +537,15 @@ func reconcileLoop(ctx context.Context, interval time.Duration, lc *leadershipCo
 				slog.Error("reconcile: reload rbac", "rbacPath", cs.rbacPath, "error", err)
 			} else {
 				rbacStore.Set(newRBAC)
+				if membership, err := loadRBACFolderMembership(ctx, folderResolver, newRBAC); err != nil {
+					// Keep serving the last-known-good membership map, same
+					// posture as a failed rbac.yaml reload above — a
+					// transient Resource Manager error shouldn't revoke
+					// every folder-scoped grant.
+					slog.Error("reconcile: resolve rbac folder scopes", "error", err)
+				} else {
+					rbacStore.SetFolderMembership(membership)
+				}
 			}
 
 			// passCtx is this leadership term's context, not the raw ctx —

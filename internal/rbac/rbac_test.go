@@ -189,3 +189,96 @@ roles:
 		t.Fatal("expected a nil config to fail closed")
 	}
 }
+
+// TestHasAnyGrant_EmptyScopeDoesNotCount is the regression test for a real
+// bypass: a rule row existing for a subject isn't the same as that rule
+// actually granting anything — an empty Scope list matches nothing under
+// CanSync, so it must not count as "any grant" here either.
+func TestHasAnyGrant_EmptyScopeDoesNotCount(t *testing.T) {
+	cfg, err := Parse([]byte(`
+roles:
+  - subject: vacuous@company.com
+    role: syncer
+    scope: []
+`))
+	if err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+	if HasAnyGrant(cfg, "vacuous@company.com") {
+		t.Fatal("expected a rule with an empty scope to grant nothing")
+	}
+}
+
+func TestCanSyncFolders_FolderScopeMatchesMemberProject(t *testing.T) {
+	cfg, err := Parse([]byte(`
+roles:
+  - subject: platform-team@company.com
+    role: syncer
+    scope: ["folder:123456789012"]
+`))
+	if err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+	membership := map[string][]string{"123456789012": {"example-prod-us", "example-prod-eu"}}
+
+	inFolder := expander.SyncUnit{App: "widget-api", Project: "example-prod-us", Env: "prd"}
+	notInFolder := expander.SyncUnit{App: "widget-api", Project: "example-dev-01", Env: "dev"}
+
+	if !CanSyncFolders(cfg, membership, "platform-team@company.com", inFolder) {
+		t.Fatal("expected a project resolved as a folder member to be permitted")
+	}
+	if CanSyncFolders(cfg, membership, "platform-team@company.com", notInFolder) {
+		t.Fatal("expected a project not in the folder's membership to be denied")
+	}
+}
+
+func TestCanSyncFolders_NilMembershipNeverMatchesFolderScope(t *testing.T) {
+	cfg, err := Parse([]byte(`
+roles:
+  - subject: platform-team@company.com
+    role: syncer
+    scope: ["folder:123456789012"]
+`))
+	if err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+	unit := expander.SyncUnit{App: "widget-api", Project: "example-prod-us", Env: "prd"}
+	if CanSyncFolders(cfg, nil, "platform-team@company.com", unit) {
+		t.Fatal("expected a folder scope to never match without a resolved membership map")
+	}
+	// CanSync itself (no membership map at all) must behave identically.
+	if CanSync(cfg, "platform-team@company.com", unit) {
+		t.Fatal("expected CanSync (folder-blind) to deny a folder-only scope")
+	}
+}
+
+func TestStore_FolderMembershipDefaultsToEmptyNotNil(t *testing.T) {
+	store := NewStore(&Config{})
+	if store.FolderMembership() == nil {
+		t.Fatal("expected NewStore to seed an empty (non-nil) folder membership map")
+	}
+	membership := map[string][]string{"111": {"a"}}
+	store.SetFolderMembership(membership)
+	if len(store.FolderMembership()["111"]) != 1 {
+		t.Fatalf("expected SetFolderMembership to be reflected by FolderMembership, got %+v", store.FolderMembership())
+	}
+}
+
+func TestFolderScopes_CollectsDistinctFolderIDs(t *testing.T) {
+	cfg, err := Parse([]byte(`
+roles:
+  - subject: alice@company.com
+    role: admin
+    scope: ["folder:111", "folder:222", "env:prd"]
+  - subject: bob@company.com
+    role: syncer
+    scope: ["folder:111"]
+`))
+	if err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+	ids := FolderScopes(cfg)
+	if len(ids) != 2 {
+		t.Fatalf("expected 2 distinct folder IDs, got %+v", ids)
+	}
+}

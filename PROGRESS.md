@@ -1179,6 +1179,90 @@ source before fixing.
   the Sync button, no loading/disabled state on the page-level Refresh
   button, unmemoized stat-tile filtering on every keystroke.
 
+## Phase 7 — GCP folder support (config + RBAC)
+
+- [x] **`environments[env].folders`** (`internal/config`) — a list of GCP
+  folder IDs whose direct child projects are resolved (a live Cloud
+  Resource Manager v3 API call — `config.Parse` itself still does no I/O)
+  and merged into that environment's `Projects`, deduped. Only direct
+  children — a folder's own sub-folders aren't recursed into. Resolved on
+  the same `RECONCILE_INTERVAL` hot-reload cadence as everything else via
+  a new `internal/folders` package:
+  - `folders.Resolver` interface (`ProjectsInFolder`) + `GCPResolver`, the
+    real implementation (`cloud.google.com/go/resourcemanager/apiv3`,
+    `ListProjects` filtered to `ACTIVE` projects — `DELETE_REQUESTED`/
+    `DELETED` ones can linger in list results).
+  - `folders.ResolveConfig(ctx, resolver, root)` merges `Folders` into
+    `Projects` per environment, returning a copy (never mutates `root`).
+  - Wired into `cmd/controller/main.go`'s `loadUnits`, called both at
+    startup and every reconcile tick — same place `config.Parse` already
+    runs.
+  - Test: `go test ./internal/folders/... -v` (merge, dedup, no-folders
+    no-op, resolver-error propagation with environment context in the
+    message).
+
+- [x] **`rbac.yaml`'s `"folder:<id>"` scope** — resolves the same way, via
+  a second, independent pass: `rbac.FolderScopes(cfg)` collects every
+  distinct folder ID referenced across all rules' scopes, and
+  `folders.ResolveMembership(ctx, resolver, ids)` resolves each into its
+  member projects, producing a `map[string][]string` `rbac.CanSyncFolders`
+  consults. `rbac.Store` gained `SetFolderMembership`/`FolderMembership` —
+  a second, independently-swapped value (not bundled atomically with
+  `Config`), matching this package's existing hot-reload looseness
+  relative to config/notify's own reload cadence (see `cmd/controller/main.go`'s
+  `reconcileLoop`, which never synchronizes those either).
+  - `CanSync` (existing, unchanged signature) is now a thin wrapper over
+    the new `CanSyncFolders(cfg, folderMembership, subject, unit)` with a
+    nil membership map — every existing call site/test that doesn't have
+    resolved folder data keeps working unchanged; only the three
+    production call sites that do (`handleSync`, `handleDryRun`,
+    `unitViewFrom`'s `canSync` field) were switched to `CanSyncFolders`.
+  - Test: `go test ./internal/rbac/... -run Folder -v`,
+    `TestHandleSync_FolderScopeGrantsAccessViaResolvedMembership` (an
+    API-level test proving a folder-scoped subject is denied before the
+    membership is resolved and permitted after — the exact hot-reload
+    sequencing `main.go` performs).
+
+- [x] **Terraform** (`terraform/controller-sa/`) — new `target_folders`
+  variable: grants `roles/resourcemanager.folderViewer` on the folder
+  itself (needed for `internal/folders`' runtime resolution to work at
+  all) and resolves the folder's *current* direct child projects at
+  `terraform apply` time (`google_projects` data source, filtered by
+  `parent.id`/`parent.type`) to grant them the same `roles/run.developer`
+  every `target_projects` entry gets. **Documented gap, deliberately not
+  solved**: this is a plan-time snapshot, not continuous reconciliation —
+  a project added to a watched folder in GCP becomes a RunCD sync unit
+  within one reconcile tick (the runtime resolution is live), but the
+  controller SA has no deploy permission on it until `terraform apply`
+  runs again against this module. `terraform validate` (what CI runs)
+  passes without live credentials — the new `google_projects` data source
+  is only evaluated at plan/apply time, not validate.
+
+## Bugs found and fixed alongside folder support (review pass)
+
+- [x] **`rbac.HasAnyGrant` real RBAC bypass** — checked only that a
+  subject had *some* rule row for orphan detection's gate, never that the
+  rule's `Scope` was non-empty — a rule like `scope: []` (or, more
+  realistically, any config mistake leaving `scope` empty) granted nothing
+  under `CanSync`/`CanSyncFolders` but still passed `HasAnyGrant`,
+  letting that subject trigger a fleet-wide live Cloud Run enumeration via
+  `GET /api/orphans` it had no real grant justifying. Fixed: `HasAnyGrant`
+  now also requires `len(rule.Scope) > 0`.
+  - Test: `TestHasAnyGrant_EmptyScopeDoesNotCount`,
+    `TestHandleOrphans_VacuousScopeForbidden`.
+- [x] **`DetectOrphans`' nil-vs-empty ambiguity** — returned a nil
+  `[]Orphan` both when every project/region scan failed (no trustworthy
+  data at all) *and* when every scan succeeded cleanly and simply found
+  zero orphans — indistinguishable to `handleOrphans`, which treated both
+  as total failure (500), turning one bad project out of ten into a 500
+  instead of 200 + a logged partial error, contradicting the function's
+  own "serve partial results" design intent from the previous pass. Fixed:
+  `orphans` is now non-nil (`make([]Orphan, 0)`) as soon as at least one
+  scope succeeds; a nil return is now the unambiguous "every scope failed"
+  signal.
+  - Test: `TestDetectOrphans_AllScopesFailingReturnsNilOrphans`,
+    `TestDetectOrphans_SuccessWithZeroOrphansReturnsNonNilSlice`.
+
 ## Infra / delivery
 
 - [x] **Dockerfile** — multi-stage (`golang:1.26-alpine` build →

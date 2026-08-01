@@ -19,6 +19,27 @@ variable "target_projects" {
   default     = []
 }
 
+variable "target_folders" {
+  description = <<-EOT
+    GCP folder IDs (numeric, e.g. "123456789012" — not "folders/123456789012")
+    listed under any environments[env].folders in runcd.yaml. The module
+    grants the controller SA read access to each folder (so
+    internal/folders' runtime resolution can list its contents) AND
+    resolves its *current* direct child projects at `terraform apply` time
+    (via the google_projects data source) to grant the same
+    roles/run.developer every target_projects entry gets.
+
+    This is a plan-time snapshot, not continuous reconciliation: a project
+    added to the folder after the last `apply` shows up in RunCD's own
+    sync-unit list within one reconcile tick (internal/folders resolves
+    fresh every hot-reload), but the controller SA has no run.developer on
+    it — and every deploy to it fails — until `terraform apply` runs again
+    against this module.
+  EOT
+  type        = set(string)
+  default     = []
+}
+
 variable "runtime_service_account_emails" {
   description = <<-EOT
     Per-project runtime service account the deployed Cloud Run revision runs

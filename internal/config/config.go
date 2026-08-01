@@ -97,9 +97,15 @@ func (w SyncWindow) validate() error {
 }
 
 type Environment struct {
-	Projects []string   `yaml:"projects"`
-	Region   string     `yaml:"region,omitempty"`
-	Sync     SyncPolicy `yaml:"sync,omitempty"`
+	Projects []string `yaml:"projects"`
+	// Folders is a list of GCP folder IDs whose direct child projects are
+	// resolved (via internal/folders, a live Cloud Resource Manager API
+	// call — Parse itself never does I/O) and merged into Projects at load
+	// time, deduped. Only direct children — a folder's own sub-folders are
+	// not recursed into.
+	Folders []string   `yaml:"folders,omitempty"`
+	Region  string     `yaml:"region,omitempty"`
+	Sync    SyncPolicy `yaml:"sync,omitempty"`
 }
 
 type Defaults struct {
@@ -189,6 +195,13 @@ func Parse(data []byte) (*Root, error) {
 				return nil, fmt.Errorf("environment %q: project %q is listed more than once", envName, p)
 			}
 			seen[p] = true
+		}
+		seenFolders := make(map[string]bool, len(env.Folders))
+		for _, f := range env.Folders {
+			if seenFolders[f] {
+				return nil, fmt.Errorf("environment %q: folder %q is listed more than once", envName, f)
+			}
+			seenFolders[f] = true
 		}
 	}
 	for _, f := range root.Defaults.ManagedFields {

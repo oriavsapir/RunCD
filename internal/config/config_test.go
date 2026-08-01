@@ -387,3 +387,36 @@ apps:
 		t.Fatal("expected error for an ignoreFields entry runcd doesn't know how to manage")
 	}
 }
+
+func TestParse_EnvironmentFolders(t *testing.T) {
+	yaml := []byte(`
+environments:
+  prd:
+    projects: [example-prod-us]
+    folders: ["123456789012"]
+defaults:
+  region: us-central1
+`)
+	root, err := Parse(yaml)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	folders := root.Environments["prd"].Folders
+	if len(folders) != 1 || folders[0] != "123456789012" {
+		t.Fatalf("folders not parsed: %+v", folders)
+	}
+}
+
+func TestParse_DuplicateFolderInEnvironmentRejected(t *testing.T) {
+	yaml := []byte(`
+environments:
+  prd:
+    projects: [example-prod-us]
+    folders: ["123", "123"]
+defaults:
+  region: us-central1
+`)
+	if _, err := Parse(yaml); err == nil {
+		t.Fatal("expected error for a folder listed twice in one environment")
+	}
+}

@@ -56,7 +56,21 @@ func Parse(data []byte) (*Config, error) {
 // this v1 doesn't make (matching this repo's "no real GCP calls yet"
 // posture); a group listed in rbac.yaml only matches if it's passed in
 // directly as subject, not by resolving its members.
+//
+// Equivalent to CanSyncFolders with a nil folderMembership — a "folder:<id>"
+// scope just never matches. Kept as its own function so every call site
+// that doesn't have a resolved folder membership map (most of this
+// package's tests) doesn't need to thread one through for no reason.
 func CanSync(cfg *Config, subject string, unit expander.SyncUnit) bool {
+	return CanSyncFolders(cfg, nil, subject, unit)
+}
+
+// CanSyncFolders is CanSync plus "folder:<id>" scope support: folderMembership
+// maps a GCP folder ID (as written in a rule's scope) to the project IDs
+// resolved to be under it (internal/folders, refreshed on the same
+// hot-reload cadence as everything else) — a scope matches if unit.Project
+// is one of them.
+func CanSyncFolders(cfg *Config, folderMembership map[string][]string, subject string, unit expander.SyncUnit) bool {
 	if cfg == nil {
 		return false // fail closed: no config means no grants, not a panic
 	}
@@ -65,7 +79,7 @@ func CanSync(cfg *Config, subject string, unit expander.SyncUnit) bool {
 			continue
 		}
 		for _, scope := range rule.Scope {
-			if scopeMatches(scope, unit) {
+			if scopeMatches(scope, unit, folderMembership) {
 				return true
 			}
 		}
@@ -73,18 +87,43 @@ func CanSync(cfg *Config, subject string, unit expander.SyncUnit) bool {
 	return false
 }
 
-// HasAnyGrant reports whether subject has any admin/syncer rule at all,
-// regardless of scope — for an endpoint like orphan detection that isn't
-// scoped to one specific unit (it fans out across every project/region the
-// whole config touches, making real GCP calls along the way), so there's no
-// single unit to check CanSync against. A caller with no sync grant
-// anywhere has no legitimate reason to burn that quota.
+// FolderScopes collects the distinct folder IDs referenced by any rule's
+// "folder:<id>" scope — the caller (main.go) resolves each into its member
+// projects (internal/folders) to build the map CanSyncFolders needs.
+func FolderScopes(cfg *Config) []string {
+	if cfg == nil {
+		return nil
+	}
+	seen := make(map[string]bool)
+	var ids []string
+	for _, rule := range cfg.Roles {
+		for _, scope := range rule.Scope {
+			if id, ok := strings.CutPrefix(scope, "folder:"); ok && !seen[id] {
+				seen[id] = true
+				ids = append(ids, id)
+			}
+		}
+	}
+	return ids
+}
+
+// HasAnyGrant reports whether subject has at least one admin/syncer rule
+// that actually grants something (a non-empty Scope) — for an endpoint
+// like orphan detection that isn't scoped to one specific unit (it fans
+// out across every project/region the whole config touches, making real
+// GCP calls along the way), so there's no single unit to check CanSync
+// against. A caller with no real grant anywhere has no legitimate reason
+// to burn that quota. A rule with an empty Scope grants nothing under
+// CanSync/CanSyncFolders either, so it must not count as "any grant" here
+// — checking Subject alone would let a rule like `scope: []` (or any
+// vacuous/unrecognized scope entry) pass this check despite authorizing
+// zero units.
 func HasAnyGrant(cfg *Config, subject string) bool {
 	if cfg == nil {
 		return false
 	}
 	for _, rule := range cfg.Roles {
-		if rule.Subject == subject {
+		if rule.Subject == subject && len(rule.Scope) > 0 {
 			return true
 		}
 	}
@@ -96,13 +135,24 @@ func HasAnyGrant(cfg *Config, subject string) bool {
 // changes take effect on the next config poll, no controller restart)
 // refreshes it from a background goroutine while API handlers read it per
 // request.
+//
+// FolderMembership is a second, independently-swapped value (not bundled
+// atomically with Config) — the same looseness this package's hot-reload
+// already has relative to config/notify's own reload (see
+// cmd/controller/main.go's reconcileLoop, which never synchronizes those
+// either): a momentary mismatch between a just-reloaded rbac.yaml and a
+// not-yet-refreshed folder membership map for one tick is an acceptable
+// staleness window, not a new correctness risk.
 type Store struct {
-	v atomic.Pointer[Config]
+	v      atomic.Pointer[Config]
+	folder atomic.Pointer[map[string][]string]
 }
 
 func NewStore(cfg *Config) *Store {
 	s := &Store{}
 	s.Set(cfg)
+	empty := map[string][]string{}
+	s.SetFolderMembership(empty)
 	return s
 }
 
@@ -110,9 +160,31 @@ func (s *Store) Set(cfg *Config) { s.v.Store(cfg) }
 
 func (s *Store) Get() *Config { return s.v.Load() }
 
-func scopeMatches(scope string, unit expander.SyncUnit) bool {
+// SetFolderMembership replaces the folder ID -> member project IDs map
+// CanSyncFolders consults for "folder:<id>" scopes.
+func (s *Store) SetFolderMembership(m map[string][]string) { s.folder.Store(&m) }
+
+// FolderMembership returns the current folder membership map, or nil if
+// none has ever been set.
+func (s *Store) FolderMembership() map[string][]string {
+	p := s.folder.Load()
+	if p == nil {
+		return nil
+	}
+	return *p
+}
+
+func scopeMatches(scope string, unit expander.SyncUnit, folderMembership map[string][]string) bool {
 	if scope == "*" {
 		return true
+	}
+	if folderID, ok := strings.CutPrefix(scope, "folder:"); ok {
+		for _, p := range folderMembership[folderID] {
+			if p == unit.Project {
+				return true
+			}
+		}
+		return false
 	}
 	if env, ok := strings.CutPrefix(scope, "env:"); ok {
 		return env == unit.Env

@@ -97,3 +97,48 @@ func TestDetectOrphans_OneProjectFailureDoesNotDiscardOthers(t *testing.T) {
 		t.Fatalf("expected the example-prod-eu orphan to still be reported despite the other project's failure, got %+v", orphans)
 	}
 }
+
+// TestDetectOrphans_AllScopesFailingReturnsNilOrphans is the disambiguation
+// regression test: a nil []Orphan (not just an empty one) is the only
+// signal handleOrphans has for "every scope failed, nothing here is
+// trustworthy" — it must not be confused with "every scope succeeded and
+// genuinely found zero orphans."
+func TestDetectOrphans_AllScopesFailingReturnsNilOrphans(t *testing.T) {
+	boom := errors.New("boom")
+	cr := &fakeCloudRun{
+		services:            map[string]*cloudrun.LiveService{"example-prod-us/widget-api": {}},
+		listServiceNamesErr: map[string]error{"example-prod-us": boom},
+	}
+	r := &Reconciler{CloudRun: cr}
+
+	units := []expander.SyncUnit{{App: "widget-api", Project: "example-prod-us", Region: "us-central1"}}
+	orphans, err := r.DetectOrphans(context.Background(), units)
+	if err == nil {
+		t.Fatal("expected an error when every scope fails")
+	}
+	if orphans != nil {
+		t.Fatalf("expected nil orphans (not just empty) on total failure, got %+v", orphans)
+	}
+}
+
+// TestDetectOrphans_SuccessWithZeroOrphansReturnsNonNilSlice is the other
+// half of the disambiguation: a clean scan finding nothing must return a
+// non-nil (just empty) slice, distinguishable from total failure.
+func TestDetectOrphans_SuccessWithZeroOrphansReturnsNonNilSlice(t *testing.T) {
+	cr := &fakeCloudRun{services: map[string]*cloudrun.LiveService{
+		"example-prod-us/widget-api": {ServiceState: cloudrun.ServiceState{ImageDigest: validDigest}},
+	}}
+	r := &Reconciler{CloudRun: cr}
+
+	units := []expander.SyncUnit{{App: "widget-api", Project: "example-prod-us", Region: "us-central1"}}
+	orphans, err := r.DetectOrphans(context.Background(), units)
+	if err != nil {
+		t.Fatalf("DetectOrphans: %v", err)
+	}
+	if orphans == nil {
+		t.Fatal("expected a non-nil (empty) slice on a clean scan with no orphans, got nil")
+	}
+	if len(orphans) != 0 {
+		t.Fatalf("expected zero orphans, got %+v", orphans)
+	}
+}

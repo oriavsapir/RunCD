@@ -5,6 +5,7 @@ go 1.26.5
 require (
 	cloud.google.com/go/cloudsqlconn v1.23.0
 	cloud.google.com/go/pubsub v1.51.0
+	cloud.google.com/go/resourcemanager v1.16.0
 	cloud.google.com/go/run v1.22.0
 	github.com/coreos/go-oidc/v3 v3.20.0
 	github.com/jackc/pgx/v5 v5.10.0

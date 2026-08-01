@@ -117,8 +117,9 @@ func (h *Handler) handleSync(w http.ResponseWriter, r *http.Request) {
 
 	// §5.9: RBAC-checked — everyone authenticated gets read-only by
 	// default, only an admin/syncer rule whose scope covers this unit may
-	// trigger a sync.
-	if !rbac.CanSync(h.RBAC.Get(), email, unit) {
+	// trigger a sync. CanSyncFolders (not plain CanSync) so a rule scoped
+	// via "folder:<id>" is honored too.
+	if !rbac.CanSyncFolders(h.RBAC.Get(), h.RBAC.FolderMembership(), email, unit) {
 		http.Error(w, "forbidden: no role grants sync access to this app/project", http.StatusForbidden)
 		return
 	}

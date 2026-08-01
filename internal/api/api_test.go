@@ -134,6 +134,12 @@ roles:
   - subject: dev-only@company.com
     role: syncer
     scope: ["env:dev"]
+  - subject: vacuous-scope@company.com
+    role: syncer
+    scope: []
+  - subject: folder-scoped@company.com
+    role: syncer
+    scope: ["folder:999"]
 `))
 	if err != nil {
 		t.Fatalf("rbac.Parse: %v", err)
@@ -147,10 +153,13 @@ roles:
 	}
 
 	h := &Handler{
+		//nolint:gosec // G101: these are fakeAuth fixture tokens, not real credentials — arbitrary strings this test's own fakeAuth maps to an email, never checked against anything real.
 		Auth: &fakeAuth{tokenToEmail: map[string]string{
-			"admin-token":    "admin@company.com",
-			"dev-only-token": "dev-only@company.com",
-			"no-role-token":  "no-role@company.com",
+			"admin-token":         "admin@company.com",
+			"dev-only-token":      "dev-only@company.com",
+			"no-role-token":       "no-role@company.com",
+			"vacuous-scope-token": "vacuous-scope@company.com",
+			"folder-scoped-token": "folder-scoped@company.com",
 		}},
 		RBAC:    rbac.NewStore(rbacCfg),
 		Units:   StaticUnits{"widget-api/example-prod-eu": unit},
@@ -378,6 +387,31 @@ func TestHandleSync_AuthorizedAdminSyncsSuccessfully(t *testing.T) {
 	}
 }
 
+// TestHandleSync_FolderScopeGrantsAccessViaResolvedMembership checks a
+// "folder:<id>" rule end-to-end: the unit's project only matches once the
+// folder is resolved to include it (via RBAC.SetFolderMembership, the same
+// entry point main.go's hot-reload uses) — before that, the same subject
+// is denied.
+func TestHandleSync_FolderScopeGrantsAccessViaResolvedMembership(t *testing.T) {
+	h, _ := newTestHandler(t)
+	srv := httptest.NewServer(NewMux(h))
+	defer srv.Close()
+
+	before := postSync(t, srv.URL+"/api/sync/example-prod-eu/widget-api", "folder-scoped-token")
+	defer func() { _ = before.Body.Close() }()
+	if before.StatusCode != http.StatusForbidden {
+		t.Fatalf("expected 403 before the folder is resolved, got %d", before.StatusCode)
+	}
+
+	h.RBAC.SetFolderMembership(map[string][]string{"999": {"example-prod-eu"}})
+
+	after := postSync(t, srv.URL+"/api/sync/example-prod-eu/widget-api", "folder-scoped-token")
+	defer func() { _ = after.Body.Close() }()
+	if after.StatusCode != http.StatusOK {
+		t.Fatalf("expected 200 once example-prod-eu resolves as a folder member, got %d", after.StatusCode)
+	}
+}
+
 // getWithBearer issues a GET request with an optional bearer token,
 // failing the test immediately on any request-construction error.
 func getWithBearer(t *testing.T, url, bearerToken string) *http.Response {
@@ -438,8 +472,8 @@ func TestHandleListRBAC_ReturnsConfiguredRoles(t *testing.T) {
 	if err := json.NewDecoder(resp.Body).Decode(&roles); err != nil {
 		t.Fatalf("decode response: %v", err)
 	}
-	if len(roles) != 2 {
-		t.Fatalf("expected 2 roles, got %d: %+v", len(roles), roles)
+	if len(roles) != 4 {
+		t.Fatalf("expected 4 roles, got %d: %+v", len(roles), roles)
 	}
 }
 
@@ -651,6 +685,22 @@ func TestHandleOrphans_NoRBACGrantForbidden(t *testing.T) {
 	defer srv.Close()
 
 	resp := getWithBearer(t, srv.URL+"/api/orphans", "no-role-token")
+	defer func() { _ = resp.Body.Close() }()
+	if resp.StatusCode != http.StatusForbidden {
+		t.Fatalf("expected 403, got %d", resp.StatusCode)
+	}
+}
+
+// TestHandleOrphans_VacuousScopeForbidden is the regression test for the
+// real HasAnyGrant bypass: a rule row existing for a subject (role: syncer,
+// scope: []) is not the same as that rule granting anything — it must not
+// be enough to pass orphans' RBAC gate.
+func TestHandleOrphans_VacuousScopeForbidden(t *testing.T) {
+	h, _ := newTestHandler(t)
+	srv := httptest.NewServer(NewMux(h))
+	defer srv.Close()
+
+	resp := getWithBearer(t, srv.URL+"/api/orphans", "vacuous-scope-token")
 	defer func() { _ = resp.Body.Close() }()
 	if resp.StatusCode != http.StatusForbidden {
 		t.Fatalf("expected 403, got %d", resp.StatusCode)
