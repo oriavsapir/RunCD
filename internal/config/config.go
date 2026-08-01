@@ -24,6 +24,18 @@ type SyncPolicy struct {
 	Retry       *RetryPolicy `yaml:"retry,omitempty"`
 	SelfHeal    *bool        `yaml:"selfHeal,omitempty"`
 	SyncWindows []SyncWindow `yaml:"syncWindows,omitempty"`
+	// Observe puts every unit under this policy into shadow mode: the
+	// reconcile loop still fetches, diffs, and assesses health every tick
+	// exactly as normal (so Status/Health reflect real drift from the first
+	// tick), but never deploys — not on auto-sync, and not on a manual sync
+	// request either, which is what distinguishes this from just leaving
+	// Auto unset. Meant for onboarding a project/environment onto runcd
+	// gradually: prove the desired state matches reality (or see exactly
+	// where it doesn't) before granting runcd any authority to change
+	// anything, without needing a separate on-demand dry-run for every
+	// tick. Takes precedence over Auto and a manual sync's force — both
+	// still no-op while Observe is true.
+	Observe *bool `yaml:"observe,omitempty"`
 }
 
 // Merge returns a copy of base with any field set on override replacing it.
@@ -43,6 +55,9 @@ func (base SyncPolicy) Merge(override SyncPolicy) SyncPolicy {
 	}
 	if override.SyncWindows != nil {
 		merged.SyncWindows = override.SyncWindows
+	}
+	if override.Observe != nil {
+		merged.Observe = override.Observe
 	}
 	return merged
 }

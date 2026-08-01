@@ -44,6 +44,9 @@ func renderUnit(w io.Writer, u unit) {
 	_, _ = fmt.Fprintf(w, "Desired image:   %s\n", desired)
 	_, _ = fmt.Fprintf(w, "Live image:      %s\n", live)
 	_, _ = fmt.Fprintf(w, "Last reconciled: %s\n", lastReconciled)
+	if u.Observing {
+		_, _ = fmt.Fprintln(w, "Observe mode:    on — sync is disabled, status/health still tracked")
+	}
 	if len(u.IgnoreFields) > 0 {
 		_, _ = fmt.Fprintf(w, "Ignores fields:  %s\n", strings.Join(u.IgnoreFields, ", "))
 	}

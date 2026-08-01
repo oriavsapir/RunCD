@@ -16,7 +16,8 @@ export function DiffView({ unit }: { unit: Unit }) {
     !!unit.desiredImage && unit.desiredImage === unit.liveImage;
   const hasExclusions =
     (unit.ignoreFields?.length ?? 0) > 0 ||
-    (unit.ignorePreconditions?.length ?? 0) > 0;
+    (unit.ignorePreconditions?.length ?? 0) > 0 ||
+    unit.observing;
 
   return (
     <Card>
@@ -47,6 +48,13 @@ export function DiffView({ unit }: { unit: Unit }) {
           <div className="bg-muted/50 flex items-start gap-2 rounded-md p-3 text-xs">
             <Info className="text-muted-foreground mt-0.5 size-3.5 shrink-0" />
             <div className="text-muted-foreground flex flex-col gap-1">
+              {unit.observing && (
+                <span>
+                  This app is in observe mode (sync.observe) — Status/Health
+                  above are tracked as usual, but sync is disabled until
+                  observe mode is turned off.
+                </span>
+              )}
               {unit.ignoreFields && unit.ignoreFields.length > 0 && (
                 <span>
                   This app doesn&apos;t manage: {unit.ignoreFields.join(", ")} —

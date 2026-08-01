@@ -30,6 +30,13 @@ func manualSync() config.SyncPolicy {
 	return config.SyncPolicy{Auto: &f}
 }
 
+// observeSync is auto-sync enabled but shadowed by Observe — proves Observe
+// takes precedence over Auto, not just over a manual sync's force.
+func observeSync() config.SyncPolicy {
+	t := true
+	return config.SyncPolicy{Auto: &t, Observe: &t}
+}
+
 type fakeManifests struct {
 	byApp map[string][]byte
 }
@@ -619,6 +626,40 @@ func TestRunOnce_DeploysOutOfSyncAutoUnit(t *testing.T) {
 	}
 }
 
+// TestRunOnce_ObserveModeSkipsAutoDeployButStillTracksDrift is shadow mode's
+// core promise: the loop still renders/diffs/persists real drift every
+// tick, it just never acts on it — even with auto-sync enabled.
+func TestRunOnce_ObserveModeSkipsAutoDeployButStillTracksDrift(t *testing.T) {
+	db := testutil.NewPostgres(t)
+	oldDigest := "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+	cr := &fakeCloudRun{services: map[string]*cloudrun.LiveService{
+		"example-dev-01/widget-api": {
+			ServiceState:                cloudrun.ServiceState{ImageDigest: oldDigest},
+			HasRevisionForDesiredDigest: false,
+			LatestRevisionReady:         true,
+		},
+	}}
+	r := &Reconciler{
+		DB:            db,
+		ManagedFields: []string{"image"},
+		Manifests:     &fakeManifests{byApp: map[string][]byte{"widget-api": serviceYAML()}},
+		CloudRun:      cr,
+		Preconditions: &fakePreconditions{},
+	}
+
+	units := []expander.SyncUnit{{App: "widget-api", Project: "example-dev-01", Sync: observeSync()}}
+	results, err := r.RunOnce(context.Background(), units)
+	if err != nil {
+		t.Fatalf("RunOnce: %v", err)
+	}
+	if results[0].Status != "OutOfSync" {
+		t.Fatalf("expected OutOfSync to still be tracked despite observe mode, got %+v", results[0])
+	}
+	if got := liveServiceDigest(t, cr, "example-dev-01/widget-api"); got != oldDigest {
+		t.Fatalf("expected no deploy in observe mode, but live digest changed to %q", got)
+	}
+}
+
 // TestRunOnce_DeniedSyncWindowBlocksAutoDeployButNotManualSync is the
 // reconcile-level guarantee behind the roadmap's "auto-sync only allow/deny
 // between these hours": a deny window blocks RunOnce's auto path, but a
@@ -1008,6 +1049,40 @@ func TestManualSync_AlreadySyncedStillDeploysIdempotently(t *testing.T) {
 	}
 	if count != 1 {
 		t.Fatalf("expected exactly one sync_events row recording the (no-op) manual sync, got %d", count)
+	}
+}
+
+// TestManualSync_ObserveMode_RejectsWithErrObserveMode proves observe mode
+// blocks even a forced manual sync, not just auto-sync — the whole point of
+// shadow mode (onboard a unit without granting runcd any authority to
+// change it yet) would be defeated if a human could still force a deploy.
+func TestManualSync_ObserveMode_RejectsWithErrObserveMode(t *testing.T) {
+	db := testutil.NewPostgres(t)
+	oldDigest := "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+	cr := &fakeCloudRun{services: map[string]*cloudrun.LiveService{
+		"example-prod-us/widget-api": {ServiceState: cloudrun.ServiceState{ImageDigest: oldDigest}, LatestRevisionReady: true},
+	}}
+	r := &Reconciler{
+		DB:            db,
+		ManagedFields: []string{"image"},
+		Manifests:     &fakeManifests{byApp: map[string][]byte{"widget-api": serviceYAML()}},
+		CloudRun:      cr,
+		Preconditions: &fakePreconditions{},
+	}
+
+	unit := expander.SyncUnit{App: "widget-api", Project: "example-prod-us", Sync: observeSync()}
+	res, err := r.ManualSync(context.Background(), unit, "alice@company.com")
+	if err != nil {
+		t.Fatalf("ManualSync: %v", err)
+	}
+	if !errors.Is(res.Err, ErrObserveMode) {
+		t.Fatalf("expected ErrObserveMode, got %+v", res.Err)
+	}
+	if res.Status != "OutOfSync" {
+		t.Fatalf("expected drift to still be reported as OutOfSync, got %+v", res)
+	}
+	if got := liveServiceDigest(t, cr, "example-prod-us/widget-api"); got != oldDigest {
+		t.Fatalf("expected no deploy in observe mode, but live digest changed to %q", got)
 	}
 }
 

@@ -22,7 +22,7 @@ import { ApiError, syncUnit } from "@/lib/api";
 import type { Unit } from "@/lib/types";
 
 interface SyncButtonProps {
-  unit: Pick<Unit, "app" | "project" | "canSync">;
+  unit: Pick<Unit, "app" | "project" | "canSync" | "observing">;
   onSynced?: () => void;
   size?: "default" | "sm";
 }
@@ -70,8 +70,9 @@ export function SyncButton({ unit, onSynced, size = "default" }: SyncButtonProps
     }
   }
 
+  const syncAllowed = unit.canSync && !unit.observing;
   const button = (
-    <Button size={size} variant="outline" disabled={!unit.canSync || pending}>
+    <Button size={size} variant="outline" disabled={!syncAllowed || pending}>
       <RefreshCw className={pending ? "animate-spin" : undefined} />
       Sync
     </Button>
@@ -79,7 +80,7 @@ export function SyncButton({ unit, onSynced, size = "default" }: SyncButtonProps
 
   return (
     <div className="flex flex-col items-end gap-1">
-      {unit.canSync ? (
+      {syncAllowed ? (
         <AlertDialog
           open={open}
           onOpenChange={(next) => {
@@ -114,7 +115,9 @@ export function SyncButton({ unit, onSynced, size = "default" }: SyncButtonProps
             {button}
           </TooltipTrigger>
           <TooltipContent>
-            You don&apos;t have permission to sync this app/project
+            {unit.observing
+              ? "This app is in observe mode (sync.observe) — sync is disabled"
+              : "You don't have permission to sync this app/project"}
           </TooltipContent>
         </Tooltip>
       )}

@@ -36,6 +36,13 @@ const DefaultWorkers = 16
 // existing applications/sync_events writes.
 var ErrSyncInProgress = errors.New("sync already in progress for this app/project")
 
+// ErrObserveMode means a manual sync was requested for a unit whose
+// effective SyncPolicy has Observe set — shadow mode (see SyncPolicy.Observe's
+// doc comment) blocks deploy regardless of trigger, and a manual sync
+// request against an observing unit gets this back explicitly rather than a
+// silent no-op that looks like it deployed.
+var ErrObserveMode = errors.New("unit is in observe mode (sync.observe) — deploy is disabled")
+
 // lockTTL bounds how long a held lock survives a crashed holder before a
 // later attempt can reclaim it. Generous relative to the real work a lock
 // is held for: DeployService/DeployJob submit the update and return
@@ -188,7 +195,8 @@ func (r *Reconciler) RunOnce(ctx context.Context, units []expander.SyncUnit) ([]
 
 // ManualSync runs a single gated sync request from an authenticated human
 // (§5.9/FR4): the same precondition-check-then-deploy path as the auto
-// loop, but always attempts the deploy (unless the unit is Invalid/Missing)
+// loop, but always attempts the deploy (unless the unit is Invalid/Missing,
+// or its effective SyncPolicy has Observe set — see ErrObserveMode)
 // regardless of the unit's auto flag, with trigger=manual and actor set to
 // the caller's verified email.
 func (r *Reconciler) ManualSync(ctx context.Context, unit expander.SyncUnit, actor string) (Result, error) {
@@ -416,9 +424,22 @@ func (r *Reconciler) applyLiveState(ctx context.Context, res Result, unit expand
 	}
 
 	blocked := res.Status == StatusInvalid || res.Status == StatusMissing
+	observing := observeModeEnabled(unit.Sync)
 	autoAllowed := autoSyncEnabled(unit.Sync) && config.WindowsAllow(unit.Sync.SyncWindows, opts.now)
-	shouldDeploy := !opts.dryRun && !blocked && (opts.force || (res.Status == string(diff.OutOfSync) && autoAllowed))
-	if shouldDeploy {
+	wouldDeploy := !opts.dryRun && !blocked && (opts.force || (res.Status == string(diff.OutOfSync) && autoAllowed))
+	if wouldDeploy && observing {
+		// Auto-sync just silently skips the deploy this tick — Status/
+		// Health above already reflect real drift, which is the entire
+		// point of shadow mode (record the decision, don't act on it). A
+		// manual/forced sync request is different: a human asked for an
+		// actual deploy, and it's better to say so explicitly than to
+		// return 200 with a res that looks like nothing was wrong to sync.
+		if opts.force && res.Err == nil {
+			res.Err = ErrObserveMode
+		}
+		return res
+	}
+	if wouldDeploy {
 		res = r.deploySyncUnit(ctx, res, unit, desired, live, resourceType, deploy, fetch, opts, managedFields)
 	}
 	return res
@@ -426,6 +447,10 @@ func (r *Reconciler) applyLiveState(ctx context.Context, res Result, unit expand
 
 func autoSyncEnabled(sync config.SyncPolicy) bool {
 	return sync.Auto != nil && *sync.Auto
+}
+
+func observeModeEnabled(sync config.SyncPolicy) bool {
+	return sync.Observe != nil && *sync.Observe
 }
 
 // fieldManaged reports whether name is in managedFields.

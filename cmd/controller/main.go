@@ -460,6 +460,15 @@ func loadUnits(ctx context.Context, gh *githubapp.Client, cs configSource, resol
 	if resolveErr != nil {
 		slog.Error("reconcile: resolve environments[].folders", "error", resolveErr)
 	}
+	if root == nil {
+		// Never actually happens — ResolveConfig always returns a usable
+		// *config.Root, even alongside a non-nil error (see its own doc
+		// comment) — but nilaway can't prove that across the call, and
+		// flags every downstream access of root.Defaults otherwise. A real
+		// guard costs nothing and satisfies it without excluding this file
+		// from nilaway checking altogether.
+		return nil, nil, fmt.Errorf("resolve environments[].folders: %w", resolveErr)
+	}
 	units, err := expander.Expand(root)
 	if err != nil {
 		return nil, nil, err

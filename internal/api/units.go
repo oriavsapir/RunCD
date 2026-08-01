@@ -37,6 +37,11 @@ type unitView struct {
 	// so it needs this to decide whether the Sync button is enabled for
 	// *this* unit, not just whether the unit exists.
 	CanSync bool `json:"canSync"`
+	// Observing mirrors this unit's effective SyncPolicy.Observe — the
+	// dashboard uses it to disable the Sync button and explain why, the
+	// same way CanSync already does for an RBAC-denied unit, rather than
+	// let a human hit Sync and get back a 409 they didn't expect.
+	Observing bool `json:"observing"`
 	// IgnoreFields/IgnorePreconditions surface this app's resource
 	// exclusions (config.App) — without these, a unit whose Status
 	// reflects a diff on an excluded field (e.g. OutOfSync from a traffic
@@ -66,6 +71,7 @@ func unitViewFrom(u expander.SyncUnit, rbacCfg *rbac.Config, folderMembership ma
 		Status:              pendingStatus,
 		Health:              pendingHealth,
 		CanSync:             rbac.CanSyncFolders(rbacCfg, folderMembership, email, u),
+		Observing:           u.Sync.Observe != nil && *u.Sync.Observe,
 		IgnoreFields:        u.IgnoreFields,
 		IgnorePreconditions: u.IgnorePreconditions,
 	}

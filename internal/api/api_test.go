@@ -14,6 +14,7 @@ import (
 	"testing"
 
 	"github.com/runcd/runcd/internal/cloudrun"
+	"github.com/runcd/runcd/internal/config"
 	"github.com/runcd/runcd/internal/expander"
 	"github.com/runcd/runcd/internal/rbac"
 	"github.com/runcd/runcd/internal/reconcile"
@@ -300,6 +301,28 @@ func TestHandleSync_LockedUnitReturns409(t *testing.T) {
 		VALUES ('widget-api', 'example-prod-eu', 'other-attempt', now() + interval '1 minute')`); err != nil {
 		t.Fatalf("seed sync_locks: %v", err)
 	}
+
+	srv := httptest.NewServer(NewMux(h))
+	defer srv.Close()
+
+	resp := postSync(t, srv.URL+"/api/sync/example-prod-eu/widget-api", "admin-token")
+	defer func() { _ = resp.Body.Close() }()
+	if resp.StatusCode != http.StatusConflict {
+		t.Fatalf("expected 409, got %d", resp.StatusCode)
+	}
+}
+
+// TestHandleSync_ObserveModeUnitReturns409 checks a manual sync against a
+// unit whose SyncPolicy has Observe set gets an explicit, actionable 409 —
+// not a 200 that looks like the sync happened when shadow mode silently
+// blocked the deploy.
+func TestHandleSync_ObserveModeUnitReturns409(t *testing.T) {
+	h, _ := newTestHandler(t)
+	observe := true
+	h.Units = StaticUnits{"widget-api/example-prod-eu": expander.SyncUnit{
+		App: "widget-api", Project: "example-prod-eu", Env: "prd",
+		Sync: config.SyncPolicy{Observe: &observe},
+	}}
 
 	srv := httptest.NewServer(NewMux(h))
 	defer srv.Close()

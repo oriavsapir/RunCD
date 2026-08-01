@@ -29,6 +29,7 @@ type unit struct {
 	Health              string   `json:"health"`
 	LastReconciledAt    *string  `json:"lastReconciledAt"`
 	CanSync             bool     `json:"canSync"`
+	Observing           bool     `json:"observing"`
 	IgnoreFields        []string `json:"ignoreFields"`
 	IgnorePreconditions []string `json:"ignorePreconditions"`
 }

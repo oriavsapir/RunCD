@@ -141,6 +141,14 @@ func (h *Handler) handleSync(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "sync already in progress for this app/project", http.StatusConflict)
 		return
 	}
+	if errors.Is(res.Err, reconcile.ErrObserveMode) {
+		// Another unambiguous, actionable case: the caller asked for a real
+		// deploy but this unit's SyncPolicy has observe mode on, so nothing
+		// happened — worth saying explicitly rather than a 200 that looks
+		// like a no-op success.
+		http.Error(w, "sync disabled: this app/environment is in observe mode (sync.observe)", http.StatusConflict)
+		return
+	}
 	if res.Err != nil {
 		// res.Err mixes business-level outcomes (a failed precondition,
 		// say) with genuine infra errors (a raw wrapped GCP/DB error from a

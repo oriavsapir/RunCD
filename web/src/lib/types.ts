@@ -29,6 +29,10 @@ export interface Unit {
   health: UnitHealth;
   lastReconciledAt?: string;
   canSync: boolean;
+  // Mirrors this unit's effective SyncPolicy.observe — sync is disabled
+  // server-side regardless of canSync, so the Sync button should say why
+  // rather than let a click round-trip into a 409.
+  observing: boolean;
   // This app's resource exclusions (config.App.ignoreFields/
   // ignorePreconditions) — a unit's Status can reflect a diff on a field
   // excluded here, which the desired/live image comparison alone can't

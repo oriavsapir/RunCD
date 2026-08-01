@@ -1599,6 +1599,63 @@ Switched to [goose](https://github.com/pressly/goose) (`github.com/pressly/goose
   needed no changes and both still pass (the latter run repeatedly,
   `-count=6 -race`, specifically to re-confirm no deadlock).
 
+## Shadow mode / observe
+
+New `sync.observe` field on `SyncPolicy` (`internal/config/config.go`),
+settable at `defaults`/`environments[env]` level like `auto`/`syncWindows`.
+When true for a unit's effective policy:
+- The reconcile loop still fetches, diffs, and assesses health every tick
+  exactly as normal — `Status`/`Health` reflect real drift from the first
+  tick, same as any other unit.
+- Deploy is blocked outright — auto-sync never fires regardless of
+  `auto`/sync windows, and a manual sync's `force` no longer overrides it
+  either (`internal/reconcile/reconcile.go`'s `applyLiveState`).
+- A manual sync request against an observing unit gets a new sentinel,
+  `reconcile.ErrObserveMode`, back instead of a silent no-op — surfaced by
+  `internal/api/api.go`'s `handleSync` as `409 Conflict`, the same
+  treatment `ErrSyncInProgress` already gets, so a caller (dashboard, CLI,
+  CI) can't mistake "blocked by observe mode" for "nothing happened to
+  sync."
+
+Meant for onboarding a project/environment onto runcd gradually: prove the
+desired state matches (or see exactly where it doesn't) before granting
+runcd any authority to change anything, without needing to remember to run
+a manual dry-run every tick.
+
+Surfaced end-to-end:
+- `internal/api/units.go`'s `unitView` gained `observing` (mirrors `auto`'s
+  own treatment).
+- `cmd/runcd`'s `unit` struct and `renderUnit` show an "Observe mode: on"
+  line when set.
+- The dashboard's `SyncButton` disables Sync and explains why (same
+  pattern as the existing RBAC-denied tooltip) when `observing` is true,
+  and `DiffView` gets an explanatory note (same treatment as
+  `ignoreFields`/`ignorePreconditions`).
+
+Tests: `TestSyncPolicy_MergeObserve`, `TestParse_SyncObserve`
+(`internal/config`), `TestRunOnce_ObserveModeSkipsAutoDeployButStillTracksDrift`,
+`TestManualSync_ObserveMode_RejectsWithErrObserveMode`
+(`internal/reconcile`), `TestHandleSync_ObserveModeUnitReturns409`
+(`internal/api`).
+
+### A real CI gap this surfaced
+
+Adding this feature involved re-running the exact CI `nilaway` invocation
+(with its `-exclude-errors-in-files` list) locally for the first time in a
+while — and it was failing, on findings in `cmd/controller/main.go` and
+`internal/expander/expander.go` that had nothing to do with this feature:
+`folders.ResolveConfig`'s result being passed to `expander.Expand`/used for
+`.Defaults` without nilaway being able to prove it's non-nil (it always is,
+by construction — see `ResolveConfig`'s own doc comment — but nilaway can't
+model that across the call). This had been silently red on `main` for the
+three preceding pushes; local spot-checks against nilaway's raw output
+without the same `-exclude-errors-in-files` flags CI uses had missed it.
+Fixed with an explicit (belt-and-suspenders, not strictly reachable) nil
+guard in `loadUnits` right after the `ResolveConfig` call, rather than
+growing the exclude list — a two-line guard costs less than losing nilaway
+coverage over the rest of those two files. Confirmed clean by running CI's
+exact command locally afterward.
+
 ## Infra / delivery
 
 - [x] **Dockerfile** — multi-stage (`golang:1.26-alpine` build →

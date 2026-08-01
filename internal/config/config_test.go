@@ -147,6 +147,42 @@ func TestSyncPolicy_Merge(t *testing.T) {
 	}
 }
 
+func TestSyncPolicy_MergeObserve(t *testing.T) {
+	trueVal := true
+	defaults := SyncPolicy{}
+	envOverride := SyncPolicy{Observe: &trueVal}
+
+	merged := defaults.Merge(envOverride)
+	if merged.Observe == nil || !*merged.Observe {
+		t.Fatalf("expected env override observe=true, got %+v", merged.Observe)
+	}
+}
+
+func TestParse_SyncObserve(t *testing.T) {
+	yaml := []byte(`
+environments:
+  prd:
+    projects: [example-prod-us]
+    sync:
+      observe: true
+defaults:
+  region: us-central1
+  managedFields: [image]
+apps:
+  - name: widget-api
+    env: prd
+    source: { repo: git@github.com:org/deployment.git, path: services/widget-api/ }
+`)
+	root, err := Parse(yaml)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	sync := root.Environments["prd"].Sync
+	if sync.Observe == nil || !*sync.Observe {
+		t.Fatalf("expected environments.prd.sync.observe=true, got %+v", sync.Observe)
+	}
+}
+
 func TestParse_DuplicateProjectInEnvironmentRejected(t *testing.T) {
 	yaml := []byte(`
 environments:
