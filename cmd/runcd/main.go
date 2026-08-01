@@ -167,7 +167,11 @@ func run(args []string, stdout, stderr io.Writer) error {
 		return nil
 
 	case "orphans":
-		ctx, cancel := context.WithTimeout(background, readTimeout)
+		// syncTimeout, not readTimeout: unlike every other read endpoint
+		// (Postgres-only), orphans fans out live Cloud Run ListServices
+		// calls across every project/region in the config — on a
+		// real-sized fleet that can legitimately take longer than 30s.
+		ctx, cancel := context.WithTimeout(background, syncTimeout)
 		defer cancel()
 		orphans, err := c.listOrphans(ctx)
 		if err != nil {

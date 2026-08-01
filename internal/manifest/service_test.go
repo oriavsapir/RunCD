@@ -239,3 +239,15 @@ secrets:
 		t.Fatal("expected error for a var name declared in both env and secrets")
 	}
 }
+
+func TestParse_EmptyEnvVarNameRejected(t *testing.T) {
+	yaml := []byte(`
+image:
+  digest: ` + validDigest + `
+env:
+  "": literal-value
+`)
+	if _, err := Parse(yaml); err == nil {
+		t.Fatal("expected error for an env entry with an empty name")
+	}
+}

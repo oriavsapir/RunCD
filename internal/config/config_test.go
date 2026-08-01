@@ -388,6 +388,42 @@ apps:
 	}
 }
 
+func TestParse_IgnorePreconditionsRejectsUnknownType(t *testing.T) {
+	yaml := []byte(`
+environments:
+  prd:
+    projects: [example-prod-us]
+defaults:
+  region: us-central1
+apps:
+  - name: widget-api
+    env: prd
+    source: { repo: git@github.com:org/deployment.git, path: services/widget-api/ }
+    ignorePreconditions: ["pubsubTopik:orders-events"]
+`)
+	if _, err := Parse(yaml); err == nil {
+		t.Fatal("expected error for an ignorePreconditions entry with a typo'd precondition type")
+	}
+}
+
+func TestParse_IgnorePreconditionsRejectsMalformedEntry(t *testing.T) {
+	yaml := []byte(`
+environments:
+  prd:
+    projects: [example-prod-us]
+defaults:
+  region: us-central1
+apps:
+  - name: widget-api
+    env: prd
+    source: { repo: git@github.com:org/deployment.git, path: services/widget-api/ }
+    ignorePreconditions: ["not-a-type-name-pair"]
+`)
+	if _, err := Parse(yaml); err == nil {
+		t.Fatal("expected error for an ignorePreconditions entry with no type:name separator")
+	}
+}
+
 func TestParse_ManagedFieldsAcceptsEnv(t *testing.T) {
 	yaml := []byte(`
 environments:

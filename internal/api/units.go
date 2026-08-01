@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"log/slog"
 	"net/http"
+	"strconv"
 	"time"
 
 	"github.com/runcd/runcd/internal/expander"
@@ -283,9 +284,13 @@ type syncEventView struct {
 }
 
 // defaultHistoryLimit caps how many sync_events rows the history view
-// returns — sync_events is append-only and never pruned (§5.2), so an
-// unbounded query would grow without limit over a unit's lifetime.
-const defaultHistoryLimit = 50
+// returns by default — sync_events is append-only and never pruned (§5.2),
+// so an unbounded query would grow without limit over a unit's lifetime.
+// maxHistoryLimit bounds the "?limit=" override for the same reason.
+const (
+	defaultHistoryLimit = 50
+	maxHistoryLimit     = 500
+)
 
 // handleUnitHistory is RBAC-checked like handleSync/handleDryRun, unlike
 // the rest of the read views: sync_events.error is populated verbatim from
@@ -314,7 +319,17 @@ func (h *Handler) handleUnitHistory(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	events, err := h.Status.SyncHistory(r.Context(), app, project, defaultHistoryLimit)
+	limit := defaultHistoryLimit
+	if q := r.URL.Query().Get("limit"); q != "" {
+		n, err := strconv.Atoi(q)
+		if err != nil || n <= 0 {
+			http.Error(w, "limit must be a positive integer", http.StatusBadRequest)
+			return
+		}
+		limit = min(n, maxHistoryLimit)
+	}
+
+	events, err := h.Status.SyncHistory(r.Context(), app, project, limit)
 	if err != nil {
 		slog.Error("sync history", "app", app, "project", project, "error", err)
 		http.Error(w, "failed to load sync history", http.StatusInternalServerError)

@@ -87,7 +87,11 @@ type apiError struct {
 }
 
 func (e *apiError) Error() string {
-	return fmt.Sprintf("%s: %s", http.StatusText(e.status), strings.TrimSpace(e.body))
+	text := http.StatusText(e.status)
+	if text == "" {
+		text = fmt.Sprintf("HTTP %d", e.status)
+	}
+	return fmt.Sprintf("%s: %s", text, strings.TrimSpace(e.body))
 }
 
 // client is a thin wrapper around the runcd HTTP API — no retries, no
@@ -101,6 +105,11 @@ func (e *apiError) Error() string {
 // the read endpoints (units/get/history/rbac). Each call site instead
 // gets its own context deadline sized for what it actually does — see
 // main.go.
+// maxResponseBytes bounds every response body this CLI reads — a
+// misbehaving backend or proxy shouldn't be able to OOM this process on a
+// huge response.
+const maxResponseBytes = 10 << 20 // 10 MiB
+
 type client struct {
 	baseURL string
 	token   string // "" if the API isn't behind IAP (or auth is handled some other way in front of this process)
@@ -132,9 +141,15 @@ func (c *client) do(ctx context.Context, method, path string, out any) error {
 	}
 	defer func() { _ = resp.Body.Close() }()
 
-	body, err := io.ReadAll(resp.Body)
+	// Capped at maxResponseBytes, same class of guard already applied to
+	// internal/githubapp's reads — an unbounded io.ReadAll would let a
+	// misbehaving backend or proxy OOM this process on a huge response.
+	body, err := io.ReadAll(io.LimitReader(resp.Body, maxResponseBytes+1))
 	if err != nil {
 		return err
+	}
+	if len(body) > maxResponseBytes {
+		return fmt.Errorf("response exceeded %d byte limit", maxResponseBytes)
 	}
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		return &apiError{status: resp.StatusCode, body: string(body)}

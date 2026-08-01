@@ -101,6 +101,9 @@ func Parse(data []byte) (*ServiceDefinition, error) {
 // var namespace, so declaring "FOO" both ways is a real config mistake,
 // not a meaningful override of one by the other.
 func validateSecrets(env map[string]string, secrets []SecretRef) error {
+	if _, ok := env[""]; ok {
+		return fmt.Errorf("env: an entry has an empty name")
+	}
 	seen := make(map[string]bool, len(secrets))
 	for _, s := range secrets {
 		if s.Name == "" {

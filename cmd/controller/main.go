@@ -14,6 +14,7 @@ import (
 	"os"
 	"os/signal"
 	"reflect"
+	"strconv"
 	"sync"
 	"sync/atomic"
 	"syscall"
@@ -186,6 +187,21 @@ func run() error {
 		return err
 	}
 	defer func() { _ = closeDB() }()
+
+	// Unbounded (database/sql's own default) risks connection exhaustion
+	// under a concurrent spike — this one pool is shared by reconcile
+	// workers (up to reconcile.DefaultWorkers concurrent deploys),
+	// dashboard-read API requests, leader-election renewal, and notify's
+	// debounce transaction, all potentially overlapping. Generous enough
+	// over the worker pool's own default size not to bottleneck normal
+	// operation, configurable for a deployment that needs otherwise.
+	maxOpenConns, err := strconv.Atoi(envOrDefault("DB_MAX_OPEN_CONNS", "25"))
+	if err != nil {
+		return fmt.Errorf("DB_MAX_OPEN_CONNS: %w", err)
+	}
+	db.SetMaxOpenConns(maxOpenConns)
+	db.SetMaxIdleConns(maxOpenConns)
+	db.SetConnMaxLifetime(30 * time.Minute)
 
 	// Idempotent — safe on every boot, including one replica racing another
 	// to apply it for the first time (see store.Apply's doc comment).
@@ -414,9 +430,16 @@ func loadUnits(ctx context.Context, gh *githubapp.Client, cs configSource, resol
 	if err != nil {
 		return nil, nil, err
 	}
-	root, err = folders.ResolveConfig(ctx, resolver, root)
-	if err != nil {
-		return nil, nil, fmt.Errorf("resolve environments[].folders: %w", err)
+	// A folder-resolution error here is logged, not propagated as fatal:
+	// ResolveConfig already falls back to each affected environment's
+	// explicitly-listed Projects on a per-folder failure, and the whole
+	// tick — every other environment's config/RBAC/notify reload and
+	// RunOnce for every unit — shouldn't abort over one folder's
+	// transient Resource Manager error. root is always usable even when
+	// resolveErr is non-nil (see ResolveConfig's own doc comment).
+	root, resolveErr := folders.ResolveConfig(ctx, resolver, root)
+	if resolveErr != nil {
+		slog.Error("reconcile: resolve environments[].folders", "error", resolveErr)
 	}
 	units, err := expander.Expand(root)
 	if err != nil {

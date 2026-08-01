@@ -7,6 +7,7 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"time"
 
 	run "cloud.google.com/go/run/apiv2"
 	"cloud.google.com/go/run/apiv2/runpb"
@@ -209,12 +210,23 @@ func jobName(project, region, name string) string {
 	return fmt.Sprintf("projects/%s/locations/%s/jobs/%s", project, region, name)
 }
 
+// apiCallTimeout bounds every AdminClient entry point's total Cloud Run API
+// time. Without this, a call inherits whatever the caller's own context
+// is — in the reconcile loop's auto path, that's the current leadership
+// term's context (leadershipContext), which can live far longer than any
+// single API call reasonably should. A hung call would otherwise occupy a
+// reconcile worker-pool slot until leadership itself changes, not until
+// the call actually finishes or fails.
+const apiCallTimeout = 30 * time.Second
+
 // GetService implements AdminClient.GetService. The interface doesn't carry
 // resourceType (it covers both service and workerPool, §5.7), so this tries
 // the Services API first and falls back to WorkerPools on NotFound —
 // ponytail: one extra round-trip for workerPool units, add resourceType to
 // the interface if that cost ever matters.
 func (c *GCPAdminClient) GetService(ctx context.Context, project, region, name, desiredDigest string) (*LiveService, error) {
+	ctx, cancel := context.WithTimeout(ctx, apiCallTimeout)
+	defer cancel()
 	sc, err := c.servicesClient(ctx, region)
 	if err != nil {
 		return nil, err
@@ -245,6 +257,8 @@ func (c *GCPAdminClient) GetService(ctx context.Context, project, region, name, 
 // (not workerPools/jobs): a first, deliberately narrower cut at prune's
 // "flag what's orphaned" gap, not full coverage of every resource type.
 func (c *GCPAdminClient) ListServiceNames(ctx context.Context, project, region string) ([]string, error) {
+	ctx, cancel := context.WithTimeout(ctx, apiCallTimeout)
+	defer cancel()
 	sc, err := c.servicesClient(ctx, region)
 	if err != nil {
 		return nil, err
@@ -279,6 +293,8 @@ func lastPathSegment(fullName string) string {
 // DeployService implements AdminClient.DeployService, with the same
 // service-then-workerPool fallback as GetService.
 func (c *GCPAdminClient) DeployService(ctx context.Context, project, region, name string, desired ServiceState) error {
+	ctx, cancel := context.WithTimeout(ctx, apiCallTimeout)
+	defer cancel()
 	sc, err := c.servicesClient(ctx, region)
 	if err != nil {
 		return err
@@ -367,6 +383,8 @@ func (c *GCPAdminClient) fetchJob(ctx context.Context, jc *run.JobsClient, proje
 // digest that hasn't actually run yet. Fetching the real Execution and
 // reading its own container image avoids that conflation.
 func (c *GCPAdminClient) GetJob(ctx context.Context, project, region, name, desiredDigest string) (*LiveJob, error) {
+	ctx, cancel := context.WithTimeout(ctx, apiCallTimeout)
+	defer cancel()
 	jc, err := c.jobsClient(ctx, region)
 	if err != nil {
 		return nil, err
@@ -416,6 +434,8 @@ func (c *GCPAdminClient) getExecution(ctx context.Context, region string, ref *r
 // a poll that re-issues a deploy call while still waiting for a prior
 // deploy's convergence would trigger a genuine duplicate job execution.
 func (c *GCPAdminClient) DeployJob(ctx context.Context, project, region, name string, desired ServiceState) error {
+	ctx, cancel := context.WithTimeout(ctx, apiCallTimeout)
+	defer cancel()
 	jc, err := c.jobsClient(ctx, region)
 	if err != nil {
 		return err

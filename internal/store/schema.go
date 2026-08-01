@@ -17,6 +17,9 @@ var migration0002 string
 //go:embed migrations/0003_sync_lock.sql
 var migration0003 string
 
+//go:embed migrations/0004_metrics_index.sql
+var migration0004 string
+
 // Schema is every migration concatenated in order. Every statement in it is
 // idempotent (IF NOT EXISTS / ON CONFLICT DO NOTHING — see the migration
 // files themselves), so applying it wholesale is safe on a fresh database
@@ -26,7 +29,7 @@ var migration0003 string
 // can't tell this apart from building a query out of untrusted input.
 // Every operand here is a //go:embed'd literal fixed at compile time, not
 // runtime data.
-var Schema = migration0001 + "\n" + migration0002 + "\n" + migration0003 //nolint:gosec
+var Schema = migration0001 + "\n" + migration0002 + "\n" + migration0003 + "\n" + migration0004 //nolint:gosec
 
 // schemaLockKey is an arbitrary constant advisory-lock key, unique only
 // within this app's own lock-key space (nothing else in runcd takes an

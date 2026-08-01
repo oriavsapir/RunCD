@@ -1373,6 +1373,64 @@ source before fixing.
   `runtime_service_account_emails`, and `nilaway`/`govulncheck` installed
   unpinned (`@latest`) in CI.
 
+## Bugs found and fixed in a ninth review pass
+
+- [x] **`loadUnits` treated any folder-resolution error as fatal to the
+  whole reconcile tick** (`cmd/controller/main.go`) — a single
+  environment's transient Resource Manager error aborted `units.set()`,
+  config/RBAC/notify hot-reload, and `RunOnce` for every unit in every
+  environment, not just the affected one. Fixed by making
+  `folders.ResolveConfig`/`ResolveMembership` themselves resilient
+  (`errors.Join` partial failures, always return a usable/partial result)
+  and having `loadUnits` log a non-nil resolve error instead of failing on
+  it.
+- [x] **Every `cloudrun.AdminClient` entry point inherited the caller's
+  context with no timeout** (`internal/cloudrun/gcp.go`) — in the
+  auto-reconcile path that's the long-lived leadership-term context, so a
+  hung Cloud Run API call could occupy a worker slot indefinitely. Fixed:
+  `apiCallTimeout = 30 * time.Second` wraps `GetService`,
+  `ListServiceNames`, `DeployService`, `GetJob`, `DeployJob`.
+- [x] **`validateSecrets` didn't reject an empty env var name**
+  (`internal/manifest/service.go`) — `env: {"": "..."}` parsed fine and
+  would have shipped Cloud Run a nameless env var. Fixed with an explicit
+  check; test: `TestParse_EmptyEnvVarNameRejected`.
+- [x] **Sync confirmation dialog's "Sync now" button had no `disabled`
+  guard** (`web/src/components/sync-button.tsx`) — the outer trigger
+  button was already `disabled={!unit.canSync || pending}`, but the
+  in-dialog `AlertDialogAction` wasn't, leaving a narrow double-submit
+  window on a fast double-click before `pending` re-renders it. Fixed by
+  adding the same `disabled={pending}`.
+- [x] **`apiError.Error()` produced a bare `": <body>"` for HTTP status
+  codes `http.StatusText` doesn't recognize** (`cmd/runcd/client.go`) —
+  `http.StatusText` returns `""` for anything it doesn't have a name for,
+  losing the actual status code from the message entirely. Fixed to fall
+  back to `HTTP <code>` when `StatusText` is empty.
+- [x] **`GET .../history`'s 50-row cap had no override**
+  (`internal/api/units.go`) — added an optional `?limit=` query param
+  (validated as a positive integer, clamped to `maxHistoryLimit = 500`) on
+  top of the existing `defaultHistoryLimit = 50`.
+- [x] **Stat-tile "Progressing" icon didn't spin, unlike the same status's
+  icon in table rows** (`web/src/app/page.tsx`) — `status-badge.tsx`
+  already applies `animate-spin` for `Progressing`; the dashboard home
+  page's summary tile used the same `Loader2` icon statically. Fixed by
+  adding `animate-spin` to the tile's className.
+- [x] **Diff view's image transition row had no accessible from/to label**
+  (`web/src/components/diff-view.tsx`) — sighted users read direction from
+  the arrow icon's position; a screen reader had no equivalent. Fixed with
+  `sr-only` "from"/"to" labels and `aria-hidden` on the icon.
+- **Checked, not a bug**: `internal/notify/slack.go`'s
+  `io.Copy(io.Discard, resp.Body)` — streams in bounded chunks, never
+  buffers the whole body, so it's not an OOM risk the way `io.ReadAll`
+  would be. `web/src/lib/types.ts`'s `SyncResponse` doesn't have
+  `desiredImage`/`liveImage` because the real `internal/api/api.go`
+  `syncResponse` struct never did either — the TS type correctly matches
+  the Go response, not a gap.
+- **Re-confirmed as still-intentional, not a new finding**: `GetService`'s
+  services-then-workerPools fallback (`internal/cloudrun/gcp.go`) still
+  costs one extra round-trip per poll for workerPool units — already
+  flagged in-code (`ponytail:` comment) as a deliberate, deferred
+  tradeoff; no `resourceType` hint is threaded through yet to skip it.
+
 ## Infra / delivery
 
 - [x] **Dockerfile** — multi-stage (`golang:1.26-alpine` build →

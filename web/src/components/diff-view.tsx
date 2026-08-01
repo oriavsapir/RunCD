@@ -79,8 +79,13 @@ export function DiffView({ unit }: { unit: Unit }) {
             <>
               <dt className="text-muted-foreground">Transition</dt>
               <dd className="flex items-center gap-2">
+                <span className="sr-only">from</span>
                 <code className="text-xs break-all">{unit.liveImage}</code>
-                <ArrowRight className="text-muted-foreground size-3.5 shrink-0" />
+                <ArrowRight
+                  className="text-muted-foreground size-3.5 shrink-0"
+                  aria-hidden="true"
+                />
+                <span className="sr-only">to</span>
                 <code className="text-xs break-all">{unit.desiredImage}</code>
               </dd>
             </>

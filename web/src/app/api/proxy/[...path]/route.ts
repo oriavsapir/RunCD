@@ -23,6 +23,23 @@ const API_BASE_URL = process.env.RUNCD_API_URL;
 
 const auth = new GoogleAuth();
 
+// Cached at module scope, not re-created per request: getIdTokenClient
+// returns a fresh IdTokenClient wrapper with no token of its own each call
+// — without reusing the same instance across requests, every proxied
+// dashboard call (units, diff, history, sync) re-mints a token instead of
+// reusing the one the client already caches internally until near expiry.
+// Caching the promise itself, not just the resolved client, so concurrent
+// requests during a cold start all await the same in-flight mint rather
+// than each kicking off their own.
+let idTokenClientPromise: ReturnType<GoogleAuth["getIdTokenClient"]> | null = null;
+
+function getIdTokenClient() {
+  if (!idTokenClientPromise) {
+    idTokenClientPromise = auth.getIdTokenClient(API_BASE_URL!);
+  }
+  return idTokenClientPromise;
+}
+
 async function forward(req: NextRequest, path: string[]) {
   if (!API_BASE_URL) {
     return NextResponse.json(
@@ -31,7 +48,7 @@ async function forward(req: NextRequest, path: string[]) {
     );
   }
 
-  const client = await auth.getIdTokenClient(API_BASE_URL);
+  const client = await getIdTokenClient();
   const authHeaders = await client.getRequestHeaders();
   const iapAssertion = req.headers.get("x-goog-iap-jwt-assertion");
   const url = `${API_BASE_URL}/${path.join("/")}${req.nextUrl.search}`;

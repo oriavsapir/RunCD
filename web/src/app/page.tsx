@@ -47,7 +47,7 @@ const STAT_TILES: Array<{
     label: "Progressing",
     match: (u) => u.status === "Progressing" || u.health === "Progressing",
     icon: Loader2,
-    className: "text-blue-600 dark:text-blue-400",
+    className: "text-blue-600 dark:text-blue-400 animate-spin",
   },
   {
     label: "Degraded",

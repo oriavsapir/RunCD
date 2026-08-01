@@ -86,7 +86,7 @@ export function SyncButton({ unit, onSynced, size = "default" }: SyncButtonProps
             </AlertDialogHeader>
             <AlertDialogFooter>
               <AlertDialogCancel>Cancel</AlertDialogCancel>
-              <AlertDialogAction onClick={handleConfirm}>
+              <AlertDialogAction onClick={handleConfirm} disabled={pending}>
                 Sync now
               </AlertDialogAction>
             </AlertDialogFooter>

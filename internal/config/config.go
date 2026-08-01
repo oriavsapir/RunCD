@@ -5,6 +5,7 @@ package config
 import (
 	"fmt"
 	"net/url"
+	"strings"
 
 	"gopkg.in/yaml.v3"
 )
@@ -167,6 +168,30 @@ type Root struct {
 // otherwise be silently ignored by the diff engine rather than rejected.
 var validManagedFields = map[string]bool{"image": true, "traffic": true, "env": true}
 
+// validPreconditionTypes mirrors internal/precondition.Check's own type
+// switch (kept as a local literal, not imported, matching how
+// validManagedFields is self-contained rather than importing internal/diff
+// for its field names) — an app.IgnorePreconditions entry naming any other
+// type would otherwise silently never match a real requires entry, leaving
+// that precondition gating forever instead of failing loudly here.
+var validPreconditionTypes = map[string]bool{"pubsubTopic": true, "pubsubSubscription": true}
+
+// validateIgnorePrecondition checks one app.IgnorePreconditions entry —
+// "type:name", where type is a precondition type runcd actually checks.
+// name itself can't be validated further at parse time (no I/O here); a
+// name that never matches any requires entry is harmless (it just ignores
+// nothing), the type prefix is what's worth catching a typo in.
+func validateIgnorePrecondition(entry string) error {
+	typ, name, found := strings.Cut(entry, ":")
+	if !found || name == "" {
+		return fmt.Errorf("%q must be \"type:name\" (e.g. \"pubsubTopic:orders-events\")", entry)
+	}
+	if !validPreconditionTypes[typ] {
+		return fmt.Errorf("%q: %q is not a precondition type runcd checks (pubsubTopic, pubsubSubscription)", entry, typ)
+	}
+	return nil
+}
+
 // Parse decodes runcd.yaml and rejects any app whose env doesn't exist, or
 // any defaults.managedFields entry the diff engine doesn't know how to
 // compare — both must fail loudly at parse time (§5.1), not be silently
@@ -213,6 +238,11 @@ func Parse(data []byte) (*Root, error) {
 		for _, f := range app.IgnoreFields {
 			if !validManagedFields[f] {
 				return nil, fmt.Errorf("app %q: ignoreFields: %q is not a field runcd knows how to manage (image, traffic, env)", app.Name, f)
+			}
+		}
+		for _, p := range app.IgnorePreconditions {
+			if err := validateIgnorePrecondition(p); err != nil {
+				return nil, fmt.Errorf("app %q: ignorePreconditions: %w", app.Name, err)
 			}
 		}
 	}

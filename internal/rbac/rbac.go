@@ -123,7 +123,29 @@ func HasAnyGrant(cfg *Config, subject string) bool {
 		return false
 	}
 	for _, rule := range cfg.Roles {
-		if rule.Subject == subject && len(rule.Scope) > 0 {
+		if rule.Subject != subject {
+			continue
+		}
+		for _, scope := range rule.Scope {
+			if isRecognizedScope(scope) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// isRecognizedScope reports whether scope is one of the forms scopeMatches
+// actually knows how to evaluate — "*", "env:", "app:", or "folder:". A
+// typo like "evn:prod" has a non-empty Scope but would never match a real
+// CanSync/CanSyncFolders check, so len(Scope) > 0 alone isn't enough for
+// HasAnyGrant either.
+func isRecognizedScope(scope string) bool {
+	if scope == "*" {
+		return true
+	}
+	for _, prefix := range [...]string{"env:", "app:", "folder:"} {
+		if strings.HasPrefix(scope, prefix) {
 			return true
 		}
 	}

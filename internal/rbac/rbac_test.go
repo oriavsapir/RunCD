@@ -209,6 +209,25 @@ roles:
 	}
 }
 
+// TestHasAnyGrant_UnrecognizedScopeDoesNotCount guards against a typo'd
+// scope (e.g. "evn:prod" instead of "env:prod") passing HasAnyGrant just
+// because Scope is non-empty — it must never match a real CanSync check
+// either, so it shouldn't grant access to a fleet-wide scan like orphans.
+func TestHasAnyGrant_UnrecognizedScopeDoesNotCount(t *testing.T) {
+	cfg, err := Parse([]byte(`
+roles:
+  - subject: typo@company.com
+    role: syncer
+    scope: ["evn:prod"]
+`))
+	if err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+	if HasAnyGrant(cfg, "typo@company.com") {
+		t.Fatal("expected an unrecognized scope form to grant nothing")
+	}
+}
+
 func TestCanSyncFolders_FolderScopeMatchesMemberProject(t *testing.T) {
 	cfg, err := Parse([]byte(`
 roles:
