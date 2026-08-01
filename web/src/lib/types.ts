@@ -29,6 +29,12 @@ export interface Unit {
   health: UnitHealth;
   lastReconciledAt?: string;
   canSync: boolean;
+  // This app's resource exclusions (config.App.ignoreFields/
+  // ignorePreconditions) — a unit's Status can reflect a diff on a field
+  // excluded here, which the desired/live image comparison alone can't
+  // explain.
+  ignoreFields?: string[];
+  ignorePreconditions?: string[];
 }
 
 export type SyncTrigger = "auto" | "manual";

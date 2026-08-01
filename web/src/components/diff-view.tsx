@@ -1,4 +1,4 @@
-import { ArrowRight, GitCompare, MapPin, Zap, ZapOff } from "lucide-react";
+import { ArrowRight, GitCompare, Info, MapPin, Zap, ZapOff } from "lucide-react";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { StatusBadge } from "@/components/status-badge";
 import type { Unit } from "@/lib/types";
@@ -14,6 +14,9 @@ function ImageValue({ digest }: { digest?: string }) {
 export function DiffView({ unit }: { unit: Unit }) {
   const inSync =
     !!unit.desiredImage && unit.desiredImage === unit.liveImage;
+  const hasExclusions =
+    (unit.ignoreFields?.length ?? 0) > 0 ||
+    (unit.ignorePreconditions?.length ?? 0) > 0;
 
   return (
     <Card>
@@ -29,10 +32,37 @@ export function DiffView({ unit }: { unit: Unit }) {
           <StatusBadge value={unit.health} />
           {inSync && (
             <span className="text-muted-foreground text-xs">
-              image digests match
+              image digest matches
             </span>
           )}
         </div>
+
+        {hasExclusions && (
+          // Status/Health can reflect a field or precondition this app
+          // deliberately excludes from management (config.App.ignoreFields/
+          // ignorePreconditions) — without this note, the image-only
+          // comparison above can look contradictory (e.g. "image digest
+          // matches" right under a red OutOfSync badge caused entirely by
+          // an excluded field like traffic).
+          <div className="bg-muted/50 flex items-start gap-2 rounded-md p-3 text-xs">
+            <Info className="text-muted-foreground mt-0.5 size-3.5 shrink-0" />
+            <div className="text-muted-foreground flex flex-col gap-1">
+              {unit.ignoreFields && unit.ignoreFields.length > 0 && (
+                <span>
+                  This app doesn&apos;t manage: {unit.ignoreFields.join(", ")} —
+                  Status may reflect a difference there that the image
+                  comparison below can&apos;t show.
+                </span>
+              )}
+              {unit.ignorePreconditions && unit.ignorePreconditions.length > 0 && (
+                <span>
+                  This app skips these preconditions:{" "}
+                  {unit.ignorePreconditions.join(", ")}
+                </span>
+              )}
+            </div>
+          </div>
+        )}
 
         <dl className="grid grid-cols-[auto_1fr] items-center gap-x-4 gap-y-3 text-sm">
           <dt className="text-muted-foreground">Desired image</dt>

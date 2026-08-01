@@ -23,7 +23,7 @@ describe("DiffView", () => {
     };
     render(<DiffView unit={unit} />);
     expect(screen.getAllByText("sha256:aaaa").length).toBeGreaterThan(0);
-    expect(screen.getByText(/image digests match/i)).toBeInTheDocument();
+    expect(screen.getByText(/image digest matches/i)).toBeInTheDocument();
   });
 
   it("shows a transition from live to desired when out of sync", () => {
@@ -38,7 +38,7 @@ describe("DiffView", () => {
     // once in the transition row — assert presence, not uniqueness.
     expect(screen.getAllByText("sha256:old").length).toBeGreaterThan(0);
     expect(screen.getAllByText("sha256:new").length).toBeGreaterThan(0);
-    expect(screen.queryByText(/image digests match/i)).not.toBeInTheDocument();
+    expect(screen.queryByText(/image digest matches/i)).not.toBeInTheDocument();
   });
 
   it("renders 'not yet observed' for a unit that's never been reconciled", () => {
@@ -50,5 +50,38 @@ describe("DiffView", () => {
   it("renders 'never' for a unit with no lastReconciledAt", () => {
     render(<DiffView unit={baseUnit} />);
     expect(screen.getByText("never")).toBeInTheDocument();
+  });
+
+  // Regression test: an app that excludes traffic from management can be
+  // OutOfSync purely from a traffic mismatch while its image digests still
+  // match — without this note, the "image digest matches" caption right
+  // under a red OutOfSync badge would look contradictory.
+  it("explains an excluded field when the unit has ignoreFields set", () => {
+    const unit: Unit = {
+      ...baseUnit,
+      status: "OutOfSync",
+      desiredImage: "sha256:aaaa",
+      liveImage: "sha256:aaaa",
+      ignoreFields: ["traffic"],
+    };
+    render(<DiffView unit={unit} />);
+    expect(screen.getByText(/doesn't manage: traffic/i)).toBeInTheDocument();
+  });
+
+  it("explains an excluded precondition when the unit has ignorePreconditions set", () => {
+    const unit: Unit = {
+      ...baseUnit,
+      ignorePreconditions: ["pubsubTopic:orders-events"],
+    };
+    render(<DiffView unit={unit} />);
+    expect(
+      screen.getByText(/skips these preconditions.*pubsubTopic:orders-events/i),
+    ).toBeInTheDocument();
+  });
+
+  it("shows no exclusions note for a unit with none configured", () => {
+    render(<DiffView unit={baseUnit} />);
+    expect(screen.queryByText(/doesn't manage/i)).not.toBeInTheDocument();
+    expect(screen.queryByText(/skips these preconditions/i)).not.toBeInTheDocument();
   });
 });

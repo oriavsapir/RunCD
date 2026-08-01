@@ -650,6 +650,41 @@ func TestHandleUnitDetail_UnknownUnitRejected(t *testing.T) {
 	}
 }
 
+// TestHandleUnitDetail_SurfacesResourceExclusions guards the review
+// finding: a unit's ignoreFields/ignorePreconditions must reach the
+// dashboard's JSON contract, not just drive the diff/precondition-check
+// logic server-side — otherwise the frontend has no way to explain why a
+// unit's Status disagrees with what it can directly compare (desiredImage
+// vs liveImage).
+func TestHandleUnitDetail_SurfacesResourceExclusions(t *testing.T) {
+	h, _ := newTestHandler(t)
+	h.Units = StaticUnits{"widget-api/example-prod-eu": expander.SyncUnit{
+		App:                 "widget-api",
+		Project:             "example-prod-eu",
+		Env:                 "prd",
+		IgnoreFields:        []string{"traffic"},
+		IgnorePreconditions: []string{"pubsubTopic:orders-events"},
+	}}
+	srv := httptest.NewServer(NewMux(h))
+	defer srv.Close()
+
+	resp := getWithBearer(t, srv.URL+"/api/units/example-prod-eu/widget-api", "admin-token")
+	defer func() { _ = resp.Body.Close() }()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("expected 200, got %d", resp.StatusCode)
+	}
+	var v unitView
+	if err := json.NewDecoder(resp.Body).Decode(&v); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if len(v.IgnoreFields) != 1 || v.IgnoreFields[0] != "traffic" {
+		t.Fatalf("expected ignoreFields in the response, got %+v", v.IgnoreFields)
+	}
+	if len(v.IgnorePreconditions) != 1 || v.IgnorePreconditions[0] != "pubsubTopic:orders-events" {
+		t.Fatalf("expected ignorePreconditions in the response, got %+v", v.IgnorePreconditions)
+	}
+}
+
 // TestHandleOrphans_FlagsLiveServiceAbsentFromConfig checks the endpoint
 // end-to-end: a live Cloud Run service the fixture's config never declared
 // shows up as an orphan, and the one it does declare doesn't.

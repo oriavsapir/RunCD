@@ -36,6 +36,14 @@ type unitView struct {
 	// so it needs this to decide whether the Sync button is enabled for
 	// *this* unit, not just whether the unit exists.
 	CanSync bool `json:"canSync"`
+	// IgnoreFields/IgnorePreconditions surface this app's resource
+	// exclusions (config.App) — without these, a unit whose Status
+	// reflects a diff on an excluded field (e.g. OutOfSync from a traffic
+	// mismatch when ignoreFields: [traffic]) has no way to explain that to
+	// the dashboard, which otherwise only ever compares desiredImage vs
+	// liveImage and would render something contradicting the badge above it.
+	IgnoreFields        []string `json:"ignoreFields,omitempty"`
+	IgnorePreconditions []string `json:"ignorePreconditions,omitempty"`
 }
 
 // pendingStatus/pendingHealth mark a unit that's in the current config but
@@ -49,14 +57,16 @@ const (
 
 func unitViewFrom(u expander.SyncUnit, rbacCfg *rbac.Config, folderMembership map[string][]string, email string) unitView {
 	return unitView{
-		App:     u.App,
-		Project: u.Project,
-		Env:     u.Env,
-		Region:  u.Region,
-		Auto:    u.Sync.Auto != nil && *u.Sync.Auto,
-		Status:  pendingStatus,
-		Health:  pendingHealth,
-		CanSync: rbac.CanSyncFolders(rbacCfg, folderMembership, email, u),
+		App:                 u.App,
+		Project:             u.Project,
+		Env:                 u.Env,
+		Region:              u.Region,
+		Auto:                u.Sync.Auto != nil && *u.Sync.Auto,
+		Status:              pendingStatus,
+		Health:              pendingHealth,
+		CanSync:             rbac.CanSyncFolders(rbacCfg, folderMembership, email, u),
+		IgnoreFields:        u.IgnoreFields,
+		IgnorePreconditions: u.IgnorePreconditions,
 	}
 }
 
