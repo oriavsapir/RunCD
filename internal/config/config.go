@@ -221,12 +221,31 @@ func Parse(data []byte) (*Root, error) {
 			return nil, fmt.Errorf("app %q references unknown environment %q", app.Name, app.Env)
 		}
 	}
-	seenApps := make(map[string]bool, len(root.Apps))
+	// Sync units key on (app, project), not app alone (every Postgres table,
+	// API route, and lookup map downstream already reflects that) — so the
+	// only real collision to reject is two apps landing on the same
+	// (app, project) pair after expansion, not merely sharing a name across
+	// unrelated projects/environments. This only checks each environment's
+	// explicitly-declared Projects — a folder-resolved addition (via
+	// environments[env].folders, resolved later by folders.ResolveConfig,
+	// not here) could in principle still introduce a collision Parse can't
+	// see, since Parse does no I/O.
+	seenAppProject := make(map[string]bool)
 	for _, app := range root.Apps {
-		if seenApps[app.Name] {
-			return nil, fmt.Errorf("app %q is listed more than once — sync units key on (app, project), so two apps sharing a name can clobber each other's applications row", app.Name)
+		excluded := make(map[string]bool, len(app.Exclude))
+		for _, p := range app.Exclude {
+			excluded[p] = true
 		}
-		seenApps[app.Name] = true
+		for _, p := range root.Environments[app.Env].Projects {
+			if excluded[p] {
+				continue
+			}
+			key := app.Name + "/" + p
+			if seenAppProject[key] {
+				return nil, fmt.Errorf("app %q is declared more than once for project %q — sync units key on (app, project), so this would clobber one applications row", app.Name, p)
+			}
+			seenAppProject[key] = true
+		}
 	}
 	for envName, env := range root.Environments {
 		seen := make(map[string]bool, len(env.Projects))

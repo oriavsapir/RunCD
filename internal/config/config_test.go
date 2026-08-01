@@ -216,6 +216,61 @@ apps:
 	}
 }
 
+// TestParse_SameAppNameAcrossDifferentProjectsAllowed is the fix for an
+// overly strict check: sync units key on (app, project) everywhere
+// downstream (Postgres primary keys, API routes, lookup maps), never app
+// alone, so reusing an app name across unrelated environments/projects is
+// legitimate and shouldn't be rejected.
+func TestParse_SameAppNameAcrossDifferentProjectsAllowed(t *testing.T) {
+	yaml := []byte(`
+environments:
+  sandbox:
+    projects: [proj-a]
+  the-heavier-environment:
+    projects: [proj-b]
+    sync:
+      observe: true
+defaults:
+  region: us-central1
+apps:
+  - name: widget-api
+    env: sandbox
+    source: { repo: git@github.com:org/deployment.git, path: services/widget-api/ }
+  - name: widget-api
+    env: the-heavier-environment
+    source: { repo: git@github.com:org/deployment.git, path: services/widget-api/ }
+`)
+	if _, err := Parse(yaml); err != nil {
+		t.Fatalf("expected the same app name reused across different projects to be allowed, got: %v", err)
+	}
+}
+
+// TestParse_SameAppSameProjectViaDifferentEnvironmentsRejected proves the
+// fix is correctly scoped to the real (app, project) collision, not just
+// "same environment" — two environments that happen to share a project
+// must still catch a real clobber.
+func TestParse_SameAppSameProjectViaDifferentEnvironmentsRejected(t *testing.T) {
+	yaml := []byte(`
+environments:
+  a:
+    projects: [shared-project]
+  b:
+    projects: [shared-project]
+defaults:
+  region: us-central1
+apps:
+  - name: widget-api
+    env: a
+    source: { repo: git@github.com:org/deployment.git, path: services/widget-api/ }
+  - name: widget-api
+    env: b
+    source: { repo: git@github.com:org/deployment.git, path: services/widget-api-v2/ }
+`)
+	if _, err := Parse(yaml); err == nil {
+		t.Fatal("expected error: same app name landing on the same project via two different environments")
+	}
+}
+
 func TestParse_NotifyRulesRequireWebhookURL(t *testing.T) {
 	yaml := []byte(`
 environments:
