@@ -122,10 +122,18 @@ export function SyncButton({
                 there&apos;s no separate rollback here.
               </AlertDialogDescription>
             </AlertDialogHeader>
-            {error && <p className="text-destructive text-sm">{error}</p>}
+            {error && (
+              <p role="alert" className="text-destructive text-sm">
+                {error}
+              </p>
+            )}
             <AlertDialogFooter>
               <AlertDialogCancel disabled={pending}>Cancel</AlertDialogCancel>
-              <Button onClick={handleConfirm} disabled={pending}>
+              <Button
+                variant="destructive"
+                onClick={handleConfirm}
+                disabled={pending}
+              >
                 {pending && <RefreshCw className="animate-spin" />}
                 {error ? "Retry" : "Sync now"}
               </Button>
@@ -145,7 +153,11 @@ export function SyncButton({
         </Tooltip>
       )}
       {justSynced && (
-        <p className="flex items-center gap-1 text-xs text-emerald-600 dark:text-emerald-400">
+        <p
+          role="status"
+          aria-live="polite"
+          className="flex items-center gap-1 text-xs text-emerald-600 dark:text-emerald-400"
+        >
           <Check className="size-3.5" />
           Synced
         </p>

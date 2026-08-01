@@ -21,9 +21,6 @@ environments:
 defaults:
   region: us-central1
   managedFields: [image]
-  sync:
-    retry: { limit: 5, backoffSeconds: 5 }
-    selfHeal: true
 
 apps:
   - name: widget-api
@@ -70,9 +67,6 @@ func TestExpand_FanOutWithOverridesAndExclude(t *testing.T) {
 	}
 	if us.Sync.Auto == nil || *us.Sync.Auto != false {
 		t.Fatalf("expected prd auto=false, got %+v", us.Sync)
-	}
-	if us.Sync.SelfHeal == nil || *us.Sync.SelfHeal != true {
-		t.Fatalf("expected selfHeal inherited from defaults, got %+v", us.Sync)
 	}
 
 	eu := byProject["widget-api@example-prod-eu"]

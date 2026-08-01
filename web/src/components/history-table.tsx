@@ -36,7 +36,10 @@ function ResultBadge({ result }: { result: SyncResult }) {
   const config = RESULT_CONFIG[result];
   const Icon = config.icon;
   return (
-    <Badge variant="outline" className={`gap-1 font-medium ${config.className}`}>
+    <Badge
+      variant="outline"
+      className={`gap-1 font-medium ${config.className}`}
+    >
       <Icon className={`size-3 ${config.spin ? "animate-spin" : ""}`} />
       {result}
     </Badge>
@@ -47,6 +50,22 @@ function shortDigest(digest?: string): string {
   if (!digest) return "—";
   const i = digest.indexOf(":");
   return i === -1 ? digest.slice(0, 12) : digest.slice(0, i + 9);
+}
+
+// For a finished row this is the real deploy duration; for an in_progress
+// row it's how long it's been running so far — without this, a row stuck
+// in_progress (e.g. the controller crashed mid-deploy before it could
+// update sync_events) looks identical to one that started a second ago,
+// with nothing hinting that it might need attention.
+function formatElapsed(startedAt: string, finishedAt?: string): string {
+  const ms =
+    (finishedAt ? new Date(finishedAt) : new Date()).getTime() -
+    new Date(startedAt).getTime();
+  const seconds = Math.max(0, Math.round(ms / 1000));
+  if (seconds < 60) return `${seconds}s`;
+  const minutes = Math.round(seconds / 60);
+  if (minutes < 60) return `${minutes}m`;
+  return `${Math.round(minutes / 60)}h`;
 }
 
 // Sync-history view backed by sync_events, per §5.11.
@@ -67,6 +86,7 @@ export function HistoryTable({ events }: { events: SyncEvent[] }) {
           <TableHead>Trigger</TableHead>
           <TableHead>Actor</TableHead>
           <TableHead>Image</TableHead>
+          <TableHead>Duration</TableHead>
           <TableHead>Result</TableHead>
         </TableRow>
       </TableHeader>
@@ -80,6 +100,10 @@ export function HistoryTable({ events }: { events: SyncEvent[] }) {
             <TableCell>{e.actor || "—"}</TableCell>
             <TableCell className="font-mono text-xs">
               {shortDigest(e.fromImage)} → {shortDigest(e.toImage)}
+            </TableCell>
+            <TableCell className="text-muted-foreground whitespace-nowrap">
+              {formatElapsed(e.startedAt, e.finishedAt)}
+              {e.result === "in_progress" && " so far"}
             </TableCell>
             <TableCell>
               <ResultBadge result={e.result} />

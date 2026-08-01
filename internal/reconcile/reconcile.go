@@ -339,7 +339,12 @@ func (r *Reconciler) reconcile(ctx context.Context, unit expander.SyncUnit, opts
 	// loudly here instead, the same "surface it at config/manifest time,
 	// not as silent inertness forever" call this repo already made for the
 	// traffic-percent validation.
-	if sd.ResourceType == manifest.ResourceJob && fieldManaged(managedFields, "env") {
+	if sd.ResourceType == manifest.ResourceJob && fieldManaged(managedFields, "env") && res.Err == nil {
+		// Guarded on res.Err == nil: a precondition failure just above is a
+		// real, specific reason this unit can't sync — overwriting it here
+		// would silently discard that in favor of a generic, less useful
+		// message about a config combination that isn't even necessarily
+		// what's blocking the unit right now.
 		res.Status, res.Health, res.Err = StatusInvalid, StatusInvalid, fmt.Errorf("managed field %q is not supported for resourceType %q", "env", sd.ResourceType)
 		return res
 	}

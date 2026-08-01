@@ -1656,6 +1656,180 @@ growing the exclude list — a two-line guard costs less than losing nilaway
 coverage over the rest of those two files. Confirmed clean by running CI's
 exact command locally afterward.
 
+## A real production incident, onboarding a-heavier-project
+
+Onboarding a real, heavier project (26 workloads across 7 services/11
+jobs/8 worker pools, in observe mode) surfaced several real bugs that a
+lighter 8-app sandbox environment never exercised:
+
+- [x] **`config.Parse`'s app-name uniqueness check was global, not scoped
+  to (app, project)** — every table/route/lookup map downstream already
+  keys on `(app, project)`, never `app` alone, so rejecting two apps
+  sharing a name across unrelated projects was stricter than necessary and
+  blocked a normal "same app name, different environment" pattern.
+  Narrowed to a real `(app, project)` collision check.
+- [x] **`expander.Expand` had no equivalent check of its own** — `Parse`'s
+  fix only sees each environment's explicitly-declared `Projects` (it does
+  no I/O); a folder-resolved project addition (via
+  `environments[env].folders`, resolved after `Parse`) landing on the same
+  `(app, project)` as a different environment's entry could still slip
+  through silently. `Expand` now rejects this itself, since it's the one
+  that runs after folder resolution and sees the real, final project
+  lists.
+- [x] **`getExecution` (job execution lookup) passed the wrong resource
+  name** — `ExecutionReference.Name`, confirmed against a live job with a
+  real completed execution, is only the short execution ID
+  ("my-job-abcde"), not a fully-qualified resource path. Passing it
+  straight through as `GetExecutionRequest.Name` made the real Cloud Run
+  API misparse the short ID as a resource path segment, producing a
+  confusing "Permission denied on resource project <execution-id>" error
+  instead of a clean result. Never caught before because it needs a job
+  with a real completed execution against the live API — no existing test
+  exercised this against a fake client. Fixed by reconstructing the full
+  resource name from `project`/`region`/`job`, all already known to both
+  callers.
+- [x] **Leader election flapped every few seconds under the new, heavier
+  reconcile load** — `os.Getenv("HOSTNAME")`/`os.Hostname()` both resolved
+  to the literal string `"localhost"` on this Cloud Run environment for
+  every concurrently-running instance (unlike Kubernetes, where `HOSTNAME`
+  is the pod name) — latent and harmless with a single instance, but once
+  autoscaling started a second one, both computed the identical
+  `holderID`, making them indistinguishable to `leader_lease`'s claim
+  logic: each kept "stealing" the lease from what looked like itself,
+  cancelling every in-flight reconcile pass mid-tick via
+  `leadershipContext`. Fixed with a random ID generated once at process
+  startup (prefixed with `K_REVISION` purely for log/DB readability).
+- [x] **`internal/leader`'s `Claim()` shared a connection pool with
+  reconcile/API traffic** — even after the `holderID` fix, leader election
+  kept flapping: `Claim()`'s 5s query timeout was being exceeded by real
+  connection-pool contention from the heavier 34-unit reconcile load (up
+  from 8), confirmed via `"dial error: ... context deadline exceeded"` in
+  the logs. Fixed by giving `leader.Lease` its own small, dedicated
+  `*sql.DB` (2 connections) — structurally immune to reconcile/API load,
+  no matter how busy those get, rather than tuning `DB_MAX_OPEN_CONNS`
+  blindly against an unknown real Postgres `max_connections` ceiling
+  (`db-g1-small`, likely itself fairly low).
+- Granted `runcd-controller@...`'s service account org-wide `roles/run.admin`
+  (confirmed explicitly with the user given the blast radius) so it could
+  reach the new project at all — the org had never granted it anything
+  outside `the-sandbox-project` before.
+
+## Ninth-ish review pass — precondition overwrite, notify's connection hold, config drift, and more
+
+- [x] **A precondition failure's error could be silently overwritten** —
+  `internal/reconcile/reconcile.go`'s job+managed-env rejection ran
+  unconditionally after the precondition check, discarding a real,
+  specific reason ("precondition pubsubTopic:X not found") in favor of a
+  generic "env not supported for job" message whenever both applied to the
+  same unit. Now guarded on `res.Err == nil`.
+- [x] **`notify.go` held a DB transaction open across the actual Slack
+  HTTP call** — up to `Sink.Send`'s own 10s timeout, per notification,
+  starving every other consumer of the same connection pool (including
+  `internal/leader`'s own `Claim()`) under load — exactly the scenario that
+  just caused a real incident above. Rewritten to claim/send/confirm as
+  three separate statements rather than one held-open transaction. This
+  first pass (commit-the-claim-then-revert-on-failure) still had a real
+  gap — see the next entry.
+- [x] **A crash between the debounce claim committing and `Send`
+  returning could silently drop a real notification for the full debounce
+  window** — found and fixed in review after the fix above: committing
+  the claim immediately (removing the transaction) meant a process crash,
+  lost connection, or a failed best-effort revert all left the claim stuck
+  with no automatic rollback, unlike the original transaction-based
+  design. Fixed by splitting the claim's own short TTL
+  (`claim_expires_at`, same idea as `sync_locks`) from the debounce marker
+  itself (`last_notified_at`, only ever set after `Send` actually
+  succeeds) — any interruption now self-heals within `claimTTL` (30s)
+  instead of depending on any single follow-up write succeeding. New
+  migration `00005_notification_claim.sql`. Tests:
+  `TestEvaluate_StuckClaimSelfHealsAfterTTL`,
+  `TestEvaluate_LiveClaimBlocksConcurrentAttempt`.
+- [x] **`folders.go`'s stale-cache fallback swallowed its error with zero
+  logging** — correct fallback behavior (serve stale membership rather
+  than propagate a transient failure as "zero projects"), but a sustained
+  Resource Manager outage would leave no trace anywhere that folder
+  membership had gone stale. Now logs a warning with the cache age.
+- [x] **`gitsource`'s cache/singleflight key was an ambiguous
+  concatenation** — `repo+"@"+path`, but repo values are SSH URLs that
+  already contain `@` (`git@github.com:org/repo.git`), so two different
+  `(repo, path)` pairs could in principle concatenate to the same string
+  and serve one app's manifest to another. Switched the cache map to a
+  struct key; the singleflight string key now joins with `"\x00"` (not a
+  valid byte in either a repo URL or a file path).
+- [x] **`sync.retry`/`sync.selfHeal` were parsed and validated but never
+  consumed anywhere in `internal/reconcile`** (confirmed via grep — zero
+  references) — silent no-ops that looked load-bearing (documented as if
+  they worked). `config.Parse` now rejects either being set, matching this
+  repo's established "fail loudly, not silently forever" pattern for
+  exactly this class of gap. `sync.interval` was already disclosed as
+  informational-only, left as-is.
+- [x] **`folders/resolve.go`'s `ResolveConfig`/`ResolveMembership` resolved
+  folders one at a time** — unlike `RunOnce`/`DetectOrphans` elsewhere in
+  this codebase, which already fan out with bounded concurrency. A
+  cold-start/cache-miss tick's folder resolution scaled linearly with
+  folder count. Now uses a shared `resolveAll` helper with a bounded
+  `errgroup` (`resolveConcurrency = 8`).
+
+Dashboard, same pass:
+
+- [x] **Settings page's error state never cleared on a successful
+  retry** — none of the three `fulfilled` branches reset their
+  corresponding error state, so a transient failure (now with a Retry
+  button, from an earlier pass) could succeed on retry and still show a
+  permanent stale error card forever. Fixed; Settings also gained a
+  general-purpose Refresh button (previously only had retry-on-error).
+- [x] **Clicking a `ProjectGrid` card leaked unrelated projects** — the
+  drill-down reused the free-text search's substring match
+  (`setQuery(project)`), so clicking "acme" also showed every
+  "acme-staging" unit with no indication why. Fixed with a separate exact-match
+  `selectedProject` state, a visible "Project: X ×" chip, and cleared
+  automatically when the user types in the search box or switches back to
+  the projects view. Test: `page.test.tsx`'s
+  "clicking a project card shows only that exact project."
+- [x] **Degraded-reason banner could show a stale, resolved error** on
+  the unit-detail page — `events?.find` picked the most recent *failed*
+  event regardless of age, which could show a weeks-old deploy error as
+  "the reason" for an unrelated live issue. First fix used a wall-clock
+  recency window; caught in review that this gets it backwards (hides a
+  real, still-unresolved error once it's been failing longest). Replaced
+  with "is the most recent sync attempt itself a failure" — no arbitrary
+  cutoff, always correct regardless of age.
+- [x] **No polling on the units list or unit-detail pages** — both only
+  ever refreshed on mount or a manual click, so a live rollout looked
+  frozen. Added a shared `usePolling` hook (15s) that also pauses while
+  the tab is hidden (wasted background traffic otherwise) and catches up
+  immediately via `visibilitychange` when the tab becomes visible again.
+- [x] **No "last updated" signal near the new silent polling** — during an
+  incident there was no way to tell if what's on screen is stale without a
+  manual refresh. Both pages now show an absolute "Updated HH:MM:SS"
+  timestamp, updated only on a successful fetch.
+- [x] **`sync-button.tsx`'s success/error messages had no `aria-live`** —
+  a screen reader user got no notification when a sync completed or
+  failed unless they happened to navigate to that part of the DOM. Added
+  `role="status"`/`aria-live="polite"` and `role="alert"` respectively.
+- [x] **`HistoryTable` never rendered `finishedAt`** — a stuck
+  `in_progress` row (e.g. the controller crashed mid-deploy before
+  updating `sync_events`) was indistinguishable from one that started a
+  second ago. Added a Duration column showing real deploy time for
+  finished rows, elapsed time "so far" for `in_progress` ones.
+- [x] **The confirm-sync dialog's button didn't match its own stated
+  risk** — copy warns "no rollback," but the button used the default/
+  primary style. Switched to the `destructive` variant.
+- [x] **Stat tiles could silently undercount `Total`** — the four tiles
+  (Synced/OutOfSync/Progressing/Degraded) aren't a partition (a unit with
+  `status=Invalid, health=Invalid` matches none of them), so `Total` could
+  exceed their visible sum with no explanation. Added a 5th "Other
+  (pending/missing/invalid)" tile, shown only when non-zero.
+- **Checked, confirmed fine as-is**: `folders.DefaultCacheTTL` (60s)
+  comfortably exceeds the default `RECONCILE_INTERVAL` (30s), and
+  `ResolveConfig`/`ResolveMembership` run within the same tick milliseconds
+  apart — the second call already hits cache, no double live Resource
+  Manager call per tick despite the two independent call sites.
+- **Flagged, not fixed (explicitly deferred, low urgency)**: `ListApplications`
+  has no `LIMIT`/pagination (fine at current scale, will matter as
+  project/unit count grows); the unit-detail failure alert doesn't
+  link/scroll to its matching sync-history row below.
+
 ## Infra / delivery
 
 - [x] **Dockerfile** — multi-stage (`golang:1.26-alpine` build →

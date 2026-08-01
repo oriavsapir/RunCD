@@ -313,3 +313,74 @@ func TestEvaluate_FailedSendDoesNotConsumeDebounceWindow(t *testing.T) {
 		t.Fatalf("expected exactly 1 message after the retry succeeded, got %d: %v", len(sink.messages), sink.messages)
 	}
 }
+
+// TestEvaluate_StuckClaimSelfHealsAfterTTL simulates a crash between the
+// claim committing and Send even starting — a stuck claim_expires_at with
+// no corresponding process still running. A later attempt must not wait
+// out the full DebounceInterval for this; only claimTTL.
+func TestEvaluate_StuckClaimSelfHealsAfterTTL(t *testing.T) {
+	db := testutil.NewPostgres(t)
+	sink := &fakeSink{}
+	e := &Evaluator{
+		DB:               db,
+		Sink:             sink,
+		Rules:            []config.NotifyRule{{On: "syncFailed"}},
+		DebounceInterval: time.Hour, // must not be what unblocks the retry
+		ClaimTTL:         50 * time.Millisecond,
+	}
+	res := reconcile.Result{
+		Unit:           expander.SyncUnit{App: "widget-api", Project: "example-prod-us"},
+		DeployFailed:   true,
+		FailureMessage: "boom",
+	}
+
+	// Simulate a crashed prior attempt: claimed, never confirmed sent.
+	if _, err := db.ExecContext(context.Background(), `
+		INSERT INTO notification_debounce (application, target_gcp_project, rule, last_notified_at, claim_expires_at)
+		VALUES ('widget-api', 'example-prod-us', 'syncFailed', 'epoch', now() + interval '50 milliseconds')`,
+	); err != nil {
+		t.Fatalf("seed stuck claim: %v", err)
+	}
+
+	time.Sleep(100 * time.Millisecond) // let the stuck claim's TTL pass
+
+	if err := e.Evaluate(context.Background(), res); err != nil {
+		t.Fatalf("Evaluate after stuck claim expired: %v", err)
+	}
+	if len(sink.messages) != 1 {
+		t.Fatalf("expected the notification to actually send once the stuck claim expired, got %d: %v", len(sink.messages), sink.messages)
+	}
+}
+
+// TestEvaluate_LiveClaimBlocksConcurrentAttempt is the flip side: a claim
+// that's genuinely still within its TTL (a real attempt actually in
+// flight, not a crash) must block a concurrent attempt from also sending.
+func TestEvaluate_LiveClaimBlocksConcurrentAttempt(t *testing.T) {
+	db := testutil.NewPostgres(t)
+	sink := &fakeSink{}
+	e := &Evaluator{
+		DB:       db,
+		Sink:     sink,
+		Rules:    []config.NotifyRule{{On: "syncFailed"}},
+		ClaimTTL: time.Minute,
+	}
+	res := reconcile.Result{
+		Unit:           expander.SyncUnit{App: "widget-api", Project: "example-prod-us"},
+		DeployFailed:   true,
+		FailureMessage: "boom",
+	}
+
+	if _, err := db.ExecContext(context.Background(), `
+		INSERT INTO notification_debounce (application, target_gcp_project, rule, last_notified_at, claim_expires_at)
+		VALUES ('widget-api', 'example-prod-us', 'syncFailed', 'epoch', now() + interval '1 minute')`,
+	); err != nil {
+		t.Fatalf("seed live claim: %v", err)
+	}
+
+	if err := e.Evaluate(context.Background(), res); err != nil {
+		t.Fatalf("Evaluate: %v", err)
+	}
+	if len(sink.messages) != 0 {
+		t.Fatalf("expected no send while another attempt's claim is still live, got %v", sink.messages)
+	}
+}

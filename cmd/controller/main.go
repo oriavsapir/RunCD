@@ -318,8 +318,29 @@ func run() error {
 	}
 	srv := &http.Server{Addr: httpAddr, Handler: api.NewMux(handler), ReadHeaderTimeout: 10 * time.Second}
 
+	// A separate, dedicated *sql.DB (own tiny pool) — not db, the pool
+	// shared by reconcile workers, dashboard-read API requests, and
+	// notify's debounce transaction. Leader election is small and
+	// latency-sensitive (one UPDATE, must complete every RenewInterval);
+	// sharing a pool with much heavier application traffic means a busy
+	// tick (more units, a slow notify send, ...) can starve Claim() of a
+	// connection until it times out — observed in practice as a real
+	// production incident: leadership flapped every few seconds under
+	// load, each flap cancelling every in-flight reconcile pass for every
+	// unit via leadershipContext, which only made the load (and thus the
+	// contention) worse. A structurally separate pool means reconcile load
+	// can never starve leader election, no matter how busy it gets.
+	leaderDB, closeLeaderDB, err := openDB(ctx)
+	if err != nil {
+		return fmt.Errorf("open leader-election database connection: %w", err)
+	}
+	defer func() { _ = closeLeaderDB() }()
+	leaderDB.SetMaxOpenConns(2)
+	leaderDB.SetMaxIdleConns(2)
+	leaderDB.SetConnMaxLifetime(30 * time.Minute)
+
 	lc := newLeadershipContext(ctx)
-	lease := leader.New(db, holderID)
+	lease := leader.New(leaderDB, holderID)
 
 	var wg sync.WaitGroup
 	wg.Add(3)

@@ -5,25 +5,31 @@ import {
   AlertCircle,
   AlertTriangle,
   CheckCircle2,
+  FolderGit2,
+  HelpCircle,
   Layers,
   ListTree,
   Loader2,
   RefreshCw,
   Search,
   Table2,
+  X,
   XCircle,
 } from "lucide-react";
 import Link from "next/link";
+import { ProjectGrid } from "@/components/project-grid";
 import { UnitTable, UnitTree } from "@/components/unit-table";
 import { Skeleton } from "@/components/ui/skeleton";
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
+import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { ToggleGroup, ToggleGroupItem } from "@/components/ui/toggle-group";
 import { listUnits } from "@/lib/api";
 import type { Unit } from "@/lib/types";
+import { usePolling } from "@/lib/use-polling";
 
-type ViewMode = "table" | "tree";
+type ViewMode = "projects" | "table" | "tree";
 
 // Without this, a live rollout (or another operator's sync) looks frozen
 // until someone happens to click Refresh — this is a silent background
@@ -73,8 +79,21 @@ export default function Home() {
   const [error, setError] = useState<string | null>(null);
   const [refreshKey, setRefreshKey] = useState(0);
   const [refreshing, setRefreshing] = useState(false);
+  // Absolute, not "Xs ago" — a relative time would need its own ticking
+  // timer to stay accurate; an absolute timestamp is trivially always
+  // correct and just as useful for "is this stale" during an incident.
+  const [lastUpdatedAt, setLastUpdatedAt] = useState<Date | null>(null);
   const [query, setQuery] = useState("");
-  const [view, setView] = useState<ViewMode>("table");
+  // Separate from query (free-text substring search): a project card click
+  // means "only this exact project," not "anything containing this
+  // string" — reusing query's substring match would also show, say,
+  // "acme-staging" when the user clicked "acme".
+  const [selectedProject, setSelectedProject] = useState<string | null>(null);
+  // Projects first: at real scale (many projects, each with a handful of
+  // apps) a flat table/tree of every sync unit stops being scannable —
+  // this is "which project needs my attention," with table/tree reachable
+  // by drilling into one project or switching manually.
+  const [view, setView] = useState<ViewMode>("projects");
 
   useEffect(() => {
     let cancelled = false;
@@ -83,6 +102,7 @@ export default function Home() {
         if (!cancelled) {
           setUnits(data);
           setError(null);
+          setLastUpdatedAt(new Date());
         }
       })
       .catch((err: unknown) => {
@@ -100,10 +120,7 @@ export default function Home() {
     };
   }, [refreshKey]);
 
-  useEffect(() => {
-    const id = setInterval(() => setRefreshKey((k) => k + 1), POLL_INTERVAL_MS);
-    return () => clearInterval(id);
-  }, []);
+  usePolling(POLL_INTERVAL_MS, () => setRefreshKey((k) => k + 1));
 
   const attention = useMemo(
     () =>
@@ -119,6 +136,9 @@ export default function Home() {
 
   const filtered = useMemo(() => {
     if (!units) return units;
+    if (selectedProject) {
+      return units.filter((u) => u.project === selectedProject);
+    }
     const q = query.trim().toLowerCase();
     if (!q) return units;
     return units.filter(
@@ -127,7 +147,7 @@ export default function Home() {
         u.project.toLowerCase().includes(q) ||
         u.env.toLowerCase().includes(q),
     );
-  }, [units, query]);
+  }, [units, query, selectedProject]);
 
   return (
     <main className="mx-auto flex w-full max-w-5xl flex-1 flex-col gap-6 p-6">
@@ -138,20 +158,27 @@ export default function Home() {
             Every configured sync unit and its last-known status.
           </p>
         </div>
-        <Button
-          variant="outline"
-          size="sm"
-          disabled={refreshing}
-          onClick={() => {
-            setRefreshing(true);
-            setRefreshKey((k) => k + 1);
-          }}
-        >
-          <RefreshCw
-            className={refreshing ? "size-3.5 animate-spin" : "size-3.5"}
-          />
-          Refresh
-        </Button>
+        <div className="flex flex-col items-end gap-1">
+          <Button
+            variant="outline"
+            size="sm"
+            disabled={refreshing}
+            onClick={() => {
+              setRefreshing(true);
+              setRefreshKey((k) => k + 1);
+            }}
+          >
+            <RefreshCw
+              className={refreshing ? "size-3.5 animate-spin" : "size-3.5"}
+            />
+            Refresh
+          </Button>
+          {lastUpdatedAt && (
+            <p className="text-muted-foreground text-xs">
+              Updated {lastUpdatedAt.toLocaleTimeString()}
+            </p>
+          )}
+        </div>
       </div>
 
       {attention.length > 0 && (
@@ -215,6 +242,32 @@ export default function Home() {
               );
             },
           )}
+          {(() => {
+            // The tiles above aren't a mutually-exclusive partition (a unit
+            // can match none of them, e.g. status=Invalid/health=Invalid —
+            // that combination is never Synced/OutOfSync and isn't
+            // Progressing or Degraded either) — without this, Total could
+            // silently exceed the visible tiles' sum with no explanation.
+            const accounted = new Set(
+              STAT_TILES.flatMap((t) => units.filter(t.match)),
+            );
+            const other = units.length - accounted.size;
+            return (
+              other > 0 && (
+                <div className="bg-card flex items-center gap-3 rounded-lg border p-3">
+                  <HelpCircle className="text-muted-foreground size-5 shrink-0" />
+                  <div>
+                    <p className="text-lg leading-none font-semibold">
+                      {other}
+                    </p>
+                    <p className="text-muted-foreground text-xs">
+                      Other (pending/missing/invalid)
+                    </p>
+                  </div>
+                </div>
+              )
+            );
+          })()}
         </div>
       )}
 
@@ -235,12 +288,31 @@ export default function Home() {
       ) : (
         units && (
           <>
+            {selectedProject && (
+              <div className="flex items-center gap-2 text-sm">
+                <span className="text-muted-foreground">Project:</span>
+                <Badge variant="secondary" className="gap-1 font-normal">
+                  {selectedProject}
+                  <button
+                    type="button"
+                    onClick={() => setSelectedProject(null)}
+                    aria-label={`Clear project filter (${selectedProject})`}
+                    className="hover:text-foreground"
+                  >
+                    <X className="size-3" />
+                  </button>
+                </Badge>
+              </div>
+            )}
             <div className="flex items-center gap-2">
               <div className="relative flex-1">
                 <Search className="text-muted-foreground pointer-events-none absolute top-1/2 left-2.5 size-4 -translate-y-1/2" />
                 <Input
                   value={query}
-                  onChange={(e) => setQuery(e.target.value)}
+                  onChange={(e) => {
+                    setQuery(e.target.value);
+                    setSelectedProject(null);
+                  }}
                   placeholder="Filter by app, project, or environment…"
                   aria-label="Filter by app, project, or environment"
                   className="h-9 pl-8"
@@ -251,9 +323,13 @@ export default function Home() {
                 value={[view]}
                 onValueChange={(v) => {
                   const next = v.find((x) => x !== view) ?? v[0];
+                  if (next === "projects") setSelectedProject(null);
                   if (next) setView(next as ViewMode);
                 }}
               >
+                <ToggleGroupItem value="projects" aria-label="Project view">
+                  <FolderGit2 className="size-4" />
+                </ToggleGroupItem>
                 <ToggleGroupItem value="table" aria-label="Table view">
                   <Table2 className="size-4" />
                 </ToggleGroupItem>
@@ -262,7 +338,15 @@ export default function Home() {
                 </ToggleGroupItem>
               </ToggleGroup>
             </div>
-            {view === "table" ? (
+            {view === "projects" ? (
+              <ProjectGrid
+                units={filtered ?? []}
+                onSelectProject={(project) => {
+                  setSelectedProject(project);
+                  setView("table");
+                }}
+              />
+            ) : view === "table" ? (
               <UnitTable
                 units={filtered ?? []}
                 onSynced={() => setRefreshKey((k) => k + 1)}

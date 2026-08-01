@@ -15,9 +15,6 @@ environments:
 defaults:
   region: us-central1
   managedFields: [image]
-  sync:
-    retry: { limit: 5, backoffSeconds: 5 }
-    selfHeal: true
 
 apps:
   - name: widget-api
@@ -36,6 +33,38 @@ apps:
 	}
 	if root.Environments["prd"].Sync.Auto == nil || *root.Environments["prd"].Sync.Auto != false {
 		t.Fatalf("prd sync.auto not parsed correctly: %+v", root.Environments["prd"].Sync)
+	}
+}
+
+func TestParse_SyncRetryRejected(t *testing.T) {
+	yaml := []byte(`
+environments:
+  prd:
+    projects: [example-prod-us]
+defaults:
+  region: us-central1
+  managedFields: [image]
+  sync:
+    retry: { limit: 5, backoffSeconds: 5 }
+`)
+	if _, err := Parse(yaml); err == nil {
+		t.Fatal("expected error: sync.retry is not implemented")
+	}
+}
+
+func TestParse_SyncSelfHealRejected(t *testing.T) {
+	yaml := []byte(`
+environments:
+  prd:
+    projects: [example-prod-us]
+    sync:
+      selfHeal: true
+defaults:
+  region: us-central1
+  managedFields: [image]
+`)
+	if _, err := Parse(yaml); err == nil {
+		t.Fatal("expected error: sync.selfHeal is not implemented")
 	}
 }
 

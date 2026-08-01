@@ -8,6 +8,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log/slog"
 	"sync"
 	"time"
 
@@ -110,6 +111,12 @@ func (r *GCPResolver) ProjectsInFolder(ctx context.Context, folderID string) ([]
 			entry, ok := r.cache[folderID]
 			r.mu.Unlock()
 			if ok {
+				// Falling back silently would mean a sustained Resource
+				// Manager outage (hours, days) never leaves any trace that
+				// folder membership has gone stale — this is the only
+				// signal an operator gets that this folder's project list
+				// may no longer be current.
+				slog.Warn("resolve folder: serving stale cached membership after fetch error", "folder", folderID, "cacheAge", time.Since(entry.fetchedAt), "error", err)
 				return entry.projects, nil
 			}
 			return nil, err

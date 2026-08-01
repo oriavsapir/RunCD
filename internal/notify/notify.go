@@ -19,6 +19,13 @@ import (
 // (sync unit, rule).
 const DefaultDebounceInterval = time.Hour
 
+// claimTTL bounds how long an in-flight "claimed but not yet confirmed
+// sent" notification blocks a retry — generous relative to Sink.Send's own
+// timeout (10s for SlackSink), so a live attempt is never pre-empted, but
+// short enough that a crash or a lost connection mid-send only delays the
+// next real attempt by claimTTL, not the full DebounceInterval.
+const claimTTL = 30 * time.Second
+
 // Sink delivers a rendered notification message. v1 has one implementation
 // (SlackSink); additional sinks are additive, not a redesign (§5.8).
 type Sink interface {
@@ -26,12 +33,10 @@ type Sink interface {
 }
 
 // db is the subset of *sql.DB the evaluator needs — an interface so tests
-// can use a real Postgres without pulling in *sql.DB directly. BeginTx
-// lets maybeNotify hold the debounce row's claim open across the actual
-// Sink.Send call, committing the claim only on success.
+// can use a real Postgres without pulling in *sql.DB directly.
 type db interface {
 	QueryRowContext(ctx context.Context, query string, args ...any) *sql.Row
-	BeginTx(ctx context.Context, opts *sql.TxOptions) (*sql.Tx, error)
+	ExecContext(ctx context.Context, query string, args ...any) (sql.Result, error)
 }
 
 // Evaluator implements reconcile.Notifier: evaluated once per reconcile
@@ -41,6 +46,7 @@ type Evaluator struct {
 	Sink             Sink
 	Rules            []config.NotifyRule
 	DebounceInterval time.Duration // 0 means DefaultDebounceInterval
+	ClaimTTL         time.Duration // 0 means claimTTL
 }
 
 func (e *Evaluator) Evaluate(ctx context.Context, res reconcile.Result) error {
@@ -99,53 +105,81 @@ func autoSyncEnabled(sync config.SyncPolicy) bool {
 	return sync.Auto != nil && *sync.Auto
 }
 
-// maybeNotify atomically checks-and-claims the debounce row inside a
-// transaction: the conditional DO UPDATE only applies (and only then does
-// RETURNING produce a row) if the last notification for this (unit, rule)
-// was outside the debounce window, so concurrent callers can't double-send.
-// The claim is only committed after Sink.Send succeeds — a failed/hung
-// webhook rolls back, leaving last_notified_at untouched so the next poll
-// can retry, instead of silently burning the whole debounce window on a
-// notification nobody received.
+// maybeNotify claims, sends, then confirms — three separate statements, not
+// one transaction held open across Sink.Send. Holding a pooled Postgres
+// connection for however long a webhook call takes (up to Sink's own
+// timeout) starved every other consumer of that same pool under load,
+// including internal/leader's Claim(), in a real production incident.
+//
+// The claim (claim_expires_at, a short TTL, same idea as sync_locks) is
+// deliberately separate from the debounce marker itself (last_notified_at,
+// only ever set after Send actually succeeds): a single "hold the claim
+// open until Send returns, then commit-or-rollback" step would need a
+// transaction (the exact thing removed above), and a "commit the claim
+// first, revert on failure" design — this function's earlier version —
+// left a real gap: a crash (or a lost connection) between the claim
+// committing and either Send returning or the revert succeeding left the
+// claim stuck, silently dropping a real failure notification for up to the
+// full DebounceInterval with nothing to retry it. Splitting the claim's own
+// expiry from the debounce window means any interruption — a crash, a
+// failed revert, anything — self-heals within claimTTL instead of
+// depending on any single follow-up write succeeding.
 func (e *Evaluator) maybeNotify(ctx context.Context, res reconcile.Result, rule, message string) error {
 	interval := e.DebounceInterval
 	if interval <= 0 {
 		interval = DefaultDebounceInterval
 	}
-
-	tx, err := e.DB.BeginTx(ctx, nil)
-	if err != nil {
-		return fmt.Errorf("begin debounce claim for %s/%s/%s: %w", res.Unit.App, res.Unit.Project, rule, err)
+	ttl := e.ClaimTTL
+	if ttl <= 0 {
+		ttl = claimTTL
 	}
-	defer func() { _ = tx.Rollback() }() // no-op once committed
 
-	// $4 is a numeric second count multiplied by a literal 1-second
-	// interval, not interval.String() cast to ::interval — Go's
+	// $4/$5 are numeric second counts multiplied by a literal 1-second
+	// interval, not Duration.String() cast to ::interval — Go's
 	// time.Duration.String() only happens to produce Postgres-parseable
-	// text for whole-second/millisecond values; a sub-millisecond interval
+	// text for whole-second/millisecond values; a sub-millisecond duration
 	// would format with a unit ("µs", "ns") Postgres's interval parser
-	// rejects (same bug class as internal/leader/lease.go).
-	var fired bool
-	err = tx.QueryRowContext(ctx, `
-		INSERT INTO notification_debounce (application, target_gcp_project, rule, last_notified_at)
-		VALUES ($1, $2, $3, now())
-		ON CONFLICT (application, target_gcp_project, rule) DO UPDATE SET last_notified_at = now()
+	// rejects (same bug class as internal/leader/lease.go). 'epoch' as the
+	// initial last_notified_at on a brand-new row is always more than
+	// interval ago, so a never-notified (unit, rule) is immediately
+	// eligible, same as before.
+	var claimed bool
+	err := e.DB.QueryRowContext(ctx, `
+		INSERT INTO notification_debounce (application, target_gcp_project, rule, last_notified_at, claim_expires_at)
+		VALUES ($1, $2, $3, 'epoch', now() + ($5 * interval '1 second'))
+		ON CONFLICT (application, target_gcp_project, rule) DO UPDATE
+		  SET claim_expires_at = now() + ($5 * interval '1 second')
 		WHERE notification_debounce.last_notified_at < now() - ($4 * interval '1 second')
+		  AND (notification_debounce.claim_expires_at IS NULL OR notification_debounce.claim_expires_at < now())
 		RETURNING true`,
-		res.Unit.App, res.Unit.Project, rule, interval.Seconds(),
-	).Scan(&fired)
+		res.Unit.App, res.Unit.Project, rule, interval.Seconds(), ttl.Seconds(),
+	).Scan(&claimed)
 	if errors.Is(err, sql.ErrNoRows) {
-		return nil // debounced — not an error, just not time yet
+		return nil // debounced, or another attempt currently holds the claim
 	}
 	if err != nil {
-		return fmt.Errorf("debounce check for %s/%s/%s: %w", res.Unit.App, res.Unit.Project, rule, err)
+		return fmt.Errorf("debounce claim for %s/%s/%s: %w", res.Unit.App, res.Unit.Project, rule, err)
 	}
 
 	if err := e.Sink.Send(ctx, message); err != nil {
+		// Best-effort, immediate revert so a retry doesn't have to wait out
+		// claimTTL — but this is an optimization, not the safety net: even
+		// if this Exec itself fails, the claim expires on its own.
+		revertCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
+		defer cancel()
+		_, _ = e.DB.ExecContext(revertCtx, `
+			UPDATE notification_debounce SET claim_expires_at = NULL
+			WHERE application = $1 AND target_gcp_project = $2 AND rule = $3`,
+			res.Unit.App, res.Unit.Project, rule)
 		return fmt.Errorf("send notification for %s/%s/%s: %w", res.Unit.App, res.Unit.Project, rule, err)
 	}
-	if err := tx.Commit(); err != nil {
-		return fmt.Errorf("commit debounce claim for %s/%s/%s: %w", res.Unit.App, res.Unit.Project, rule, err)
+
+	if _, err := e.DB.ExecContext(ctx, `
+		UPDATE notification_debounce SET last_notified_at = now(), claim_expires_at = NULL
+		WHERE application = $1 AND target_gcp_project = $2 AND rule = $3`,
+		res.Unit.App, res.Unit.Project, rule,
+	); err != nil {
+		return fmt.Errorf("confirm sent notification for %s/%s/%s: %w", res.Unit.App, res.Unit.Project, rule, err)
 	}
 	return nil
 }

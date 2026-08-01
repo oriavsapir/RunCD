@@ -33,8 +33,16 @@ type Source struct {
 	CacheTTL time.Duration
 
 	mu    sync.Mutex
-	cache map[string]cachedManifest
+	cache map[cacheKey]cachedManifest
 	group singleflight.Group
+}
+
+// cacheKey is a struct, not a concatenated string — repo values are SSH
+// URLs that already contain "@" (e.g. "git@github.com:org/repo.git"), so a
+// naive repo+"@"+path join is ambiguous: two different (repo, path) pairs
+// could concatenate to the same string. A struct key has no such ambiguity.
+type cacheKey struct {
+	repo, path string
 }
 
 type cachedManifest struct {
@@ -48,7 +56,7 @@ type cachedManifest struct {
 // shared across every project it targets) are coalesced and briefly cached
 // rather than each hitting GitHub's API independently.
 func (s *Source) Get(ctx context.Context, unit expander.SyncUnit) ([]byte, error) {
-	key := unit.SourceRepo + "@" + unit.SourcePath
+	key := cacheKey{repo: unit.SourceRepo, path: unit.SourcePath}
 	ttl := s.CacheTTL
 	if ttl <= 0 {
 		ttl = DefaultCacheTTL
@@ -58,7 +66,12 @@ func (s *Source) Get(ctx context.Context, unit expander.SyncUnit) ([]byte, error
 		return data, nil
 	}
 
-	v, err, _ := s.group.Do(key, func() (any, error) {
+	// singleflight.Group.Do needs a string key. "\x00" is not a valid byte
+	// in a git repo URL or a file path on any real system, so this join is
+	// unambiguous — unlike the plain "@"-joined string this replaced,
+	// which could collide since repo values already contain "@".
+	groupKey := unit.SourceRepo + "\x00" + unit.SourcePath
+	v, err, _ := s.group.Do(groupKey, func() (any, error) {
 		if data, ok := s.cached(key, ttl); ok {
 			return data, nil
 		}
@@ -74,7 +87,7 @@ func (s *Source) Get(ctx context.Context, unit expander.SyncUnit) ([]byte, error
 		}
 		s.mu.Lock()
 		if s.cache == nil {
-			s.cache = make(map[string]cachedManifest)
+			s.cache = make(map[cacheKey]cachedManifest)
 		}
 		s.cache[key] = cachedManifest{data: data, fetchedAt: time.Now()}
 		s.mu.Unlock()
@@ -86,7 +99,7 @@ func (s *Source) Get(ctx context.Context, unit expander.SyncUnit) ([]byte, error
 	return v.([]byte), nil
 }
 
-func (s *Source) cached(key string, ttl time.Duration) ([]byte, bool) {
+func (s *Source) cached(key cacheKey, ttl time.Duration) ([]byte, bool) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	e, ok := s.cache[key]

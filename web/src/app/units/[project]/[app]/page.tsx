@@ -11,6 +11,7 @@ import { Skeleton } from "@/components/ui/skeleton";
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
 import { ApiError, getUnit, getUnitHistory } from "@/lib/api";
 import type { SyncEvent, Unit } from "@/lib/types";
+import { usePolling } from "@/lib/use-polling";
 
 // Same silent background poll as the units list (page.tsx) — without it, a
 // live rollout looks frozen on this page too until a manual reload.
@@ -48,6 +49,7 @@ export default function UnitDetailPage() {
   // view still showing the pre-sync state until the refetch resolves, with
   // no signal that a fresher answer is on the way.
   const [refreshing, setRefreshing] = useState(false);
+  const [lastUpdatedAt, setLastUpdatedAt] = useState<Date | null>(null);
 
   // Promise.allSettled, not .all: a failing history fetch shouldn't blank
   // out the diff view (or vice versa) — each result applies independently.
@@ -59,6 +61,7 @@ export default function UnitDetailPage() {
         if (u.status === "fulfilled") {
           setUnit(u.value);
           setUnitError(null);
+          setLastUpdatedAt(new Date());
         } else {
           setUnitError(
             u.reason instanceof Error
@@ -90,10 +93,7 @@ export default function UnitDetailPage() {
     };
   }, [project, app, refreshKey]);
 
-  useEffect(() => {
-    const id = setInterval(() => setRefreshKey((k) => k + 1), POLL_INTERVAL_MS);
-    return () => clearInterval(id);
-  }, []);
+  usePolling(POLL_INTERVAL_MS, () => setRefreshKey((k) => k + 1));
 
   const degraded =
     !!unit &&
@@ -101,7 +101,16 @@ export default function UnitDetailPage() {
       unit.status === "Invalid" ||
       unit.health === "Degraded" ||
       unit.health === "Invalid");
-  const lastFailure = events?.find((e) => e.result === "failed");
+  // Only shown as "the reason" if the *most recent* sync attempt is itself
+  // the failure — events is sorted most-recent-first, so if anything newer
+  // has happened since (a later success, or even a later in_progress
+  // attempt), an older failure's error text is likely stale/resolved and
+  // showing it would be actively misleading. A wall-clock cutoff instead
+  // (e.g. "only if within the last hour") would get this backwards: it'd
+  // hide a real, still-unresolved error exactly when it's been failing the
+  // longest and someone finally checks.
+  const recentFailure =
+    events?.[0]?.result === "failed" ? events[0] : undefined;
 
   return (
     <main className="mx-auto flex w-full max-w-3xl flex-1 flex-col gap-6 p-6">
@@ -118,15 +127,22 @@ export default function UnitDetailPage() {
             <h1 className="text-2xl font-semibold tracking-tight">{app}</h1>
             <p className="text-muted-foreground text-sm">{project}</p>
           </div>
-          {unit && (
-            <SyncButton
-              unit={unit}
-              onSynced={() => {
-                setRefreshing(true);
-                setRefreshKey((k) => k + 1);
-              }}
-            />
-          )}
+          <div className="flex flex-col items-end gap-1">
+            {unit && (
+              <SyncButton
+                unit={unit}
+                onSynced={() => {
+                  setRefreshing(true);
+                  setRefreshKey((k) => k + 1);
+                }}
+              />
+            )}
+            {lastUpdatedAt && (
+              <p className="text-muted-foreground text-xs">
+                Updated {lastUpdatedAt.toLocaleTimeString()}
+              </p>
+            )}
+          </div>
         </div>
       </div>
 
@@ -155,7 +171,7 @@ export default function UnitDetailPage() {
               : `Health: ${unit!.health}`}
           </AlertTitle>
           <AlertDescription>
-            {lastFailure?.error ??
+            {recentFailure?.error ??
               "This unit is out of a healthy, synced state. See the diff and sync history below."}
           </AlertDescription>
         </Alert>

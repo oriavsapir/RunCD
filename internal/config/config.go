@@ -112,6 +112,24 @@ func (w SyncWindow) validate() error {
 	return nil
 }
 
+// validateSyncNotImplemented rejects sync.retry / sync.selfHeal wherever
+// they're set — neither is consumed anywhere in internal/reconcile (grep
+// confirms zero references), so a config setting either would silently do
+// nothing: no retry-with-backoff on a failed deploy, no auto-correction of
+// manually-drifted live resources. Rejecting loudly at parse time matches
+// this repo's established pattern for exactly this class of gap (see the
+// traffic-percent and job+env validations) — better than a user believing
+// selfHeal is protecting them from drift when it never was.
+func validateSyncNotImplemented(sync SyncPolicy, path string) error {
+	if sync.Retry != nil {
+		return fmt.Errorf("%s.retry is not implemented yet — remove it (a deploy failure is retried on the next reconcile poll regardless, just not with per-app backoff/limit control)", path)
+	}
+	if sync.SelfHeal != nil {
+		return fmt.Errorf("%s.selfHeal is not implemented yet — remove it (auto-sync already redeploys OutOfSync units; there's no separate self-heal behavior for manually-drifted live resources)", path)
+	}
+	return nil
+}
+
 type Environment struct {
 	Projects []string `yaml:"projects"`
 	// Folders is a list of GCP folder IDs whose direct child projects are
@@ -290,6 +308,14 @@ func Parse(data []byte) (*Root, error) {
 			if err := w.validate(); err != nil {
 				return nil, fmt.Errorf("environments[%q].sync: %w", envName, err)
 			}
+		}
+	}
+	if err := validateSyncNotImplemented(root.Defaults.Sync, "defaults.sync"); err != nil {
+		return nil, err
+	}
+	for envName, env := range root.Environments {
+		if err := validateSyncNotImplemented(env.Sync, fmt.Sprintf("environments[%q].sync", envName)); err != nil {
+			return nil, err
 		}
 	}
 	for _, rule := range root.Notify.Rules {

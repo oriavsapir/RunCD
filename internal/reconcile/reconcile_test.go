@@ -382,6 +382,42 @@ requires:
 	}
 }
 
+// TestRunOnce_PreconditionFailureNotOverwrittenByJobEnvValidation proves a
+// real precondition-failure reason survives even when the same unit also
+// hits the (separate) job+managed-env rejection — previously the job+env
+// check unconditionally overwrote res.Err, silently discarding the actual,
+// more specific reason a unit couldn't sync.
+func TestRunOnce_PreconditionFailureNotOverwrittenByJobEnvValidation(t *testing.T) {
+	db := testutil.NewPostgres(t)
+	manifestWithRequires := []byte(fmt.Sprintf(`
+resourceType: job
+image:
+  digest: %s
+env:
+  FOO: bar
+requires:
+  - type: pubsubTopic
+    name: orders-events
+`, validDigest))
+
+	r := &Reconciler{
+		DB:            db,
+		ManagedFields: []string{"image", "env"},
+		Manifests:     &fakeManifests{byApp: map[string][]byte{"widget-api": manifestWithRequires}},
+		CloudRun:      &fakeCloudRun{},
+		Preconditions: &fakePreconditions{topics: map[string]bool{}}, // topic missing
+	}
+
+	units := []expander.SyncUnit{{App: "widget-api", Project: "example-prod-us"}}
+	results, err := r.RunOnce(context.Background(), units)
+	if err != nil {
+		t.Fatalf("RunOnce: %v", err)
+	}
+	if results[0].Err == nil || !strings.Contains(results[0].Err.Error(), "orders-events") {
+		t.Fatalf("expected the precondition failure to survive as the reported error, got %+v", results[0].Err)
+	}
+}
+
 func TestRunOnce_ResourceNotProvisionedMarkedMissing(t *testing.T) {
 	db := testutil.NewPostgres(t)
 	r := &Reconciler{

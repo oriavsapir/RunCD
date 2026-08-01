@@ -10,6 +10,7 @@ import {
   Layers,
   ListChecks,
   Palette,
+  RefreshCw,
   ShieldCheck,
 } from "lucide-react";
 import {
@@ -109,38 +110,56 @@ export default function SettingsPage() {
   const [rolesError, setRolesError] = useState<string | null>(null);
   const [configError, setConfigError] = useState<string | null>(null);
   const [refreshKey, setRefreshKey] = useState(0);
+  // Set only by the manual Refresh button, cleared by any fetch-effect
+  // completion — correct today since nothing else re-triggers the effect.
+  // If a poller is ever added to this page (matching page.tsx's), it would
+  // clear this flag on its own tick too, cutting a manual refresh's
+  // spinner short mid-flight; give it its own state at that point rather
+  // than sharing this one.
+  const [refreshing, setRefreshing] = useState(false);
 
   // Promise.allSettled, not .all: one section's fetch failing (e.g.
   // /api/rbac 500) must not blank out sibling sections that loaded fine —
   // each result is applied independently below.
   useEffect(() => {
     let cancelled = false;
-    Promise.allSettled([listUnits(), listRbac(), getRuntimeConfig()]).then(
-      ([u, r, c]) => {
+    Promise.allSettled([listUnits(), listRbac(), getRuntimeConfig()])
+      .then(([u, r, c]) => {
         if (cancelled) return;
-        if (u.status === "fulfilled") setUnits(u.value);
-        else
+        if (u.status === "fulfilled") {
+          setUnits(u.value);
+          setUnitsError(null);
+        } else {
           setUnitsError(
             u.reason instanceof Error
               ? u.reason.message
               : "Failed to load units",
           );
-        if (r.status === "fulfilled") setRoles(r.value);
-        else
+        }
+        if (r.status === "fulfilled") {
+          setRoles(r.value);
+          setRolesError(null);
+        } else {
           setRolesError(
             r.reason instanceof Error
               ? r.reason.message
               : "Failed to load RBAC roles",
           );
-        if (c.status === "fulfilled") setConfig(c.value);
-        else
+        }
+        if (c.status === "fulfilled") {
+          setConfig(c.value);
+          setConfigError(null);
+        } else {
           setConfigError(
             c.reason instanceof Error
               ? c.reason.message
               : "Failed to load controller config",
           );
-      },
-    );
+        }
+      })
+      .finally(() => {
+        if (!cancelled) setRefreshing(false);
+      });
     return () => {
       cancelled = true;
     };
@@ -154,12 +173,28 @@ export default function SettingsPage() {
 
   return (
     <main className="mx-auto flex w-full max-w-3xl flex-1 flex-col gap-6 p-6">
-      <div>
-        <h1 className="text-2xl font-semibold tracking-tight">Settings</h1>
-        <p className="text-muted-foreground text-sm">
-          Appearance, live controller configuration, environments, and who can
-          sync what.
-        </p>
+      <div className="flex items-start justify-between gap-4">
+        <div>
+          <h1 className="text-2xl font-semibold tracking-tight">Settings</h1>
+          <p className="text-muted-foreground text-sm">
+            Appearance, live controller configuration, environments, and who can
+            sync what.
+          </p>
+        </div>
+        <Button
+          variant="outline"
+          size="sm"
+          disabled={refreshing}
+          onClick={() => {
+            setRefreshing(true);
+            setRefreshKey((k) => k + 1);
+          }}
+        >
+          <RefreshCw
+            className={refreshing ? "size-3.5 animate-spin" : "size-3.5"}
+          />
+          Refresh
+        </Button>
       </div>
 
       {units && envGroups && (

@@ -46,4 +46,20 @@ describe("HistoryTable", () => {
     render(<HistoryTable events={[auto]} />);
     expect(screen.getByText("—")).toBeInTheDocument();
   });
+
+  it("shows the deploy duration for a finished event", () => {
+    render(<HistoryTable events={[baseEvent]} />);
+    expect(screen.getByText("5s")).toBeInTheDocument();
+  });
+
+  it("shows elapsed time (not a fixed duration) for an in_progress event", () => {
+    const inProgress: SyncEvent = {
+      ...baseEvent,
+      id: 3,
+      result: "in_progress",
+      finishedAt: undefined,
+    };
+    render(<HistoryTable events={[inProgress]} />);
+    expect(screen.getByText(/so far/i)).toBeInTheDocument();
+  });
 });
