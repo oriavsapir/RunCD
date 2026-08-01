@@ -1,6 +1,6 @@
 "use client";
 
-import { useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { Check, RefreshCw } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import {
@@ -41,13 +41,33 @@ const SUCCESS_MESSAGE_MS = 4000;
 // actual Cloud Run revision, not a preview), plus explicit success
 // feedback afterward — a one-click sync with only a spinner as feedback
 // left no visible confirmation the sync actually happened.
-export function SyncButton({ unit, onSynced, size = "default" }: SyncButtonProps) {
+export function SyncButton({
+  unit,
+  onSynced,
+  size = "default",
+}: SyncButtonProps) {
   const [open, setOpen] = useState(false);
   const [pending, setPending] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [justSynced, setJustSynced] = useState(false);
+  // Tracks the pending fade-out timer so a second sync attempt (or an
+  // unmount) can cancel a still-running one from a prior attempt — a bare
+  // setTimeout would otherwise fire regardless, clearing justSynced early
+  // out from under a newer attempt's own success message, or firing a
+  // setState call after the component's gone.
+  const fadeTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  useEffect(() => {
+    return () => {
+      if (fadeTimer.current) clearTimeout(fadeTimer.current);
+    };
+  }, []);
 
   async function handleConfirm() {
+    if (fadeTimer.current) {
+      clearTimeout(fadeTimer.current);
+      fadeTimer.current = null;
+    }
     setPending(true);
     setError(null);
     try {
@@ -59,7 +79,10 @@ export function SyncButton({ unit, onSynced, size = "default" }: SyncButtonProps
       setOpen(false);
       setJustSynced(true);
       onSynced?.();
-      setTimeout(() => setJustSynced(false), SUCCESS_MESSAGE_MS);
+      fadeTimer.current = setTimeout(() => {
+        setJustSynced(false);
+        fadeTimer.current = null;
+      }, SUCCESS_MESSAGE_MS);
     } catch (err) {
       // Left open so the failure is seen where the user is already
       // looking, not in small text below a button they've stopped

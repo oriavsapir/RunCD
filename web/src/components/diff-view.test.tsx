@@ -12,6 +12,7 @@ const baseUnit: Unit = {
   status: "Synced",
   health: "Healthy",
   canSync: true,
+  observing: false,
 };
 
 describe("DiffView", () => {

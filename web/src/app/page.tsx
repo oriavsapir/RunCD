@@ -25,11 +25,21 @@ import type { Unit } from "@/lib/types";
 
 type ViewMode = "table" | "tree";
 
+// Without this, a live rollout (or another operator's sync) looks frozen
+// until someone happens to click Refresh — this is a silent background
+// poll, not tied to `refreshing`, so it doesn't spin the Refresh button or
+// otherwise announce itself.
+const POLL_INTERVAL_MS = 15000;
+
 const STAT_TILES: Array<{
   label: string;
   match: (u: Unit) => boolean;
   icon: typeof Layers;
   className: string;
+  // Only the Progressing tile's icon spins, and only while it's actually
+  // counting something — a spinner next to "0" reads as "something's
+  // happening" when nothing is.
+  spinWhenNonZero?: boolean;
 }> = [
   {
     label: "Synced",
@@ -47,7 +57,8 @@ const STAT_TILES: Array<{
     label: "Progressing",
     match: (u) => u.status === "Progressing" || u.health === "Progressing",
     icon: Loader2,
-    className: "text-blue-600 dark:text-blue-400 animate-spin",
+    className: "text-blue-600 dark:text-blue-400",
+    spinWhenNonZero: true,
   },
   {
     label: "Degraded",
@@ -88,6 +99,11 @@ export default function Home() {
       cancelled = true;
     };
   }, [refreshKey]);
+
+  useEffect(() => {
+    const id = setInterval(() => setRefreshKey((k) => k + 1), POLL_INTERVAL_MS);
+    return () => clearInterval(id);
+  }, []);
 
   const attention = useMemo(
     () =>
@@ -131,7 +147,9 @@ export default function Home() {
             setRefreshKey((k) => k + 1);
           }}
         >
-          <RefreshCw className={refreshing ? "size-3.5 animate-spin" : "size-3.5"} />
+          <RefreshCw
+            className={refreshing ? "size-3.5 animate-spin" : "size-3.5"}
+          />
           Refresh
         </Button>
       </div>
@@ -175,20 +193,28 @@ export default function Home() {
               <p className="text-muted-foreground text-xs">Total</p>
             </div>
           </div>
-          {STAT_TILES.map(({ label, match, icon: Icon, className }) => (
-            <div
-              key={label}
-              className="bg-card flex items-center gap-3 rounded-lg border p-3"
-            >
-              <Icon className={`size-5 shrink-0 ${className}`} />
-              <div>
-                <p className="text-lg leading-none font-semibold">
-                  {units.filter(match).length}
-                </p>
-                <p className="text-muted-foreground text-xs">{label}</p>
-              </div>
-            </div>
-          ))}
+          {STAT_TILES.map(
+            ({ label, match, icon: Icon, className, spinWhenNonZero }) => {
+              const count = units.filter(match).length;
+              const spin = spinWhenNonZero && count > 0;
+              return (
+                <div
+                  key={label}
+                  className="bg-card flex items-center gap-3 rounded-lg border p-3"
+                >
+                  <Icon
+                    className={`size-5 shrink-0 ${className} ${spin ? "animate-spin" : ""}`}
+                  />
+                  <div>
+                    <p className="text-lg leading-none font-semibold">
+                      {count}
+                    </p>
+                    <p className="text-muted-foreground text-xs">{label}</p>
+                  </div>
+                </div>
+              );
+            },
+          )}
         </div>
       )}
 

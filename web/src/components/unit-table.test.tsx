@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { render, screen } from "@testing-library/react";
-import { UnitTable } from "./unit-table";
+import userEvent from "@testing-library/user-event";
+import { UnitTable, UnitTree } from "./unit-table";
 import type { Unit } from "@/lib/types";
 
 function unit(overrides: Partial<Unit>): Unit {
@@ -13,6 +14,7 @@ function unit(overrides: Partial<Unit>): Unit {
     status: "Synced",
     health: "Healthy",
     canSync: true,
+    observing: false,
     ...overrides,
   };
 }
@@ -36,5 +38,25 @@ describe("UnitTable", () => {
     expect(screen.getByText("dev")).toBeInTheDocument();
     expect(screen.getByText("widget-api")).toBeInTheDocument();
     expect(screen.getByText("notification-service")).toBeInTheDocument();
+  });
+});
+
+describe("UnitTree", () => {
+  it("keeps a manually-collapsed environment collapsed across a re-render (e.g. a data refresh)", async () => {
+    const units = [
+      unit({ app: "widget-api", project: "example-prod-eu", env: "prd" }),
+    ];
+    const { rerender } = render(<UnitTree units={units} />);
+
+    expect(screen.getByText("widget-api")).toBeVisible();
+
+    await userEvent.click(screen.getByText("prd"));
+    expect(screen.getByText("widget-api")).not.toBeVisible();
+
+    // A bare `open` attribute would be reapplied by React here, silently
+    // re-expanding the node — this simulates the periodic poll re-rendering
+    // with a new (but equal) units array.
+    rerender(<UnitTree units={[...units]} />);
+    expect(screen.getByText("widget-api")).not.toBeVisible();
   });
 });

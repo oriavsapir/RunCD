@@ -1559,6 +1559,35 @@ func TestDryRun_ComputesResultWithoutDeployingOrPersisting(t *testing.T) {
 // TestDryRun_DoesNotBlockAConcurrentRealSync is the concrete version of "no
 // sync_locks row": a dry run running against a unit a real manual sync is
 // about to touch must not contend for that unit's lock at all.
+// TestDryRun_ObserveModeSurfacesObserving proves DryRun tells a caller when
+// a real sync would be blocked by shadow mode — without this, a preview of
+// an observing unit looks identical to any other non-auto unit's preview,
+// hiding that even a forced manual sync would go nowhere.
+func TestDryRun_ObserveModeSurfacesObserving(t *testing.T) {
+	db := testutil.NewPostgres(t)
+	oldDigest := "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+	cr := &fakeCloudRun{services: map[string]*cloudrun.LiveService{
+		"example-prod-us/widget-api": {ServiceState: cloudrun.ServiceState{ImageDigest: oldDigest}, LatestRevisionReady: true},
+	}}
+	r := &Reconciler{
+		DB:            db,
+		ManagedFields: []string{"image"},
+		Manifests:     &fakeManifests{byApp: map[string][]byte{"widget-api": serviceYAML()}},
+		CloudRun:      cr,
+		Preconditions: &fakePreconditions{},
+	}
+
+	unit := expander.SyncUnit{App: "widget-api", Project: "example-prod-us", Sync: observeSync()}
+	res := r.DryRun(context.Background(), unit)
+
+	if res.Status != string(diff.OutOfSync) {
+		t.Fatalf("expected the preview to still report real drift, got %+v", res)
+	}
+	if !res.Observing {
+		t.Fatalf("expected Observing=true so the caller knows a real sync would be blocked, got %+v", res)
+	}
+}
+
 func TestDryRun_DoesNotBlockAConcurrentRealSync(t *testing.T) {
 	db := testutil.NewPostgres(t)
 	cr := &fakeCloudRun{services: map[string]*cloudrun.LiveService{

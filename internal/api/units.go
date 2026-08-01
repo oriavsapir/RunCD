@@ -175,6 +175,12 @@ type dryRunView struct {
 	Health       string `json:"health"`
 	DesiredImage string `json:"desiredImage,omitempty"`
 	LiveImage    string `json:"liveImage,omitempty"`
+	// Observing means this preview reflects real drift, but a real sync
+	// would be blocked outright (shadow mode) — without this, a dry-run of
+	// an observing unit looks identical to a normal preview of an
+	// auto:false unit, silently hiding that even a forced manual sync
+	// would go nowhere.
+	Observing bool `json:"observing"`
 }
 
 // handleDryRun previews a manual sync (§ dry-run/diff preview): the same
@@ -218,6 +224,7 @@ func (h *Handler) handleDryRun(w http.ResponseWriter, r *http.Request) {
 		Health:       res.Health,
 		DesiredImage: res.DesiredImage,
 		LiveImage:    res.LiveImage,
+		Observing:    res.Observing,
 	}
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(v)

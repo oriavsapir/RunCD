@@ -12,6 +12,7 @@ function unit(overrides: Partial<Unit>): Unit {
     status: "Synced",
     health: "Healthy",
     canSync: true,
+    observing: false,
     ...overrides,
   };
 }

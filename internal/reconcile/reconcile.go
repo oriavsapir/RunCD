@@ -91,6 +91,12 @@ type Result struct {
 	// record for anything deploy-related; this is for the caller's own
 	// logging.
 	Err error
+	// Observing mirrors this unit's effective SyncPolicy.Observe — computed
+	// unconditionally (unlike ErrObserveMode, which only fires for an
+	// actually-attempted forced sync) so DryRun can tell a caller "a real
+	// sync would be blocked by shadow mode here," not just show a preview
+	// that looks identical to any other non-auto unit's.
+	Observing bool
 }
 
 // db is the subset of *sql.DB the reconciler needs — kept as an interface
@@ -425,6 +431,7 @@ func (r *Reconciler) applyLiveState(ctx context.Context, res Result, unit expand
 
 	blocked := res.Status == StatusInvalid || res.Status == StatusMissing
 	observing := observeModeEnabled(unit.Sync)
+	res.Observing = observing
 	autoAllowed := autoSyncEnabled(unit.Sync) && config.WindowsAllow(unit.Sync.SyncWindows, opts.now)
 	wouldDeploy := !opts.dryRun && !blocked && (opts.force || (res.Status == string(diff.OutOfSync) && autoAllowed))
 	if wouldDeploy && observing {

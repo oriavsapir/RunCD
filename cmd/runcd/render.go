@@ -92,6 +92,9 @@ func renderDryRun(w io.Writer, res dryRunResponse) {
 	_, _ = fmt.Fprintf(w, "Health:        %s\n", res.Health)
 	_, _ = fmt.Fprintf(w, "Desired image: %s\n", orDash(res.DesiredImage))
 	_, _ = fmt.Fprintf(w, "Live image:    %s\n", orDash(res.LiveImage))
+	if res.Observing {
+		_, _ = fmt.Fprintln(w, "Note:          this app is in observe mode — a real sync would be blocked")
+	}
 }
 
 func renderOrphans(w io.Writer, orphans []orphan) {

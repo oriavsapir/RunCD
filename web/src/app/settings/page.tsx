@@ -20,6 +20,7 @@ import {
   CardTitle,
 } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
+import { Button } from "@/components/ui/button";
 import {
   Table,
   TableBody,
@@ -61,6 +62,23 @@ export function groupEnvironments(units: Unit[]): Map<string, EnvSummary> {
   return byEnv;
 }
 
+function ErrorWithRetry({
+  message,
+  onRetry,
+}: {
+  message: string;
+  onRetry: () => void;
+}) {
+  return (
+    <div className="flex items-center justify-between gap-3">
+      <p className="text-destructive text-sm">{message}</p>
+      <Button variant="outline" size="sm" onClick={onRetry}>
+        Retry
+      </Button>
+    </div>
+  );
+}
+
 function StatTile({
   icon: Icon,
   label,
@@ -90,6 +108,7 @@ export default function SettingsPage() {
   const [unitsError, setUnitsError] = useState<string | null>(null);
   const [rolesError, setRolesError] = useState<string | null>(null);
   const [configError, setConfigError] = useState<string | null>(null);
+  const [refreshKey, setRefreshKey] = useState(0);
 
   // Promise.allSettled, not .all: one section's fetch failing (e.g.
   // /api/rbac 500) must not blank out sibling sections that loaded fine —
@@ -100,17 +119,32 @@ export default function SettingsPage() {
       ([u, r, c]) => {
         if (cancelled) return;
         if (u.status === "fulfilled") setUnits(u.value);
-        else setUnitsError(u.reason instanceof Error ? u.reason.message : "Failed to load units");
+        else
+          setUnitsError(
+            u.reason instanceof Error
+              ? u.reason.message
+              : "Failed to load units",
+          );
         if (r.status === "fulfilled") setRoles(r.value);
-        else setRolesError(r.reason instanceof Error ? r.reason.message : "Failed to load RBAC roles");
+        else
+          setRolesError(
+            r.reason instanceof Error
+              ? r.reason.message
+              : "Failed to load RBAC roles",
+          );
         if (c.status === "fulfilled") setConfig(c.value);
-        else setConfigError(c.reason instanceof Error ? c.reason.message : "Failed to load controller config");
+        else
+          setConfigError(
+            c.reason instanceof Error
+              ? c.reason.message
+              : "Failed to load controller config",
+          );
       },
     );
     return () => {
       cancelled = true;
     };
-  }, []);
+  }, [refreshKey]);
 
   const envGroups = units ? groupEnvironments(units) : null;
   const envNames = envGroups ? [...envGroups.keys()].sort() : [];
@@ -123,14 +157,18 @@ export default function SettingsPage() {
       <div>
         <h1 className="text-2xl font-semibold tracking-tight">Settings</h1>
         <p className="text-muted-foreground text-sm">
-          Appearance, live controller configuration, environments, and who
-          can sync what.
+          Appearance, live controller configuration, environments, and who can
+          sync what.
         </p>
       </div>
 
       {units && envGroups && (
         <div className="grid grid-cols-2 gap-3 sm:grid-cols-4">
-          <StatTile icon={Layers} label="Environments" value={envNames.length} />
+          <StatTile
+            icon={Layers}
+            label="Environments"
+            value={envNames.length}
+          />
           <StatTile icon={ListChecks} label="Apps" value={totalApps} />
           <StatTile icon={GitBranch} label="Projects" value={totalProjects} />
           <StatTile
@@ -164,13 +202,16 @@ export default function SettingsPage() {
             Controller configuration
           </CardTitle>
           <CardDescription>
-            Live from the running controller — where it reads config from,
-            how often it polls, and what it&apos;s allowed to manage.
+            Live from the running controller — where it reads config from, how
+            often it polls, and what it&apos;s allowed to manage.
           </CardDescription>
         </CardHeader>
         <CardContent>
           {configError ? (
-            <p className="text-destructive text-sm">{configError}</p>
+            <ErrorWithRetry
+              message={configError}
+              onRetry={() => setRefreshKey((k) => k + 1)}
+            />
           ) : !config ? (
             <Skeleton className="h-32 w-full" />
           ) : (
@@ -198,7 +239,11 @@ export default function SettingsPage() {
                     <span className="text-muted-foreground italic">none</span>
                   ) : (
                     config.managedFields.map((f) => (
-                      <Badge key={f} variant="secondary" className="font-mono text-xs font-normal">
+                      <Badge
+                        key={f}
+                        variant="secondary"
+                        className="font-mono text-xs font-normal"
+                      >
                         {f}
                       </Badge>
                     ))
@@ -237,7 +282,10 @@ export default function SettingsPage() {
         </CardHeader>
         <CardContent>
           {unitsError ? (
-            <p className="text-destructive text-sm">{unitsError}</p>
+            <ErrorWithRetry
+              message={unitsError}
+              onRetry={() => setRefreshKey((k) => k + 1)}
+            />
           ) : !units ? (
             <Skeleton className="h-24 w-full" />
           ) : (
@@ -289,7 +337,10 @@ export default function SettingsPage() {
         </CardHeader>
         <CardContent>
           {rolesError ? (
-            <p className="text-destructive text-sm">{rolesError}</p>
+            <ErrorWithRetry
+              message={rolesError}
+              onRetry={() => setRefreshKey((k) => k + 1)}
+            />
           ) : !roles ? (
             <Skeleton className="h-24 w-full" />
           ) : roles.length === 0 ? (

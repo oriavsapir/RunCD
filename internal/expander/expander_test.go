@@ -128,6 +128,30 @@ apps:
 	}
 }
 
+// TestExpand_CollidingAppProjectRejected covers a case config.Parse itself
+// can't catch: Parse only checks each environment's explicitly-declared
+// Projects (it does no I/O), but folders.ResolveConfig runs after Parse and
+// can merge a folder-resolved project into an environment — if that
+// resolved project happens to overlap with a project a same-named app in a
+// different environment already targets, two SyncUnits would collide on
+// the same (app, project) key. Building the Root directly (not via Parse)
+// simulates that post-folder-resolution state.
+func TestExpand_CollidingAppProjectRejected(t *testing.T) {
+	root := &config.Root{
+		Environments: map[string]config.Environment{
+			"a": {Projects: []string{"shared-project"}, Region: "us-central1"},
+			"b": {Projects: []string{"shared-project"}, Region: "us-central1"},
+		},
+		Apps: []config.App{
+			{Name: "widget-api", Env: "a", Source: config.Source{Repo: "git@github.com:org/deployment.git", Path: "services/widget-api/"}},
+			{Name: "widget-api", Env: "b", Source: config.Source{Repo: "git@github.com:org/deployment.git", Path: "services/widget-api-v2/"}},
+		},
+	}
+	if _, err := Expand(root); err == nil {
+		t.Fatal("expected error: two app entries colliding on the same (app, project) key")
+	}
+}
+
 func TestExpand_CopiesIgnoreFieldsAndIgnorePreconditions(t *testing.T) {
 	root, err := config.Parse([]byte(`
 environments:

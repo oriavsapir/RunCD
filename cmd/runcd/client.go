@@ -70,6 +70,7 @@ type dryRunResponse struct {
 	Health       string `json:"health"`
 	DesiredImage string `json:"desiredImage"`
 	LiveImage    string `json:"liveImage"`
+	Observing    bool   `json:"observing"`
 }
 
 // orphan mirrors internal/api/units.go's orphanView JSON shape.

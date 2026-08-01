@@ -32,6 +32,18 @@ type SyncUnit struct {
 // whole config load rather than silently mis-expanding (§5.1, §7).
 func Expand(root *config.Root) ([]SyncUnit, error) {
 	var units []SyncUnit
+	// config.Parse already rejects two apps colliding on (app, project),
+	// but only over each environment's explicitly-declared Projects — it
+	// does no I/O, so it can't see a folder-resolved addition
+	// (environments[env].folders, merged in later by folders.ResolveConfig
+	// before this Expand call). Two app entries sharing a name in
+	// different environments whose folders happen to resolve to an
+	// overlapping project would otherwise silently produce two SyncUnits
+	// for the same (app, project) key — sync_locks stops a literal
+	// double-deploy, but the applications row becomes a last-write-wins
+	// race between units that may carry different region/sync settings,
+	// with nothing surfacing the collision anywhere.
+	seenAppProject := make(map[string]bool)
 
 	for _, app := range root.Apps {
 		// Parse() already rejects an app referencing an unknown environment,
@@ -88,6 +100,12 @@ func Expand(root *config.Root) ([]SyncUnit, error) {
 			if region == "" {
 				return nil, fmt.Errorf("app %q project %q: no region resolved — set defaults.region, environments[%q].region, or overrides[%q].region", app.Name, project, app.Env, project)
 			}
+
+			key := app.Name + "/" + project
+			if seenAppProject[key] {
+				return nil, fmt.Errorf("app %q: two sync units would collide on project %q — check for the same app name reused across environments whose folders/projects overlap", app.Name, project)
+			}
+			seenAppProject[key] = true
 
 			units = append(units, SyncUnit{
 				App:                 app.Name,
