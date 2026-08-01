@@ -399,7 +399,7 @@ func (c *GCPAdminClient) GetJob(ctx context.Context, project, region, name, desi
 		return &LiveJob{}, nil
 	}
 
-	exec, err := c.getExecution(ctx, region, ref)
+	exec, err := c.getExecution(ctx, project, region, name, ref)
 	if err != nil {
 		return nil, err
 	}
@@ -411,14 +411,24 @@ func (c *GCPAdminClient) GetJob(ctx context.Context, project, region, name, desi
 	}, nil
 }
 
-func (c *GCPAdminClient) getExecution(ctx context.Context, region string, ref *runpb.ExecutionReference) (*runpb.Execution, error) {
+// getExecution fetches one job execution. ExecutionReference.Name (as
+// actually returned by the real Cloud Run Admin API — confirmed against a
+// live job, not just the proto docs) is only the short execution ID (e.g.
+// "my-job-abcde"), not a fully-qualified resource name — passing it
+// straight through as GetExecutionRequest.Name makes the API try to parse
+// that short ID as if it were itself a resource path segment, producing a
+// confusing "Permission denied on resource project <execution-id>" error
+// instead of a clean 404/success. project/region/job (all already known to
+// both callers) are needed to reconstruct the real resource name.
+func (c *GCPAdminClient) getExecution(ctx context.Context, project, region, job string, ref *runpb.ExecutionReference) (*runpb.Execution, error) {
 	ec, err := c.executionsClient(ctx, region)
 	if err != nil {
 		return nil, err
 	}
-	exec, err := ec.GetExecution(ctx, &runpb.GetExecutionRequest{Name: ref.GetName()})
+	name := jobName(project, region, job) + "/executions/" + ref.GetName()
+	exec, err := ec.GetExecution(ctx, &runpb.GetExecutionRequest{Name: name})
 	if err != nil {
-		return nil, fmt.Errorf("get execution %s: %w", ref.GetName(), err)
+		return nil, fmt.Errorf("get execution %s: %w", name, err)
 	}
 	return exec, nil
 }
@@ -446,7 +456,7 @@ func (c *GCPAdminClient) DeployJob(ctx context.Context, project, region, name st
 	}
 
 	if ref := job.GetLatestCreatedExecution(); ref != nil {
-		exec, err := c.getExecution(ctx, region, ref)
+		exec, err := c.getExecution(ctx, project, region, name, ref)
 		if err != nil {
 			return err
 		}

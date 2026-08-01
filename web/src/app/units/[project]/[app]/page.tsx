@@ -16,10 +16,22 @@ import type { SyncEvent, Unit } from "@/lib/types";
 // live rollout looks frozen on this page too until a manual reload.
 const POLL_INTERVAL_MS = 15000;
 
+// decodeURIComponent throws URIError on a malformed percent-escape (e.g. a
+// lone "%" from a hand-edited URL or bad bookmark) — with no error.tsx
+// anywhere in this app, an uncaught throw here would crash the whole page
+// render instead of just failing the eventual API lookup cleanly.
+function safeDecodeURIComponent(value: string): string {
+  try {
+    return decodeURIComponent(value);
+  } catch {
+    return value;
+  }
+}
+
 export default function UnitDetailPage() {
   const params = useParams<{ project: string; app: string }>();
-  const project = decodeURIComponent(params.project);
-  const app = decodeURIComponent(params.app);
+  const project = safeDecodeURIComponent(params.project);
+  const app = safeDecodeURIComponent(params.app);
 
   const [unit, setUnit] = useState<Unit | null>(null);
   const [events, setEvents] = useState<SyncEvent[] | null>(null);

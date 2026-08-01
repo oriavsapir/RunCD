@@ -8,13 +8,13 @@ import { Button } from "@/components/ui/button";
 // script in layout.tsx already put on <html>. Avoids a hydration-mismatch
 // state sync (there's no way to read document.documentElement in a lazy
 // useState initializer without disagreeing with the server-rendered pass).
-export function ThemeToggle() {
-  function toggle() {
-    const next = !document.documentElement.classList.contains("dark");
-    document.documentElement.classList.toggle("dark", next);
-    localStorage.setItem("theme", next ? "dark" : "light");
-  }
+function toggle() {
+  const next = !document.documentElement.classList.contains("dark");
+  document.documentElement.classList.toggle("dark", next);
+  localStorage.setItem("theme", next ? "dark" : "light");
+}
 
+export function ThemeToggle() {
   return (
     <Button
       variant="outline"
