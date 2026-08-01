@@ -82,9 +82,9 @@ func envOrDefault(key, def string) string {
 //   - Unset: DATABASE_URL, a plain connection string — unchanged fallback
 //     for anyone not using Cloud SQL IAM auth.
 //
-// The returned close func releases the Cloud SQL dialer's background
-// token-refresh goroutines (a no-op in DATABASE_URL mode); callers must
-// call it in addition to db.Close().
+// The returned close func closes both db itself and (in Cloud SQL IAM mode)
+// the dialer's background token-refresh goroutines — one call for the
+// caller to defer, not two to remember separately.
 func openDB(ctx context.Context) (*sql.DB, func() error, error) {
 	instanceConnName := os.Getenv("CLOUDSQL_INSTANCE_CONNECTION_NAME")
 	if instanceConnName == "" {
@@ -96,7 +96,7 @@ func openDB(ctx context.Context) (*sql.DB, func() error, error) {
 		if err != nil {
 			return nil, nil, fmt.Errorf("open database: %w", err)
 		}
-		return db, func() error { return nil }, nil
+		return db, db.Close, nil
 	}
 
 	dbUser, err := requiredEnv("CLOUDSQL_IAM_DB_USER")
@@ -126,7 +126,10 @@ func openDB(ctx context.Context) (*sql.DB, func() error, error) {
 	}
 
 	db := stdlib.OpenDB(*connConfig)
-	return db, dialer.Close, nil
+	closeAll := func() error {
+		return errors.Join(db.Close(), dialer.Close())
+	}
+	return db, closeAll, nil
 }
 
 // run does the actual work so its defers (closing db/clients, stopping

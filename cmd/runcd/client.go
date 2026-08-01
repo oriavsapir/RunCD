@@ -10,6 +10,7 @@ import (
 	"net/url"
 	"os/exec"
 	"strings"
+	"time"
 )
 
 // unit mirrors internal/api/units.go's unitView JSON shape. Kept as an
@@ -17,17 +18,19 @@ import (
 // separate consumer of a stable HTTP contract, the same relationship
 // web/src/lib/types.ts has to it.
 type unit struct {
-	App              string  `json:"app"`
-	Project          string  `json:"project"`
-	Env              string  `json:"env"`
-	Region           string  `json:"region"`
-	Auto             bool    `json:"auto"`
-	DesiredImage     string  `json:"desiredImage"`
-	LiveImage        string  `json:"liveImage"`
-	Status           string  `json:"status"`
-	Health           string  `json:"health"`
-	LastReconciledAt *string `json:"lastReconciledAt"`
-	CanSync          bool    `json:"canSync"`
+	App                 string   `json:"app"`
+	Project             string   `json:"project"`
+	Env                 string   `json:"env"`
+	Region              string   `json:"region"`
+	Auto                bool     `json:"auto"`
+	DesiredImage        string   `json:"desiredImage"`
+	LiveImage           string   `json:"liveImage"`
+	Status              string   `json:"status"`
+	Health              string   `json:"health"`
+	LastReconciledAt    *string  `json:"lastReconciledAt"`
+	CanSync             bool     `json:"canSync"`
+	IgnoreFields        []string `json:"ignoreFields"`
+	IgnorePreconditions []string `json:"ignorePreconditions"`
 }
 
 // syncEvent mirrors internal/api/units.go's sync_events JSON shape.
@@ -184,6 +187,12 @@ func (c *client) listOrphans(ctx context.Context) ([]orphan, error) {
 	return orphans, err
 }
 
+// identityTokenTimeout bounds the gcloud subprocess — unlike every network
+// call this CLI makes (each gets its own readTimeout/syncTimeout deadline),
+// this had none at all: a hung or interactive gcloud (a re-auth prompt, a
+// DNS stall) would otherwise block the CLI forever.
+const identityTokenTimeout = 30 * time.Second
+
 // identityToken shells out to gcloud for a Google-signed identity token
 // audienced to audience — the documented way to authenticate a script/CLI
 // against an IAP-protected URL directly
@@ -196,6 +205,8 @@ func identityToken(ctx context.Context, audience string) (string, error) {
 	if audience == "" {
 		return "", nil
 	}
+	ctx, cancel := context.WithTimeout(ctx, identityTokenTimeout)
+	defer cancel()
 	// audience is operator-configured (RUNCD_IAP_AUDIENCE), passed as one
 	// argv element to a fixed binary/subcommand — not shell-interpreted, so
 	// there's no injection surface for gosec's G204 to actually flag here.

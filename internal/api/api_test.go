@@ -889,6 +889,23 @@ func TestHandleMetrics_RequiresNoAuth(t *testing.T) {
 	}
 }
 
+// TestHandleUnitHistory_OutOfScopeSubjectForbidden guards the review
+// finding: sync_events.error carries raw deploy/DB error text, so history
+// needs the same RBAC gate handleSync/handleDryRun have, not the
+// open-to-any-authenticated-caller posture the rest of the read views use.
+func TestHandleUnitHistory_OutOfScopeSubjectForbidden(t *testing.T) {
+	h, _ := newTestHandler(t)
+	srv := httptest.NewServer(NewMux(h))
+	defer srv.Close()
+
+	// dev-only@company.com is scoped to env:dev; widget-api/example-prod-eu is prd.
+	resp := getWithBearer(t, srv.URL+"/api/units/example-prod-eu/widget-api/history", "dev-only-token")
+	defer func() { _ = resp.Body.Close() }()
+	if resp.StatusCode != http.StatusForbidden {
+		t.Fatalf("expected 403, got %d", resp.StatusCode)
+	}
+}
+
 // TestHandleUnitHistory_ReturnsSyncEventAfterSync checks the history
 // endpoint surfaces the audit trail a manual sync writes to sync_events.
 func TestHandleUnitHistory_ReturnsSyncEventAfterSync(t *testing.T) {

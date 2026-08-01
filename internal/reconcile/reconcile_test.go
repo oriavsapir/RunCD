@@ -77,11 +77,29 @@ func (f *fakeCloudRun) DeployService(_ context.Context, project, _, name string,
 	if err, ok := f.deployErr[key]; ok {
 		return err
 	}
-	if _, ok := f.services[key]; !ok {
+	existing, ok := f.services[key]
+	if !ok {
 		return cloudrun.ErrNotProvisioned
 	}
+	// Mirrors the real GCPAdminClient: mutate the fetched live object in
+	// place, only touching traffic/env when the caller actually manages
+	// them — an unmanaged field must survive a deploy untouched, not get
+	// reset to desired's zero value.
+	next := cloudrun.ServiceState{
+		ImageDigest:                  desired.ImageDigest,
+		TrafficLatestRevisionPercent: existing.TrafficLatestRevisionPercent,
+		EnvVars:                      existing.EnvVars,
+		SecretRefs:                   existing.SecretRefs,
+	}
+	if desired.TrafficLatestRevisionPercent != nil {
+		next.TrafficLatestRevisionPercent = desired.TrafficLatestRevisionPercent
+	}
+	if desired.EnvVars != nil || desired.SecretRefs != nil {
+		next.EnvVars = desired.EnvVars
+		next.SecretRefs = desired.SecretRefs
+	}
 	f.services[key] = &cloudrun.LiveService{
-		ServiceState:                cloudrun.ServiceState{ImageDigest: desired.ImageDigest, TrafficLatestRevisionPercent: desired.TrafficLatestRevisionPercent},
+		ServiceState:                next,
 		HasRevisionForDesiredDigest: true,
 		LatestRevisionReady:         true,
 		LatestRevisionCreating:      false,
@@ -1502,15 +1520,15 @@ func TestDryRun_DoesNotBlockAConcurrentRealSync(t *testing.T) {
 // traffic is ignored for this one app.
 func TestRunOnce_IgnoreFieldsExcludesFieldFromDiff(t *testing.T) {
 	db := testutil.NewPostgres(t)
-	manifestYAML := []byte(fmt.Sprintf("image:\n  digest: %s\ntraffic:\n  latestRevisionPercent: 80\n", validDigest))
-	live80 := 50
+	manifestYAML := []byte(fmt.Sprintf("image:\n  digest: %s\ntraffic:\n  latestRevisionPercent: 100\n", validDigest))
+	liveTraffic := 50
 	r := &Reconciler{
 		DB:            db,
 		ManagedFields: []string{"image", "traffic"},
 		Manifests:     &fakeManifests{byApp: map[string][]byte{"widget-api": manifestYAML}},
 		CloudRun: &fakeCloudRun{services: map[string]*cloudrun.LiveService{
 			"example-prod-us/widget-api": {
-				ServiceState:                cloudrun.ServiceState{ImageDigest: validDigest, TrafficLatestRevisionPercent: &live80},
+				ServiceState:                cloudrun.ServiceState{ImageDigest: validDigest, TrafficLatestRevisionPercent: &liveTraffic},
 				HasRevisionForDesiredDigest: true,
 				LatestRevisionReady:         true,
 			},
@@ -1524,7 +1542,7 @@ func TestRunOnce_IgnoreFieldsExcludesFieldFromDiff(t *testing.T) {
 		t.Fatalf("RunOnce: %v", err)
 	}
 	if results[0].Status != "Synced" {
-		t.Fatalf("expected Synced once traffic is ignored for this app despite a real traffic mismatch (manifest wants 80%%, live is 50%%), got %+v", results[0])
+		t.Fatalf("expected Synced once traffic is ignored for this app despite a real traffic mismatch (manifest wants 100%%, live is 50%%), got %+v", results[0])
 	}
 }
 
@@ -1620,5 +1638,91 @@ func TestManualSync_IgnoreFieldsImage_ForcedSyncDoesNotChangeLiveImage(t *testin
 	}
 	if got := liveServiceDigest(t, cr, "example-prod-us/widget-api"); got != liveDigest {
 		t.Fatalf("ignoreFields: [image] must make a forced sync a no-op for image, but live digest changed to %q (manifest wanted %q)", got, validDigest)
+	}
+}
+
+// TestManualSync_EnvManaged_DeploysEnvAndSecrets checks the whole env/secrets
+// path end-to-end: a manifest declaring env + secrets, with "env" in
+// managedFields, actually deploys both to the fake Cloud Run service.
+func TestManualSync_EnvManaged_DeploysEnvAndSecrets(t *testing.T) {
+	db := testutil.NewPostgres(t)
+	manifestYAML := []byte(fmt.Sprintf(`
+image:
+  digest: %s
+env:
+  LOG_LEVEL: debug
+secrets:
+  - name: DB_PASSWORD
+    secret: db-password
+    version: "3"
+`, validDigest))
+	cr := &fakeCloudRun{services: map[string]*cloudrun.LiveService{
+		"example-prod-us/widget-api": {ServiceState: cloudrun.ServiceState{ImageDigest: validDigest}, LatestRevisionReady: true},
+	}}
+	r := &Reconciler{
+		DB:            db,
+		ManagedFields: []string{"image", "env"},
+		Manifests:     &fakeManifests{byApp: map[string][]byte{"widget-api": manifestYAML}},
+		CloudRun:      cr,
+		Preconditions: &fakePreconditions{},
+	}
+
+	unit := expander.SyncUnit{App: "widget-api", Project: "example-prod-us", Sync: manualSync()}
+	res, err := r.ManualSync(context.Background(), unit, "alice@company.com")
+	if err != nil {
+		t.Fatalf("ManualSync: %v", err)
+	}
+	if res.Status != "Synced" {
+		t.Fatalf("expected Synced, got %+v", res)
+	}
+	live, ok := cr.services["example-prod-us/widget-api"]
+	if !ok {
+		t.Fatal("no fake Cloud Run service state for example-prod-us/widget-api")
+	}
+	if live.EnvVars["LOG_LEVEL"] != "debug" {
+		t.Fatalf("expected env var deployed, got %+v", live.EnvVars)
+	}
+	if live.SecretRefs["DB_PASSWORD"] != (cloudrun.SecretRef{Secret: "db-password", Version: "3"}) {
+		t.Fatalf("expected secret ref deployed, got %+v", live.SecretRefs)
+	}
+}
+
+// TestManualSync_EnvNotManaged_LeavesLiveEnvUntouched is the counterpart:
+// without "env" in managedFields, a forced sync must never touch the
+// live service's existing env vars, even though the manifest happens to
+// declare some (a real gotcha if managedFields is later widened —
+// whatever's live should survive until "env" is explicitly opted into).
+func TestManualSync_EnvNotManaged_LeavesLiveEnvUntouched(t *testing.T) {
+	db := testutil.NewPostgres(t)
+	manifestYAML := []byte(fmt.Sprintf(`
+image:
+  digest: %s
+env:
+  LOG_LEVEL: debug
+`, validDigest))
+	cr := &fakeCloudRun{services: map[string]*cloudrun.LiveService{
+		"example-prod-us/widget-api": {
+			ServiceState:        cloudrun.ServiceState{ImageDigest: "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", EnvVars: map[string]string{"EXISTING": "value"}},
+			LatestRevisionReady: true,
+		},
+	}}
+	r := &Reconciler{
+		DB:            db,
+		ManagedFields: []string{"image"}, // env not managed
+		Manifests:     &fakeManifests{byApp: map[string][]byte{"widget-api": manifestYAML}},
+		CloudRun:      cr,
+		Preconditions: &fakePreconditions{},
+	}
+
+	unit := expander.SyncUnit{App: "widget-api", Project: "example-prod-us", Sync: manualSync()}
+	if _, err := r.ManualSync(context.Background(), unit, "alice@company.com"); err != nil {
+		t.Fatalf("ManualSync: %v", err)
+	}
+	live, ok := cr.services["example-prod-us/widget-api"]
+	if !ok {
+		t.Fatal("no fake Cloud Run service state for example-prod-us/widget-api")
+	}
+	if live.EnvVars["EXISTING"] != "value" || live.EnvVars["LOG_LEVEL"] != "" {
+		t.Fatalf("expected live env untouched since env isn't managed, got %+v", live.EnvVars)
 	}
 }

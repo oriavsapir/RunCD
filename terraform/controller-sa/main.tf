@@ -14,7 +14,11 @@ resource "google_service_account" "controller" {
 data "google_projects" "folder_members" {
   for_each = var.target_folders
 
-  filter = "parent.id:${each.value} parent.type:folder"
+  # lifecycleState:ACTIVE matches internal/folders' own runtime resolution
+  # (folders.go filters to Project_ACTIVE) — without it, Terraform could
+  # grant run.developer on a DELETE_REQUESTED/DELETED project the
+  # controller would never actually treat as a sync target.
+  filter = "parent.id:${each.value} parent.type:folder lifecycleState:ACTIVE"
 }
 
 locals {
@@ -64,4 +68,28 @@ resource "google_service_account_iam_member" "act_as_runtime_sa" {
   service_account_id = "projects/${each.key}/serviceAccounts/${each.value}"
   role               = "roles/iam.serviceAccountUser"
   member             = "serviceAccount:${google_service_account.controller.email}"
+}
+
+# internal/precondition.GCPChecker calls Topic(name).Exists() /
+# Subscription(name).Exists() against every pubsubTopic/pubsubSubscription
+# precondition target (§5.10) — without pubsub.viewer there, every such
+# precondition check 403s and the unit is stuck Invalid forever. Optional:
+# a runcd.yaml with no pubsub preconditions at all doesn't need this grant.
+resource "google_project_iam_member" "pubsub_viewer" {
+  for_each = var.enable_pubsub_preconditions ? local.all_target_projects : []
+
+  project = each.value
+  role    = "roles/pubsub.viewer"
+  member  = "serviceAccount:${google_service_account.controller.email}"
+}
+
+# Opt-in, per-secret (not project-wide) access to whatever Secret Manager
+# secrets you actually store controller config in — DATABASE_URL, GitHub
+# App private key, Slack webhook. Nothing is granted unless you list it.
+resource "google_secret_manager_secret_iam_member" "secret_accessor" {
+  for_each = var.secret_accessor_ids
+
+  secret_id = each.value
+  role      = "roles/secretmanager.secretAccessor"
+  member    = "serviceAccount:${google_service_account.controller.email}"
 }

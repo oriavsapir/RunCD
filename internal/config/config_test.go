@@ -388,6 +388,24 @@ apps:
 	}
 }
 
+func TestParse_ManagedFieldsAcceptsEnv(t *testing.T) {
+	yaml := []byte(`
+environments:
+  prd:
+    projects: [example-prod-us]
+defaults:
+  region: us-central1
+  managedFields: [image, env]
+`)
+	root, err := Parse(yaml)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(root.Defaults.ManagedFields) != 2 || root.Defaults.ManagedFields[1] != "env" {
+		t.Fatalf("expected env accepted as a managed field, got %+v", root.Defaults.ManagedFields)
+	}
+}
+
 func TestParse_EnvironmentFolders(t *testing.T) {
 	yaml := []byte(`
 environments:

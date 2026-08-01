@@ -44,6 +44,12 @@ func renderUnit(w io.Writer, u unit) {
 	_, _ = fmt.Fprintf(w, "Desired image:   %s\n", desired)
 	_, _ = fmt.Fprintf(w, "Live image:      %s\n", live)
 	_, _ = fmt.Fprintf(w, "Last reconciled: %s\n", lastReconciled)
+	if len(u.IgnoreFields) > 0 {
+		_, _ = fmt.Fprintf(w, "Ignores fields:  %s\n", strings.Join(u.IgnoreFields, ", "))
+	}
+	if len(u.IgnorePreconditions) > 0 {
+		_, _ = fmt.Fprintf(w, "Ignores requires: %s\n", strings.Join(u.IgnorePreconditions, ", "))
+	}
 }
 
 func renderHistory(w io.Writer, events []syncEvent) {

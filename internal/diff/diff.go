@@ -14,7 +14,10 @@ const (
 
 // Compute returns Synced only if every managed field matches between
 // desired and live. traffic is ignored for job/workerPool even if present
-// in managedFields, since it's meaningless there (§5.7).
+// in managedFields, since it's meaningless there (§5.7). env is ignored
+// for job — Cloud Run Jobs' env vars live on the task template vs. what a
+// past execution actually ran, a distinction this v1 doesn't try to
+// reconcile; scoped to service/workerPool only for now.
 func Compute(desired, live cloudrun.ServiceState, managedFields []string, resourceType string) Status {
 	for _, field := range managedFields {
 		switch field {
@@ -36,6 +39,19 @@ func Compute(desired, live cloudrun.ServiceState, managedFields []string, resour
 			if !trafficEqual(desired.TrafficLatestRevisionPercent, live.TrafficLatestRevisionPercent) {
 				return OutOfSync
 			}
+		case "env":
+			if resourceType == "job" {
+				continue
+			}
+			// Both nil means this manifest hasn't declared env as part of
+			// its spec (env not actually managed for this unit) — same
+			// nothing-to-diff convention as traffic above.
+			if desired.EnvVars == nil && desired.SecretRefs == nil {
+				continue
+			}
+			if !stringMapEqual(desired.EnvVars, live.EnvVars) || !secretMapEqual(desired.SecretRefs, live.SecretRefs) {
+				return OutOfSync
+			}
 		}
 	}
 	return Synced
@@ -46,4 +62,28 @@ func trafficEqual(a, b *int) bool {
 		return a == b
 	}
 	return *a == *b
+}
+
+func stringMapEqual(a, b map[string]string) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for k, v := range a {
+		if b[k] != v {
+			return false
+		}
+	}
+	return true
+}
+
+func secretMapEqual(a, b map[string]cloudrun.SecretRef) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for k, v := range a {
+		if b[k] != v {
+			return false
+		}
+	}
+	return true
 }

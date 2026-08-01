@@ -9,7 +9,7 @@ import { HistoryTable } from "@/components/history-table";
 import { SyncButton } from "@/components/sync-button";
 import { Skeleton } from "@/components/ui/skeleton";
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
-import { getUnit, getUnitHistory } from "@/lib/api";
+import { ApiError, getUnit, getUnitHistory } from "@/lib/api";
 import type { SyncEvent, Unit } from "@/lib/types";
 
 export default function UnitDetailPage() {
@@ -21,6 +21,11 @@ export default function UnitDetailPage() {
   const [events, setEvents] = useState<SyncEvent[] | null>(null);
   const [unitError, setUnitError] = useState<string | null>(null);
   const [eventsError, setEventsError] = useState<string | null>(null);
+  // History is RBAC-gated the same as triggering a sync (sync_events.error
+  // carries raw deploy/DB error text) — a viewer without sync rights for
+  // this unit gets a 403, which is an expected, clean "no access" state,
+  // not a real failure worth a destructive-styled error banner.
+  const [eventsForbidden, setEventsForbidden] = useState(false);
   const [refreshKey, setRefreshKey] = useState(0);
 
   // Promise.allSettled, not .all: a failing history fetch shouldn't blank
@@ -39,8 +44,13 @@ export default function UnitDetailPage() {
         if (h.status === "fulfilled") {
           setEvents(h.value);
           setEventsError(null);
+          setEventsForbidden(false);
+        } else if (h.reason instanceof ApiError && h.reason.status === 403) {
+          setEventsError(null);
+          setEventsForbidden(true);
         } else {
           setEventsError(h.reason instanceof Error ? h.reason.message : "Failed to load sync history");
+          setEventsForbidden(false);
         }
       },
     );
@@ -118,7 +128,12 @@ export default function UnitDetailPage() {
         <h2 className="mb-2 text-lg font-semibold tracking-tight">
           Sync history
         </h2>
-        {!events && !eventsError ? (
+        {eventsForbidden ? (
+          <p className="text-muted-foreground text-sm">
+            You don&apos;t have sync access to this app/project, so its
+            history isn&apos;t shown here.
+          </p>
+        ) : !events && !eventsError ? (
           <Skeleton className="h-32 w-full" />
         ) : (
           events && <HistoryTable events={events} />

@@ -35,13 +35,30 @@ type Precondition struct {
 	Name string `yaml:"name"`
 }
 
+// SecretRef exposes a Secret Manager secret+version as one environment
+// variable — the same env var namespace as Env, so a name can't appear in
+// both (checked at parse time). Version defaults to "latest" when omitted.
+type SecretRef struct {
+	Name    string `yaml:"name"`
+	Secret  string `yaml:"secret"`
+	Version string `yaml:"version,omitempty"`
+}
+
 // ServiceDefinition is one service's app.yaml (§5.1). No env, project, or
 // region — those are bound in the root runcd.yaml's apps[]/environments.
 type ServiceDefinition struct {
-	ResourceType ResourceType   `yaml:"resourceType,omitempty"`
-	Image        Image          `yaml:"image"`
-	Traffic      *Traffic       `yaml:"traffic,omitempty"`
-	Requires     []Precondition `yaml:"requires,omitempty"`
+	ResourceType ResourceType `yaml:"resourceType,omitempty"`
+	Image        Image        `yaml:"image"`
+	Traffic      *Traffic     `yaml:"traffic,omitempty"`
+	// Env/Secrets are only compared/deployed when "env" is in
+	// managedFields (§5.7) — together they're this app's full desired
+	// container environment; Cloud Run itself has no separate concept for
+	// "plain" vs "secret-sourced" env vars, they're both just entries in
+	// one list, so runcd manages them as a single managed field even
+	// though the manifest splits them into two sections for readability.
+	Env      map[string]string `yaml:"env,omitempty"`
+	Secrets  []SecretRef       `yaml:"secrets,omitempty"`
+	Requires []Precondition    `yaml:"requires,omitempty"`
 }
 
 // digestPattern matches a resolved OCI digest reference, e.g.
@@ -72,16 +89,51 @@ func Parse(data []byte) (*ServiceDefinition, error) {
 	if err := validateTraffic(sd.Traffic); err != nil {
 		return nil, err
 	}
+	if err := validateSecrets(sd.Env, sd.Secrets); err != nil {
+		return nil, err
+	}
 
 	return &sd, nil
 }
 
+// validateSecrets rejects a malformed secret ref (empty name/secret) and an
+// env var name declared in both env and secrets — Cloud Run has one env
+// var namespace, so declaring "FOO" both ways is a real config mistake,
+// not a meaningful override of one by the other.
+func validateSecrets(env map[string]string, secrets []SecretRef) error {
+	seen := make(map[string]bool, len(secrets))
+	for _, s := range secrets {
+		if s.Name == "" {
+			return fmt.Errorf("secrets: an entry is missing name")
+		}
+		if s.Secret == "" {
+			return fmt.Errorf("secrets: %q is missing secret", s.Name)
+		}
+		if seen[s.Name] {
+			return fmt.Errorf("secrets: %q is listed more than once", s.Name)
+		}
+		seen[s.Name] = true
+		if _, ok := env[s.Name]; ok {
+			return fmt.Errorf("%q is declared in both env and secrets — Cloud Run has one env var namespace, pick one", s.Name)
+		}
+	}
+	return nil
+}
+
+// validateTraffic rejects anything but a full cutover to the latest
+// revision (100) — matching cloudrun.GCPAdminClient's validatedPercent
+// exactly, not just the wider [0,100] range this field's own type allows.
+// Accepting, say, 50 here would parse fine and diff cleanly, then fail
+// every single deploy attempt forever (a new failed sync_events row every
+// reconcile tick) once a real deploy call actually tries it — v1's traffic
+// model has no way to say where the remaining percent should go, so this
+// has to fail loudly at config-load time, not repeatedly at deploy time.
 func validateTraffic(t *Traffic) error {
 	if t == nil || t.LatestRevisionPercent == nil {
 		return nil
 	}
-	if p := *t.LatestRevisionPercent; p < 0 || p > 100 {
-		return fmt.Errorf("traffic.latestRevisionPercent %d must be between 0 and 100", p)
+	if p := *t.LatestRevisionPercent; p != 100 {
+		return fmt.Errorf("traffic.latestRevisionPercent %d is not supported — v1 only manages a full cutover to the latest revision (100)", p)
 	}
 	return nil
 }

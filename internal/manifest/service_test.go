@@ -126,8 +126,13 @@ image:
 	}
 }
 
+// TestParse_TrafficPercentOutOfRangeRejected covers both out-of-[0,100]
+// values and, crucially, in-range-but-unsupported ones (e.g. 50) — the
+// real deploy path (cloudrun.validatedPercent) only ever accepts exactly
+// 100, so anything else must fail here at parse time, not repeatedly at
+// deploy time forever.
 func TestParse_TrafficPercentOutOfRangeRejected(t *testing.T) {
-	for _, percent := range []int{-1, 101, 500} {
+	for _, percent := range []int{-1, 0, 1, 50, 99, 101, 500} {
 		yaml := []byte(`
 image:
   digest: ` + validDigest + `
@@ -153,5 +158,84 @@ traffic:
 	}
 	if sd.Traffic == nil || sd.Traffic.LatestRevisionPercent == nil || *sd.Traffic.LatestRevisionPercent != 100 {
 		t.Fatalf("traffic not parsed: %+v", sd.Traffic)
+	}
+}
+
+func TestParse_EnvAndSecrets(t *testing.T) {
+	yaml := []byte(`
+image:
+  digest: ` + validDigest + `
+env:
+  LOG_LEVEL: debug
+secrets:
+  - name: DB_PASSWORD
+    secret: db-password
+    version: "3"
+  - name: API_KEY
+    secret: api-key
+`)
+	sd, err := Parse(yaml)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if sd.Env["LOG_LEVEL"] != "debug" {
+		t.Fatalf("env not parsed: %+v", sd.Env)
+	}
+	if len(sd.Secrets) != 2 || sd.Secrets[0].Name != "DB_PASSWORD" || sd.Secrets[0].Version != "3" {
+		t.Fatalf("secrets not parsed: %+v", sd.Secrets)
+	}
+}
+
+func TestParse_SecretMissingNameRejected(t *testing.T) {
+	yaml := []byte(`
+image:
+  digest: ` + validDigest + `
+secrets:
+  - secret: db-password
+`)
+	if _, err := Parse(yaml); err == nil {
+		t.Fatal("expected error for a secret entry missing name")
+	}
+}
+
+func TestParse_SecretMissingSecretRejected(t *testing.T) {
+	yaml := []byte(`
+image:
+  digest: ` + validDigest + `
+secrets:
+  - name: DB_PASSWORD
+`)
+	if _, err := Parse(yaml); err == nil {
+		t.Fatal("expected error for a secret entry missing secret")
+	}
+}
+
+func TestParse_DuplicateSecretNameRejected(t *testing.T) {
+	yaml := []byte(`
+image:
+  digest: ` + validDigest + `
+secrets:
+  - name: DB_PASSWORD
+    secret: db-password-a
+  - name: DB_PASSWORD
+    secret: db-password-b
+`)
+	if _, err := Parse(yaml); err == nil {
+		t.Fatal("expected error for a secret name listed twice")
+	}
+}
+
+func TestParse_EnvVarNameInBothEnvAndSecretsRejected(t *testing.T) {
+	yaml := []byte(`
+image:
+  digest: ` + validDigest + `
+env:
+  DB_PASSWORD: literal-value
+secrets:
+  - name: DB_PASSWORD
+    secret: db-password
+`)
+	if _, err := Parse(yaml); err == nil {
+		t.Fatal("expected error for a var name declared in both env and secrets")
 	}
 }

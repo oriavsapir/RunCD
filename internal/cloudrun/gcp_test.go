@@ -148,3 +148,58 @@ func TestContainerImage_EmptyWhenNoContainers(t *testing.T) {
 		t.Fatalf("expected empty string, got %q", got)
 	}
 }
+
+func TestEnvStateFromContainers_NoContainersOrNoEnvReturnsNil(t *testing.T) {
+	vars, secrets := envStateFromContainers(nil)
+	if vars != nil || secrets != nil {
+		t.Fatalf("expected nil/nil for no containers, got %+v/%+v", vars, secrets)
+	}
+	vars, secrets = envStateFromContainers([]*runpb.Container{{}})
+	if vars != nil || secrets != nil {
+		t.Fatalf("expected nil/nil for a container with no env, got %+v/%+v", vars, secrets)
+	}
+}
+
+func TestEnvStateFromContainers_SplitsPlainAndSecretSourced(t *testing.T) {
+	containers := []*runpb.Container{{
+		Env: []*runpb.EnvVar{
+			{Name: "LOG_LEVEL", Values: &runpb.EnvVar_Value{Value: "debug"}},
+			{Name: "DB_PASSWORD", Values: &runpb.EnvVar_ValueSource{
+				ValueSource: &runpb.EnvVarSource{
+					SecretKeyRef: &runpb.SecretKeySelector{Secret: "db-password", Version: "3"},
+				},
+			}},
+		},
+	}}
+	vars, secrets := envStateFromContainers(containers)
+	if vars["LOG_LEVEL"] != "debug" {
+		t.Fatalf("expected plain var parsed, got %+v", vars)
+	}
+	if secrets["DB_PASSWORD"] != (SecretRef{Secret: "db-password", Version: "3"}) {
+		t.Fatalf("expected secret ref parsed, got %+v", secrets)
+	}
+}
+
+func TestBuildEnvVars_RoundTripsThroughEnvStateFromContainers(t *testing.T) {
+	vars := map[string]string{"LOG_LEVEL": "debug"}
+	secrets := map[string]SecretRef{"DB_PASSWORD": {Secret: "db-password", Version: "3"}}
+	built := buildEnvVars(vars, secrets)
+	if len(built) != 2 {
+		t.Fatalf("expected 2 env vars built, got %d", len(built))
+	}
+	gotVars, gotSecrets := envStateFromContainers([]*runpb.Container{{Env: built}})
+	if gotVars["LOG_LEVEL"] != "debug" {
+		t.Fatalf("round-trip lost the plain var: %+v", gotVars)
+	}
+	if gotSecrets["DB_PASSWORD"] != (SecretRef{Secret: "db-password", Version: "3"}) {
+		t.Fatalf("round-trip lost the secret ref: %+v", gotSecrets)
+	}
+}
+
+func TestBuildEnvVars_DeterministicOrder(t *testing.T) {
+	vars := map[string]string{"ZEBRA": "1", "ALPHA": "2"}
+	built := buildEnvVars(vars, nil)
+	if len(built) != 2 || built[0].GetName() != "ALPHA" || built[1].GetName() != "ZEBRA" {
+		t.Fatalf("expected alphabetical order for deterministic output, got %+v", built)
+	}
+}

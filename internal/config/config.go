@@ -165,7 +165,7 @@ type Root struct {
 // validManagedFields are the only fields the diff engine and deploy path
 // know how to compare/apply (§5.7, NFR8). An unrecognized entry here would
 // otherwise be silently ignored by the diff engine rather than rejected.
-var validManagedFields = map[string]bool{"image": true, "traffic": true}
+var validManagedFields = map[string]bool{"image": true, "traffic": true, "env": true}
 
 // Parse decodes runcd.yaml and rejects any app whose env doesn't exist, or
 // any defaults.managedFields entry the diff engine doesn't know how to
@@ -206,13 +206,13 @@ func Parse(data []byte) (*Root, error) {
 	}
 	for _, f := range root.Defaults.ManagedFields {
 		if !validManagedFields[f] {
-			return nil, fmt.Errorf("defaults.managedFields: %q is not a field runcd knows how to manage (image, traffic)", f)
+			return nil, fmt.Errorf("defaults.managedFields: %q is not a field runcd knows how to manage (image, traffic, env)", f)
 		}
 	}
 	for _, app := range root.Apps {
 		for _, f := range app.IgnoreFields {
 			if !validManagedFields[f] {
-				return nil, fmt.Errorf("app %q: ignoreFields: %q is not a field runcd knows how to manage (image, traffic)", app.Name, f)
+				return nil, fmt.Errorf("app %q: ignoreFields: %q is not a field runcd knows how to manage (image, traffic, env)", app.Name, f)
 			}
 		}
 	}

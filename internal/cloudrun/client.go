@@ -15,6 +15,14 @@ import (
 // desired digest on an existing resource" (§7).
 var ErrNotProvisioned = errors.New("resource not provisioned: run Terraform first")
 
+// SecretRef is one env var sourced from Secret Manager: name is the env var
+// exposed in the container, Secret/Version identify the Secret Manager
+// secret+version.
+type SecretRef struct {
+	Secret  string
+	Version string
+}
+
 // ServiceState is the subset of Cloud Run service spec the diff engine and
 // health assessment reason about — only the fields runcd ever manages
 // (§5.7's managed-field set) plus what's needed to assess health.
@@ -23,6 +31,16 @@ type ServiceState struct {
 	// TrafficLatestRevisionPercent is nil when traffic isn't part of the
 	// service spec being compared (e.g. not yet in defaults.managedFields).
 	TrafficLatestRevisionPercent *int
+	// EnvVars/SecretRefs are both nil when "env" isn't managed for this
+	// unit — the single signal diff.Compute and the real deploy path use
+	// to skip comparing/touching the container's environment at all, same
+	// convention TrafficLatestRevisionPercent already uses. When managed,
+	// both are non-nil (possibly empty maps, meaning "manage env and want
+	// zero entries") — together they're the full desired/live container
+	// environment; Cloud Run has one unified env var list, not a separate
+	// "plain" vs "secret-sourced" concept.
+	EnvVars    map[string]string
+	SecretRefs map[string]SecretRef
 }
 
 // LiveService is what GetService returns: current spec plus the health
@@ -70,10 +88,11 @@ type AdminClient interface {
 	// ErrNotProvisioned if the resource doesn't exist in the project at all.
 	GetJob(ctx context.Context, project, region, name, desiredDigest string) (*LiveJob, error)
 
-	// DeployService applies desired's managed fields (image digest, and
-	// traffic if managed) to the named service or workerPool as a new
-	// revision. Returns ErrNotProvisioned if the resource shell doesn't
-	// exist yet (§7 — Terraform hasn't provisioned it).
+	// DeployService applies desired's managed fields (image digest,
+	// traffic if managed, env/secrets if managed) to the named service or
+	// workerPool as a new revision. Returns ErrNotProvisioned if the
+	// resource shell doesn't exist yet (§7 — Terraform hasn't provisioned
+	// it).
 	DeployService(ctx context.Context, project, region, name string, desired ServiceState) error
 
 	// DeployJob triggers an execution of the named job with desired's image

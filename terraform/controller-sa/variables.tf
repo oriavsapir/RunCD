@@ -51,3 +51,29 @@ variable "runtime_service_account_emails" {
   type        = map(string)
   default     = {}
 }
+
+variable "enable_pubsub_preconditions" {
+  description = <<-EOT
+    Grant roles/pubsub.viewer on every target project (target_projects plus
+    every project resolved from target_folders) so
+    internal/precondition.GCPChecker can evaluate pubsubTopic/
+    pubsubSubscription preconditions (§5.10) there. Turn off if nothing in
+    runcd.yaml declares a pubsub precondition and you'd rather not grant
+    fleet-wide Pub/Sub read for a feature you're not using.
+  EOT
+  type        = bool
+  default     = true
+}
+
+variable "secret_accessor_ids" {
+  description = <<-EOT
+    Secret Manager secrets the controller reads at boot (GitHub App private
+    key, DATABASE_URL, Slack webhook, etc.) if you store them there instead
+    of plain env vars — this module has no way to know which ones you use,
+    so nothing is granted unless listed here. Keyed by an arbitrary label
+    (used only for the resource address); each value is the secret's full
+    resource ID, "projects/<project>/secrets/<secret_id>".
+  EOT
+  type        = map(string)
+  default     = {}
+}

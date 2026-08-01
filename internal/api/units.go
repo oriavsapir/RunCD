@@ -106,10 +106,15 @@ func (h *Handler) handleListUnits(w http.ResponseWriter, r *http.Request) {
 		byKey[row.App+"/"+row.Project] = row
 	}
 
+	// cfg/folderMembership are hoisted once, not read fresh per unit — a
+	// hot-reload landing mid-loop would otherwise let different units in
+	// the same response be evaluated against two different RBAC
+	// snapshots (canSync inconsistent within one JSON response).
+	cfg := h.RBAC.Get()
 	folderMembership := h.RBAC.FolderMembership()
 	views := make([]unitView, 0, len(units))
 	for _, u := range units {
-		v := unitViewFrom(u, h.RBAC.Get(), folderMembership, email)
+		v := unitViewFrom(u, cfg, folderMembership, email)
 		if row, ok := byKey[u.App+"/"+u.Project]; ok {
 			applyRow(&v, row)
 		}
@@ -282,15 +287,30 @@ type syncEventView struct {
 // unbounded query would grow without limit over a unit's lifetime.
 const defaultHistoryLimit = 50
 
+// handleUnitHistory is RBAC-checked like handleSync/handleDryRun, unlike
+// the rest of the read views: sync_events.error is populated verbatim from
+// a real deploy/DB error's Error() text (see reconcile.go's
+// updateSyncEvent calls) — exactly the raw-infra-error-detail class
+// handleSync's own response deliberately never echoes. Unlike that
+// response, this IS the intended durable place to see the actual reason
+// (§5.2/FR6's audit-trail requirement) — so rather than scrub it here too
+// and leave no API path to it at all, visibility is restricted to callers
+// who could also sync this unit.
 func (h *Handler) handleUnitHistory(w http.ResponseWriter, r *http.Request) {
-	if _, ok := verify(w, r, h.Auth); !ok {
+	email, ok := verify(w, r, h.Auth)
+	if !ok {
 		return
 	}
 
 	project := r.PathValue("project")
 	app := r.PathValue("app")
-	if _, ok := h.Units.Find(app, project); !ok {
+	unit, ok := h.Units.Find(app, project)
+	if !ok {
 		http.Error(w, "unknown app/project", http.StatusNotFound)
+		return
+	}
+	if !rbac.CanSyncFolders(h.RBAC.Get(), h.RBAC.FolderMembership(), email, unit) {
+		http.Error(w, "forbidden: no role grants sync access to this app/project", http.StatusForbidden)
 		return
 	}
 

@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"sort"
 	"strings"
 	"sync"
 
@@ -304,6 +305,14 @@ func (c *GCPAdminClient) DeployService(ctx context.Context, project, region, nam
 			Percent: percent,
 		}}
 	}
+	// nil EnvVars/SecretRefs (env unmanaged) leaves Env completely
+	// untouched on this freshly-fetched live object — the same
+	// "don't-touch-what-isn't-managed" behavior traffic gets above, just
+	// via omission rather than a nil check, since there's nothing to
+	// assign in that case.
+	if desired.EnvVars != nil || desired.SecretRefs != nil {
+		svc.Template.Containers[0].Env = buildEnvVars(desired.EnvVars, desired.SecretRefs)
+	}
 	if _, err := sc.UpdateService(ctx, &runpb.UpdateServiceRequest{Service: svc}); err != nil {
 		return fmt.Errorf("update service %s: %w", name, err)
 	}
@@ -326,6 +335,9 @@ func (c *GCPAdminClient) deployWorkerPool(ctx context.Context, project, region, 
 		return fmt.Errorf("workerPool %s has no containers in its revision template", name)
 	}
 	wp.Template.Containers[0].Image = withDigest(wp.Template.Containers[0].Image, desired.ImageDigest)
+	if desired.EnvVars != nil || desired.SecretRefs != nil {
+		wp.Template.Containers[0].Env = buildEnvVars(desired.EnvVars, desired.SecretRefs)
+	}
 	if _, err := wc.UpdateWorkerPool(ctx, &runpb.UpdateWorkerPoolRequest{WorkerPool: wp}); err != nil {
 		return fmt.Errorf("update workerPool %s: %w", name, err)
 	}
@@ -536,10 +548,13 @@ func liveServiceFromService(svc *runpb.Service, desiredDigest string) *LiveServi
 	digest := digestSuffix(containerImage(svc.GetTemplate().GetContainers()))
 	percent := latestRevisionPercent(svc.GetTraffic())
 	ready, creating := conditionState(svc.GetTerminalCondition(), svc.GetReconciling())
+	envVars, secretRefs := envStateFromContainers(svc.GetTemplate().GetContainers())
 	return &LiveService{
 		ServiceState: ServiceState{
 			ImageDigest:                  digest,
 			TrafficLatestRevisionPercent: &percent,
+			EnvVars:                      envVars,
+			SecretRefs:                   secretRefs,
 		},
 		HasRevisionForDesiredDigest: digest == desiredDigest,
 		LatestRevisionReady:         ready,
@@ -550,10 +565,65 @@ func liveServiceFromService(svc *runpb.Service, desiredDigest string) *LiveServi
 func liveServiceFromWorkerPool(wp *runpb.WorkerPool, desiredDigest string) *LiveService {
 	digest := digestSuffix(containerImage(wp.GetTemplate().GetContainers()))
 	ready, creating := conditionState(wp.GetTerminalCondition(), wp.GetReconciling())
+	envVars, secretRefs := envStateFromContainers(wp.GetTemplate().GetContainers())
 	return &LiveService{
-		ServiceState:                ServiceState{ImageDigest: digest},
+		ServiceState: ServiceState{
+			ImageDigest: digest,
+			EnvVars:     envVars,
+			SecretRefs:  secretRefs,
+		},
 		HasRevisionForDesiredDigest: digest == desiredDigest,
 		LatestRevisionReady:         ready,
 		LatestRevisionCreating:      creating,
 	}
+}
+
+// envStateFromContainers splits containers[0].Env into plain values and
+// secret-sourced ones — the inverse of buildEnvVars. Both return values are
+// nil (not empty maps) when there are no env vars at all, matching this
+// package's "nil means nothing here" convention for live state.
+func envStateFromContainers(containers []*runpb.Container) (map[string]string, map[string]SecretRef) {
+	if len(containers) == 0 || len(containers[0].GetEnv()) == 0 {
+		return nil, nil
+	}
+	var vars map[string]string
+	var secrets map[string]SecretRef
+	for _, e := range containers[0].GetEnv() {
+		if ref := e.GetValueSource().GetSecretKeyRef(); ref != nil {
+			if secrets == nil {
+				secrets = make(map[string]SecretRef)
+			}
+			secrets[e.GetName()] = SecretRef{Secret: ref.GetSecret(), Version: ref.GetVersion()}
+			continue
+		}
+		if vars == nil {
+			vars = make(map[string]string)
+		}
+		vars[e.GetName()] = e.GetValue()
+	}
+	return vars, secrets
+}
+
+// buildEnvVars is the inverse of envStateFromContainers — used by the
+// deploy path to replace a container's Env wholesale when "env" is
+// managed. Sorted by name for deterministic output (map iteration order
+// isn't stable), so re-deploying an unchanged desired env doesn't produce
+// a spurious spec diff from reordering alone.
+func buildEnvVars(vars map[string]string, secrets map[string]SecretRef) []*runpb.EnvVar {
+	out := make([]*runpb.EnvVar, 0, len(vars)+len(secrets))
+	for name, value := range vars {
+		out = append(out, &runpb.EnvVar{Name: name, Values: &runpb.EnvVar_Value{Value: value}})
+	}
+	for name, ref := range secrets {
+		out = append(out, &runpb.EnvVar{
+			Name: name,
+			Values: &runpb.EnvVar_ValueSource{
+				ValueSource: &runpb.EnvVarSource{
+					SecretKeyRef: &runpb.SecretKeySelector{Secret: ref.Secret, Version: ref.Version},
+				},
+			},
+		})
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].Name < out[j].Name })
+	return out
 }

@@ -1263,6 +1263,116 @@ source before fixing.
   - Test: `TestDetectOrphans_AllScopesFailingReturnsNilOrphans`,
     `TestDetectOrphans_SuccessWithZeroOrphansReturnsNonNilSlice`.
 
+## Phase 8 — Managed env vars and Secret Manager refs
+
+- [x] **`env`/`secrets` as a managed field** (`internal/manifest`,
+  `internal/cloudrun`, `internal/diff`, `internal/reconcile`) — a per-app
+  manifest can now declare `env` (plain key/value pairs) and `secrets`
+  (env var name → Secret Manager secret+version), managed together under
+  one `"env"` entry in `managedFields` (not two separately-toggleable
+  fields) since Cloud Run itself has a single unified env var list, not a
+  separate "plain" vs "secret-sourced" concept. A var name can't appear in
+  both sections (rejected at parse time), and Secret `version` defaults to
+  `"latest"`.
+  - `cloudrun.ServiceState.EnvVars`/`.SecretRefs` follow the same
+    nil-means-unmanaged convention `TrafficLatestRevisionPercent` already
+    uses — both non-nil (possibly empty maps) when `env` is managed, both
+    nil when it isn't, so `diff.Compute` and the real deploy path can tell
+    "manage env and want zero entries" apart from "don't touch env at
+    all."
+  - The real `GCPAdminClient.DeployService`/`deployWorkerPool` only assign
+    `Env` on the freshly-fetched live object when `EnvVars`/`SecretRefs`
+    is non-nil — same "mutate what's fetched, touch only what's managed"
+    pattern `image`'s ignoreFields fix and `traffic` already established,
+    so an unmanaged live environment survives a deploy untouched.
+  - **Scoped to `service`/`workerPool` only** — `diff.Compute` skips
+    `env` for `resourceType: job` entirely. Cloud Run Jobs' env vars live
+    on the task template, but the live value worth comparing against is
+    on the last *execution* (a distinct object that can lag a spec update)
+    — reconciling that distinction is deferred, not solved here.
+  - Test: `go test ./internal/manifest/... -run 'Env|Secret' -v`,
+    `go test ./internal/diff/... -run Env -v`,
+    `go test ./internal/cloudrun/... -run 'EnvVars|EnvState' -v` (the
+    pure `buildEnvVars`/`envStateFromContainers` round-trip + determinstic
+    ordering), `go test ./internal/reconcile/... -run EnvManaged -v` (a
+    real fake-Cloud-Run deploy proving both managed-deploys-it and
+    unmanaged-leaves-it-untouched).
+  - Granting the Cloud Run **runtime** service account
+    `roles/secretmanager.secretAccessor` on a referenced secret is a
+    separate IAM step (Cloud Run's own runtime pulls the secret value at
+    container start, not the controller) — already covered by the
+    Terraform module's `secret_accessor_ids` variable, not new here.
+
+## Bugs found and fixed in an eighth review pass
+
+- [x] **Infinite deploy-fail loop on an in-range-but-unsupported traffic
+  percent** — `manifest.Parse` accepted any `traffic.latestRevisionPercent`
+  in `[0,100]`, but the real deploy path
+  (`cloudrun.GCPAdminClient.validatedPercent`) only ever accepts exactly
+  `100` (v1's traffic model can't express a partial split). A manifest
+  with, say, `latestRevisionPercent: 50` parsed fine, diffed as genuinely
+  `OutOfSync`, and then failed *every single deploy attempt forever* —
+  writing a new `failed` `sync_events` row on every reconcile tick with no
+  way to recover short of editing the manifest. Fixed: `manifest.Parse`
+  now rejects anything but exactly `100`, matching `validatedPercent`
+  exactly, so this fails loudly once at config-load time instead of
+  silently forever at deploy time.
+  - Test: extended `TestParse_TrafficPercentOutOfRangeRejected` to cover
+    in-range-but-unsupported values (0, 1, 50, 99), not just out-of-[0,100]
+    ones.
+- [x] **RBAC snapshot torn mid-response in `handleListUnits`**
+  (`internal/api/units.go`) — `folderMembership` was hoisted once for the
+  whole response, but `h.RBAC.Get()` was called fresh *per unit* inside
+  the loop — a hot-reload landing mid-loop could let different units in
+  the same JSON response be evaluated against two different RBAC
+  snapshots (`canSync` inconsistent within one response). Fixed: `cfg`
+  is now hoisted once too, alongside `folderMembership`.
+- [x] **History's new RBAC gate needed its own doc/UX follow-through** —
+  gating `GET .../history` the same as `handleSync`/`handleDryRun` (the
+  immediately preceding fix, closing a real raw-error-text leak) had two
+  loose ends: `CLAUDE.md` still described every read endpoint as open to
+  any authenticated caller, and the dashboard's unit detail page fetched
+  history unconditionally, surfacing a viewer's expected 403 as a generic
+  "failed to load sync history" error instead of a clean no-access state.
+  Fixed: `CLAUDE.md` updated; the unit detail page now detects a 403 on
+  the history fetch specifically and renders a plain "you don't have sync
+  access to view this unit's history" message instead of a destructive
+  error banner.
+- [x] **`closeAll` swallowed one error if both `db.Close()` and
+  `dialer.Close()` failed** (`cmd/controller/main.go`) — fixed with
+  `errors.Join` instead of an if/return that discarded whichever error
+  came second.
+- [x] **CLI's `unit` struct never picked up `ignoreFields`/
+  `ignorePreconditions`** (`cmd/runcd/client.go`) — added when
+  `internal/api/units.go`'s `unitView` gained them a few commits earlier;
+  the CLI's independent copy of the JSON shape wasn't updated alongside
+  it, so `runcd get` silently couldn't show this info. Fixed, and
+  `runcd get`'s output now prints them when non-empty.
+- [x] **Two doc-comment misattachments in the same uncommitted diff** —
+  a new declaration's own comment was inserted directly between an
+  existing declaration's doc comment and the declaration itself (no blank
+  line separating the two comment blocks), stranding the original comment
+  non-adjacent to what it actually documented:
+  `cmd/runcd/client.go`'s new `identityTokenTimeout` const wedged between
+  `identityToken`'s doc comment and the function, and
+  `internal/api/api_test.go`'s new `TestHandleUnitHistory_OutOfScopeSubjectForbidden`
+  wedged the same way ahead of `TestHandleUnitHistory_ReturnsSyncEventAfterSync`'s
+  own comment. Both reordered so each comment directly precedes its own
+  declaration.
+- **Not yet triaged, flagged for a later pass**: no orphan-detection UI in
+  the dashboard (backend/CLI-only — a real, bounded gap), no fetch timeout
+  on the dashboard's own proxy route, the sync confirmation dialog closing
+  before the pending/success/error state is visible, no polling while a
+  unit is `Progressing`, a `ToggleGroup` custom-select workaround that may
+  duplicate built-in library behavior, `UnitTree`'s row key not scoped by
+  project like its sibling `UnitTable`, `enable_pubsub_preconditions`
+  granting project-wide `pubsub.viewer` rather than per-topic scoping,
+  Terraform's folder-resolved IAM grants having no drift detection, CI's
+  `terraform validate` never exercising `target_folders`/
+  `enable_pubsub_preconditions`/`secret_accessor_ids`/
+  `runtime_service_account_emails`, and `nilaway`/`govulncheck` installed
+  unpinned (`@latest`) in CI.
+
 ## Infra / delivery
 
 - [x] **Dockerfile** — multi-stage (`golang:1.26-alpine` build →

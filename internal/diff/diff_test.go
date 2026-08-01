@@ -78,3 +78,67 @@ func TestCompute_JobImageMismatchIsOutOfSync(t *testing.T) {
 		t.Fatalf("expected OutOfSync, got %s", got)
 	}
 }
+
+func TestCompute_EnvNotManagedIsSynced(t *testing.T) {
+	desired := cloudrun.ServiceState{ImageDigest: "sha256:abc"} // no EnvVars/SecretRefs
+	live := cloudrun.ServiceState{ImageDigest: "sha256:abc", EnvVars: map[string]string{"FOO": "bar"}}
+	if got := Compute(desired, live, []string{"image", "env"}, "service"); got != Synced {
+		t.Fatalf("expected Synced (env not part of the declared spec), got %s", got)
+	}
+}
+
+func TestCompute_EnvManagedMismatchIsOutOfSync(t *testing.T) {
+	desired := cloudrun.ServiceState{ImageDigest: "sha256:abc", EnvVars: map[string]string{"FOO": "bar"}}
+	live := cloudrun.ServiceState{ImageDigest: "sha256:abc", EnvVars: map[string]string{"FOO": "baz"}}
+	if got := Compute(desired, live, []string{"image", "env"}, "service"); got != OutOfSync {
+		t.Fatalf("expected OutOfSync, got %s", got)
+	}
+}
+
+func TestCompute_EnvManagedMatchIsSynced(t *testing.T) {
+	desired := cloudrun.ServiceState{
+		ImageDigest: "sha256:abc",
+		EnvVars:     map[string]string{"FOO": "bar"},
+		SecretRefs:  map[string]cloudrun.SecretRef{"DB_PASSWORD": {Secret: "db-password", Version: "3"}},
+	}
+	live := cloudrun.ServiceState{
+		ImageDigest: "sha256:abc",
+		EnvVars:     map[string]string{"FOO": "bar"},
+		SecretRefs:  map[string]cloudrun.SecretRef{"DB_PASSWORD": {Secret: "db-password", Version: "3"}},
+	}
+	if got := Compute(desired, live, []string{"image", "env"}, "service"); got != Synced {
+		t.Fatalf("expected Synced, got %s", got)
+	}
+}
+
+func TestCompute_SecretVersionMismatchIsOutOfSync(t *testing.T) {
+	desired := cloudrun.ServiceState{
+		ImageDigest: "sha256:abc",
+		EnvVars:     map[string]string{},
+		SecretRefs:  map[string]cloudrun.SecretRef{"DB_PASSWORD": {Secret: "db-password", Version: "3"}},
+	}
+	live := cloudrun.ServiceState{
+		ImageDigest: "sha256:abc",
+		EnvVars:     map[string]string{},
+		SecretRefs:  map[string]cloudrun.SecretRef{"DB_PASSWORD": {Secret: "db-password", Version: "2"}},
+	}
+	if got := Compute(desired, live, []string{"image", "env"}, "service"); got != OutOfSync {
+		t.Fatalf("expected OutOfSync on a secret version mismatch, got %s", got)
+	}
+}
+
+func TestCompute_EnvIgnoredForJobEvenIfManaged(t *testing.T) {
+	desired := cloudrun.ServiceState{ImageDigest: "sha256:abc", EnvVars: map[string]string{"FOO": "bar"}}
+	live := cloudrun.ServiceState{ImageDigest: "sha256:abc", EnvVars: map[string]string{"FOO": "different"}}
+	if got := Compute(desired, live, []string{"image", "env"}, "job"); got != Synced {
+		t.Fatalf("expected Synced (env not yet supported for job), got %s", got)
+	}
+}
+
+func TestCompute_EnvManagedAndEmptyIsSyncedAgainstEmptyLive(t *testing.T) {
+	desired := cloudrun.ServiceState{ImageDigest: "sha256:abc", EnvVars: map[string]string{}, SecretRefs: map[string]cloudrun.SecretRef{}}
+	live := cloudrun.ServiceState{ImageDigest: "sha256:abc"} // nil EnvVars/SecretRefs
+	if got := Compute(desired, live, []string{"image", "env"}, "service"); got != Synced {
+		t.Fatalf("expected Synced (nil live env == empty desired env), got %s", got)
+	}
+}

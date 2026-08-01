@@ -287,6 +287,24 @@ func (r *Reconciler) reconcile(ctx context.Context, unit expander.SyncUnit, opts
 	if trafficManaged && sd.Traffic != nil {
 		desired.TrafficLatestRevisionPercent = sd.Traffic.LatestRevisionPercent
 	}
+	// envManaged: both maps must be non-nil (even if empty) so
+	// diff.Compute and the real deploy path can tell "env is managed and
+	// wants zero entries" apart from "env isn't managed at all" — the
+	// same nil-means-unmanaged signal traffic uses via a nil pointer.
+	if fieldManaged(managedFields, "env") {
+		desired.EnvVars = sd.Env
+		if desired.EnvVars == nil {
+			desired.EnvVars = map[string]string{}
+		}
+		desired.SecretRefs = make(map[string]cloudrun.SecretRef, len(sd.Secrets))
+		for _, s := range sd.Secrets {
+			version := s.Version
+			if version == "" {
+				version = "latest"
+			}
+			desired.SecretRefs[s.Name] = cloudrun.SecretRef{Secret: s.Secret, Version: version}
+		}
+	}
 
 	// Per §5.7: service and workerPool are both revision-based (workerPool
 	// just has no traffic concept); job is execution-based. Only the
