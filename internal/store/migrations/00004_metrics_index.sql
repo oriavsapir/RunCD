@@ -4,7 +4,10 @@
 --
 -- CONCURRENTLY so building it doesn't hold a lock that blocks sync_events
 -- writes (the reconcile loop's own in-flight deploys) for however long the
--- build takes on an already-populated table — applied separately from the
--- rest of Schema (see store.Apply) since CONCURRENTLY can't run inside a
--- transaction block, which the other migrations' combined statement is.
+-- build takes on an already-populated table. NO TRANSACTION (goose's
+-- annotation for "run this migration's statements without wrapping them in
+-- a transaction") since CONCURRENTLY can't run inside one.
+
+-- +goose NO TRANSACTION
+-- +goose Up
 CREATE INDEX CONCURRENTLY IF NOT EXISTS sync_events_trigger_result_idx ON sync_events (trigger, result);

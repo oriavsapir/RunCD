@@ -3,6 +3,8 @@
 -- healthDegraded/outOfSyncGated duration rules), and per-(unit, rule)
 -- debounce state so a sustained failure doesn't spam Slack.
 
+-- +goose Up
+
 ALTER TABLE applications
   ADD COLUMN IF NOT EXISTS status_since timestamptz NOT NULL DEFAULT now(),
   ADD COLUMN IF NOT EXISTS health_since timestamptz NOT NULL DEFAULT now();

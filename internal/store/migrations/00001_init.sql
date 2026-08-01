@@ -1,11 +1,13 @@
 -- Phase 0 schema (§5.2): last-known state, audit trail, leader lease.
 -- Deliberately minimal, no ORM abstraction beyond what's needed.
 --
--- Every statement below is idempotent (IF NOT EXISTS / ON CONFLICT DO
--- NOTHING) — internal/store.Apply runs the whole concatenated Schema on
--- every controller boot, including against a database that already has it
--- (see store.Apply's doc comment for why a plain re-run would otherwise
--- fail on a second boot).
+-- goose (github.com/pressly/goose/v3) tracks which migrations have already
+-- run in its own goose_db_version table, so — unlike this repo's earlier
+-- hand-rolled Apply — a migration only ever executes once. Every statement
+-- is still written idempotent (IF NOT EXISTS / ON CONFLICT DO NOTHING)
+-- anyway, as cheap defense in depth.
+
+-- +goose Up
 
 CREATE TABLE IF NOT EXISTS applications (
   name             text NOT NULL,

@@ -2,6 +2,8 @@
 -- leader's auto-reconcile pass can otherwise race to deploy the same unit
 -- concurrently. TTL-based (not session-held) so a crashed holder can't
 -- deadlock future syncs — see internal/reconcile's lock acquire/release.
+
+-- +goose Up
 CREATE TABLE IF NOT EXISTS sync_locks (
   application         text NOT NULL,
   target_gcp_project  text NOT NULL,

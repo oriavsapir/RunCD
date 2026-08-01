@@ -1565,6 +1565,40 @@ source before fixing.
   filtered to projects the caller can actually sync, a grant that never
   resolves to any real project just yields an empty result, not a leak.
 
+## Migrations switched to goose
+
+Fixing the `CREATE INDEX CONCURRENTLY` deadlock above (two concurrent
+`Apply` callers, one blocked acquiring a session-held advisory lock while
+the other's index build waited on that blocked session) by hand — a
+non-blocking `pg_try_advisory_lock` poll loop — was a sign the hand-rolled
+"re-apply one big idempotent SQL blob every boot, advisory-lock-guarded"
+approach (`internal/store/schema.go`) had reached the point where a real
+migration tool does this more reliably than bespoke code can.
+
+Switched to [goose](https://github.com/pressly/goose) (`github.com/pressly/goose/v3`):
+- Migration files (`internal/store/migrations/*.sql`) renamed to goose's
+  `NNNNN_name.sql` convention and given `-- +goose Up` annotations;
+  `00004_metrics_index.sql` additionally gets `-- +goose NO TRANSACTION`
+  (goose's own equivalent of running a migration outside a transaction,
+  needed for `CREATE INDEX CONCURRENTLY`).
+- `store.Apply`'s signature is unchanged (`ctx, *sql.DB`) — every caller
+  (`cmd/controller/main.go`, `internal/testutil/postgres.go`) needed no
+  changes. Internally it now builds a `goose.Provider` over the embedded
+  migrations dir and calls `provider.Up(ctx)`.
+- Concurrent-replica safety now comes from
+  `lock.NewPostgresSessionLocker()` (`goose/v3/lock`) — goose's own
+  Postgres session locker, which already uses `pg_try_advisory_lock` in a
+  retry loop internally, the same non-blocking pattern this repo had just
+  hand-rolled to fix the deadlock, now provided by the library instead.
+- goose tracks applied migrations in its own `goose_db_version` table, so
+  each migration runs exactly once — a real improvement over "re-run the
+  whole idempotent blob every boot and hope every statement really is
+  idempotent."
+- `TestApply_IdempotentOnAlreadyAppliedSchema` and
+  `TestApply_ConcurrentCallersBothSucceed` (`internal/store/schema_test.go`)
+  needed no changes and both still pass (the latter run repeatedly,
+  `-count=6 -race`, specifically to re-confirm no deadlock).
+
 ## Infra / delivery
 
 - [x] **Dockerfile** — multi-stage (`golang:1.26-alpine` build →
