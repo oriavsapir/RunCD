@@ -5,7 +5,9 @@ package main
 
 import (
 	"context"
+	"crypto/rand"
 	"database/sql"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -73,6 +75,22 @@ func envOrDefault(key, def string) string {
 		return v
 	}
 	return def
+}
+
+// randomID returns an 8-byte random hex string, generated once at process
+// startup for holderID (see its own comment) — crypto/rand, not math/rand,
+// since two instances racing to start at the exact same instant must not
+// be able to collide on a predictable seed.
+func randomID() string {
+	b := make([]byte, 8)
+	if _, err := rand.Read(b); err != nil {
+		// Astronomically unlikely (crypto/rand reading from the OS CSPRNG),
+		// but holderID must never end up empty — fall back to a
+		// timestamp-derived value rather than leaving two instances both
+		// computing the same empty string.
+		return fmt.Sprintf("fallback-%d", time.Now().UnixNano())
+	}
+	return hex.EncodeToString(b)
 }
 
 // openDB opens the controller's database connection. Two modes, chosen by
@@ -179,10 +197,21 @@ func run() error {
 		return fmt.Errorf("RECONCILE_INTERVAL: %w", err)
 	}
 
-	holderID := os.Getenv("HOSTNAME")
-	if holderID == "" {
-		holderID, _ = os.Hostname()
-	}
+	// Neither $HOSTNAME nor os.Hostname() reliably return anything
+	// per-instance-unique on Cloud Run (unlike Kubernetes, where HOSTNAME is
+	// the pod name) — observed in practice resolving to the literal string
+	// "localhost" for every concurrently-running instance once the service
+	// autoscaled past one replica, which made two genuinely different
+	// containers indistinguishable to the leader_lease claim logic: each
+	// kept "stealing" the lease from what looked like itself, flapping
+	// leadership every few seconds and cancelling every in-flight
+	// reconcile pass mid-tick. holderID only needs to be unique among
+	// currently-running processes, not stable across restarts, so a random
+	// suffix generated once at boot is sufficient — prefixed with
+	// K_REVISION (Cloud Run's own env var, same across every replica of one
+	// revision) purely so the sync_locks/leader_lease holder column stays
+	// readable in logs/DB inspection.
+	holderID := envOrDefault("K_REVISION", "controller") + "-" + randomID()
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
