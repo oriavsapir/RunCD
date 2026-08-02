@@ -65,6 +65,42 @@ func (g *GoogleAuthenticator) Verify(r *http.Request) (string, error) {
 	return email, nil
 }
 
+// EventarcAuthenticator verifies the OIDC identity token Eventarc attaches
+// to a push request (the same Google-signed-ID-token mechanism
+// GoogleAuthenticator validates), but for a single-purpose machine endpoint
+// rather than a human caller — so instead of accepting any authenticated
+// Google identity, it further requires the token's email to be exactly the
+// one service account the Eventarc trigger is configured to run as. That
+// makes this an authorization check as much as an authentication one:
+// nothing else, not even another authenticated Google identity, may invoke
+// the endpoint this gates.
+type EventarcAuthenticator struct {
+	Audience       string
+	ServiceAccount string
+}
+
+func (e *EventarcAuthenticator) Verify(r *http.Request) (string, error) {
+	token, ok := bearerToken(r)
+	if !ok {
+		return "", errors.New("missing bearer token")
+	}
+	if e.Audience == "" {
+		return "", errors.New("EventarcAuthenticator.Audience is empty — refusing to skip audience validation")
+	}
+	if e.ServiceAccount == "" {
+		return "", errors.New("EventarcAuthenticator.ServiceAccount is empty — refusing to accept any caller")
+	}
+	payload, err := idtoken.Validate(r.Context(), token, e.Audience)
+	if err != nil {
+		return "", fmt.Errorf("verify google id token: %w", err)
+	}
+	email, _ := payload.Claims["email"].(string)
+	if email != e.ServiceAccount {
+		return "", fmt.Errorf("token email %q does not match configured trigger service account", email)
+	}
+	return email, nil
+}
+
 func bearerToken(r *http.Request) (string, bool) {
 	const prefix = "Bearer "
 	h := r.Header.Get("Authorization")

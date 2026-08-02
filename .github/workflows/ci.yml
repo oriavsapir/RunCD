@@ -108,6 +108,11 @@ jobs:
         run: |
           terraform init -backend=false
           terraform validate
+      - name: validate image-events via its example
+        working-directory: terraform/image-events/examples/minimal
+        run: |
+          terraform init -backend=false
+          terraform validate
 
   docker:
     runs-on: ubuntu-latest

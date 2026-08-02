@@ -58,6 +58,17 @@ type Handler struct {
 	// (e.g. a test fixture that has no need for it). Build one via
 	// NewMetricsHandler.
 	Metrics http.Handler
+	// ImageEvents, IsLeader, and NudgeReconcile back an optional add-on:
+	// an Eventarc trigger (Cloud Audit Logs on Artifact Registry pushes)
+	// can nudge the auto-reconcile loop to run sooner than its next
+	// RECONCILE_INTERVAL tick. All three are nil unless the controller was
+	// started with the image-events env vars set — POST /api/events/image
+	// is registered unconditionally either way, but does nothing without
+	// them, the same "configured or it's inert" shape notify.slackWebhookUrl
+	// already has. See handleImageEvent's doc comment for the rest.
+	ImageEvents    auth.Authenticator
+	IsLeader       func() bool
+	NudgeReconcile func()
 }
 
 // NewMux registers the API's routes on a fresh http.ServeMux.
@@ -71,6 +82,7 @@ func NewMux(h *Handler) *http.ServeMux {
 	mux.HandleFunc("GET /api/config", h.handleConfig)
 	mux.HandleFunc("GET /api/orphans", h.handleOrphans)
 	mux.HandleFunc("POST /api/sync/{project}/{app}", h.handleSync)
+	mux.HandleFunc("POST /api/events/image", h.handleImageEvent)
 	if h.Metrics != nil {
 		mux.Handle("GET /metrics", h.Metrics)
 	}

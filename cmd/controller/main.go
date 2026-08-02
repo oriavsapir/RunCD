@@ -189,6 +189,14 @@ func run() error {
 	if err != nil {
 		return fmt.Errorf("RECONCILE_INTERVAL: %w", err)
 	}
+	// Both optional and both-or-neither: the image-events add-on (an
+	// Eventarc trigger nudging the reconcile loop early on an Artifact
+	// Registry push — see internal/api's handleImageEvent) stays entirely
+	// inert, POST /api/events/image just 404ing, unless a deployment opts
+	// in by setting both. No separate "enabled" flag, same shape
+	// notify.slackWebhookUrl already has.
+	imageEventsAudience := os.Getenv("RUNCD_IMAGE_EVENTS_AUDIENCE")
+	imageEventsServiceAccount := os.Getenv("RUNCD_IMAGE_EVENTS_SERVICE_ACCOUNT")
 
 	// Unlike Kubernetes (HOSTNAME = pod name), $HOSTNAME/os.Hostname() both
 	// resolve to the literal "localhost" on Cloud Run for every replica —
@@ -286,6 +294,25 @@ func run() error {
 		return fmt.Errorf("build metrics handler: %w", err)
 	}
 
+	// Constructed here (not down with runLeaderElection/reconcileLoop
+	// below) so handler.IsLeader can close over it — lc.Current() is safe
+	// to call from any goroutine from the moment it's constructed, well
+	// before runLeaderElection's own goroutine starts actually updating it.
+	lc := newLeadershipContext(ctx)
+
+	// Buffered 1, non-blocking send (see NudgeReconcile below): several
+	// image-push events between reconcile ticks collapse into a single
+	// extra early pass, not a queue of them.
+	nudgeCh := make(chan struct{}, 1)
+
+	var imageEventsAuth auth.Authenticator
+	if imageEventsAudience != "" && imageEventsServiceAccount != "" {
+		imageEventsAuth = &auth.EventarcAuthenticator{
+			Audience:       imageEventsAudience,
+			ServiceAccount: imageEventsServiceAccount,
+		}
+	}
+
 	handler := &api.Handler{
 		Auth:       iapAuth,
 		RBAC:       rbacStore,
@@ -299,6 +326,14 @@ func run() error {
 			ConfigPath:               configPath,
 			RBACPath:                 rbacPath,
 			ReconcileIntervalSeconds: int(reconcileInterval.Seconds()),
+		},
+		ImageEvents: imageEventsAuth,
+		IsLeader:    func() bool { return lc.Current().Err() == nil },
+		NudgeReconcile: func() {
+			select {
+			case nudgeCh <- struct{}{}:
+			default:
+			}
 		},
 	}
 	srv := &http.Server{Addr: httpAddr, Handler: api.NewMux(handler), ReadHeaderTimeout: 10 * time.Second}
@@ -324,7 +359,6 @@ func run() error {
 	leaderDB.SetMaxIdleConns(2)
 	leaderDB.SetConnMaxLifetime(30 * time.Minute)
 
-	lc := newLeadershipContext(ctx)
 	lease := leader.New(leaderDB, holderID)
 
 	var wg sync.WaitGroup
@@ -348,7 +382,7 @@ func run() error {
 
 	go func() {
 		defer wg.Done()
-		reconcileLoop(ctx, reconcileInterval, lc, ghClient, cfgSrc, db, reconcilerPtr, dynUnits, rbacStore, folderResolver)
+		reconcileLoop(ctx, reconcileInterval, lc, ghClient, cfgSrc, db, reconcilerPtr, dynUnits, rbacStore, folderResolver, nudgeCh)
 	}()
 
 	// A bind/serve failure (e.g. the port is already taken) is fatal, not a
@@ -583,7 +617,13 @@ func (d *dynamicUnits) List() []expander.SyncUnit {
 	return out
 }
 
-func reconcileLoop(ctx context.Context, interval time.Duration, lc *leadershipContext, gh *githubapp.Client, cs configSource, db *sql.DB, reconcilerPtr *atomic.Pointer[reconcile.Reconciler], units *dynamicUnits, rbacStore *rbac.Store, folderResolver folders.Resolver) {
+// nudgeCh optionally carries early-wakeup signals from the image-events
+// add-on (see internal/api's handleImageEvent) — nil means the feature was
+// never configured, which read-only-nil-channel-receives-never (a nil
+// channel blocks forever in a select, exactly like "this case never
+// fires"), so the loop degrades to plain ticker-only polling with no extra
+// branch needed.
+func reconcileLoop(ctx context.Context, interval time.Duration, lc *leadershipContext, gh *githubapp.Client, cs configSource, db *sql.DB, reconcilerPtr *atomic.Pointer[reconcile.Reconciler], units *dynamicUnits, rbacStore *rbac.Store, folderResolver folders.Resolver, nudgeCh <-chan struct{}) {
 	ticker := time.NewTicker(interval)
 	defer ticker.Stop()
 	// lastNotify/lastManagedFields track what the currently-stored
@@ -594,69 +634,78 @@ func reconcileLoop(ctx context.Context, interval time.Duration, lc *leadershipCo
 	// hasn't diverged from startup yet.
 	var lastNotify config.Notify
 	var lastManagedFields []string
+
+	// Shared by both the regular ticker and an image-events nudge — a nudge
+	// is "run this same tick sooner," not a different, lighter-weight path.
+	tick := func() {
+		// config, RBAC, and notify reload independently (§8) — a
+		// transient config-fetch error must not also skip the RBAC/
+		// folder-membership reload below just because they happen to
+		// be fetched in the same tick; only the config-dependent steps
+		// (unit list, RunOnce) are skipped this tick.
+		root, expanded, configErr := loadUnits(ctx, gh, cs, folderResolver)
+		if configErr != nil {
+			slog.Error("reconcile: reload config", "error", configErr)
+		} else {
+			units.set(expanded)
+
+			if !reflect.DeepEqual(root.Notify, lastNotify) || !reflect.DeepEqual(root.Defaults.ManagedFields, lastManagedFields) {
+				next := *reconcilerPtr.Load() // shallow copy: DB/CloudRun/Preconditions/Manifests/Workers carry over unchanged
+				next.ManagedFields = root.Defaults.ManagedFields
+				next.Notifier = buildNotifier(db, root)
+				reconcilerPtr.Store(&next)
+				lastNotify, lastManagedFields = root.Notify, root.Defaults.ManagedFields
+			}
+		}
+
+		// A missing/invalid rbac.yaml here doesn't fail closed to empty
+		// like the startup path does — that would silently revoke every
+		// existing grant on a transient fetch error. Keep serving the
+		// last-known-good rules and just log it.
+		if newRBAC, err := loadRBAC(ctx, gh, cs); err != nil {
+			slog.Error("reconcile: reload rbac", "rbacPath", cs.rbacPath, "error", err)
+		} else {
+			rbacStore.Set(newRBAC)
+			if membership, err := loadRBACFolderMembership(ctx, folderResolver, newRBAC); err != nil {
+				// Same fail-open posture as the rbac.yaml reload above.
+				slog.Error("reconcile: resolve rbac folder scopes", "error", err)
+			} else {
+				rbacStore.SetFolderMembership(membership)
+			}
+		}
+
+		if configErr != nil {
+			return // no fresh unit list to run this tick's reconcile pass over
+		}
+
+		passCtx := lc.Current() // this leadership term's context, not the raw ctx
+		if passCtx.Err() != nil {
+			return // not leader
+		}
+		results, err := reconcilerPtr.Load().RunOnce(passCtx, expanded)
+		if err != nil {
+			slog.Error("reconcile: run once", "error", err)
+		}
+		// RunOnce's own error is just the first of possibly several
+		// concurrent failures with no unit attribution (see its comment) —
+		// without this, a unit landing on Invalid/Missing is otherwise
+		// silent: the reason lives only in the applications table's
+		// status column, never in the logs.
+		for _, res := range results {
+			if res.Err != nil {
+				slog.Error("reconcile", "app", res.Unit.App, "project", res.Unit.Project, "error", res.Err)
+			}
+		}
+	}
+
 	for {
 		select {
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
-			// config, RBAC, and notify reload independently (§8) — a
-			// transient config-fetch error must not also skip the RBAC/
-			// folder-membership reload below just because they happen to
-			// be fetched in the same tick; only the config-dependent steps
-			// (unit list, RunOnce) are skipped this tick.
-			root, expanded, configErr := loadUnits(ctx, gh, cs, folderResolver)
-			if configErr != nil {
-				slog.Error("reconcile: reload config", "error", configErr)
-			} else {
-				units.set(expanded)
-
-				if !reflect.DeepEqual(root.Notify, lastNotify) || !reflect.DeepEqual(root.Defaults.ManagedFields, lastManagedFields) {
-					next := *reconcilerPtr.Load() // shallow copy: DB/CloudRun/Preconditions/Manifests/Workers carry over unchanged
-					next.ManagedFields = root.Defaults.ManagedFields
-					next.Notifier = buildNotifier(db, root)
-					reconcilerPtr.Store(&next)
-					lastNotify, lastManagedFields = root.Notify, root.Defaults.ManagedFields
-				}
-			}
-
-			// A missing/invalid rbac.yaml here doesn't fail closed to empty
-			// like the startup path does — that would silently revoke every
-			// existing grant on a transient fetch error. Keep serving the
-			// last-known-good rules and just log it.
-			if newRBAC, err := loadRBAC(ctx, gh, cs); err != nil {
-				slog.Error("reconcile: reload rbac", "rbacPath", cs.rbacPath, "error", err)
-			} else {
-				rbacStore.Set(newRBAC)
-				if membership, err := loadRBACFolderMembership(ctx, folderResolver, newRBAC); err != nil {
-					// Same fail-open posture as the rbac.yaml reload above.
-					slog.Error("reconcile: resolve rbac folder scopes", "error", err)
-				} else {
-					rbacStore.SetFolderMembership(membership)
-				}
-			}
-
-			if configErr != nil {
-				continue // no fresh unit list to run this tick's reconcile pass over
-			}
-
-			passCtx := lc.Current() // this leadership term's context, not the raw ctx
-			if passCtx.Err() != nil {
-				continue // not leader
-			}
-			results, err := reconcilerPtr.Load().RunOnce(passCtx, expanded)
-			if err != nil {
-				slog.Error("reconcile: run once", "error", err)
-			}
-			// RunOnce's own error is just the first of possibly several
-			// concurrent failures with no unit attribution (see its comment) —
-			// without this, a unit landing on Invalid/Missing is otherwise
-			// silent: the reason lives only in the applications table's
-			// status column, never in the logs.
-			for _, res := range results {
-				if res.Err != nil {
-					slog.Error("reconcile", "app", res.Unit.App, "project", res.Unit.Project, "error", res.Err)
-				}
-			}
+			tick()
+		case <-nudgeCh:
+			tick()
 		}
 	}
 }

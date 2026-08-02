@@ -7,11 +7,13 @@ import (
 	"testing"
 )
 
-func requestWithBearer(token string) *http.Request {
+// requestWithBearer is always used with the same malformed-JWT string —
+// every offline-rejection test just needs *some* bearer token present so
+// Verify gets far enough to actually exercise its own parsing, not
+// bearerToken's separate missing-header check.
+func requestWithBearer() *http.Request {
 	r := httptest.NewRequestWithContext(context.Background(), http.MethodPost, "/", nil)
-	if token != "" {
-		r.Header.Set("Authorization", "Bearer "+token)
-	}
+	r.Header.Set("Authorization", "Bearer not-a-jwt")
 	return r
 }
 
@@ -22,7 +24,7 @@ func requestWithBearer(token string) *http.Request {
 // repo's "no real GCP calls in tests" posture.
 func TestGoogleAuthenticator_MalformedTokenRejected(t *testing.T) {
 	g := &GoogleAuthenticator{Audience: "test-client-id"}
-	_, err := g.Verify(requestWithBearer("not-a-jwt"))
+	_, err := g.Verify(requestWithBearer())
 	if err == nil {
 		t.Fatal("expected a malformed token to be rejected")
 	}
@@ -44,8 +46,42 @@ func TestGoogleAuthenticator_MissingBearerTokenRejected(t *testing.T) {
 // idToken is.
 func TestGoogleAuthenticator_EmptyAudienceFailsClosed(t *testing.T) {
 	g := &GoogleAuthenticator{Audience: ""}
-	if _, err := g.Verify(requestWithBearer("not-a-jwt")); err == nil {
+	if _, err := g.Verify(requestWithBearer()); err == nil {
 		t.Fatal("expected Verify to fail closed when Audience is empty")
+	}
+}
+
+func TestEventarcAuthenticator_MalformedTokenRejected(t *testing.T) {
+	e := &EventarcAuthenticator{Audience: "test-aud", ServiceAccount: "trigger@example.iam.gserviceaccount.com"}
+	if _, err := e.Verify(requestWithBearer()); err == nil {
+		t.Fatal("expected a malformed token to be rejected")
+	}
+}
+
+func TestEventarcAuthenticator_MissingBearerTokenRejected(t *testing.T) {
+	e := &EventarcAuthenticator{Audience: "test-aud", ServiceAccount: "trigger@example.iam.gserviceaccount.com"}
+	if _, err := e.Verify(httptest.NewRequestWithContext(context.Background(), http.MethodPost, "/", nil)); err == nil {
+		t.Fatal("expected a request with no Authorization header to be rejected")
+	}
+}
+
+// TestEventarcAuthenticator_EmptyAudienceFailsClosed mirrors
+// GoogleAuthenticator's identical fail-closed requirement: idtoken.Validate
+// treats an empty audience as "skip the check."
+func TestEventarcAuthenticator_EmptyAudienceFailsClosed(t *testing.T) {
+	e := &EventarcAuthenticator{Audience: "", ServiceAccount: "trigger@example.iam.gserviceaccount.com"}
+	if _, err := e.Verify(requestWithBearer()); err == nil {
+		t.Fatal("expected Verify to fail closed when Audience is empty")
+	}
+}
+
+// TestEventarcAuthenticator_EmptyServiceAccountFailsClosed is this type's
+// own extra requirement beyond GoogleAuthenticator's: an empty
+// ServiceAccount must never be treated as "accept any caller."
+func TestEventarcAuthenticator_EmptyServiceAccountFailsClosed(t *testing.T) {
+	e := &EventarcAuthenticator{Audience: "test-aud", ServiceAccount: ""}
+	if _, err := e.Verify(requestWithBearer()); err == nil {
+		t.Fatal("expected Verify to fail closed when ServiceAccount is empty")
 	}
 }
 
