@@ -68,6 +68,22 @@ data "google_project" "this" {
   project_id = var.project_id
 }
 
+# Docker-PutManifest is a Data Access ("Data Write") audit log entry, and
+# Data Access logs are OFF by default for every service except some
+# BigQuery ones — without this, the trigger below is created and looks
+# healthy, but Artifact Registry never actually emits the log entries it's
+# listening for, so it silently never fires. Scoped to just this one
+# service, not "allServices" — this resource is authoritative for whatever
+# it's scoped to, so keeping it per-service means it can't clobber some
+# unrelated service's own audit config.
+resource "google_project_iam_audit_config" "artifact_registry_data_write" {
+  project = var.project_id
+  service = "artifactregistry.googleapis.com"
+  audit_log_config {
+    log_type = "DATA_WRITE"
+  }
+}
+
 resource "google_eventarc_trigger" "image_push" {
   name     = var.trigger_name
   project  = var.project_id
@@ -99,5 +115,6 @@ resource "google_eventarc_trigger" "image_push" {
     google_project_iam_member.event_receiver,
     google_cloud_run_v2_service_iam_member.run_invoker,
     google_project_iam_member.pubsub_token_creator,
+    google_project_iam_audit_config.artifact_registry_data_write,
   ]
 }

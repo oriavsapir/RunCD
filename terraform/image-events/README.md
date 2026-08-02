@@ -10,6 +10,12 @@ auto-reconcile loop to run within seconds instead of waiting out the rest of
 **Status:** module shape only, not yet invoked against a real project — see
 `examples/minimal`.
 
+Also enables Data Access (`DATA_WRITE`) audit logging for
+`artifactregistry.googleapis.com` in the project — Data Access logs are off
+by default for every service except some BigQuery ones, and
+`Docker-PutManifest` is one, so without this the trigger exists but
+Artifact Registry never actually emits the log entries it's listening for.
+
 Purely additive: the controller's `POST /api/events/image` route is always
 registered and does nothing unless both `RUNCD_IMAGE_EVENTS_AUDIENCE` and
 `RUNCD_IMAGE_EVENTS_SERVICE_ACCOUNT` are set on it — deleting this module's
