@@ -7,7 +7,14 @@ import * as api from "@/lib/api";
 describe("SyncButton", () => {
   it("is disabled when canSync is false — the RBAC gate (§5.11)", () => {
     render(
-      <SyncButton unit={{ app: "widget-api", project: "example-prod-eu", canSync: false, observing: false }} />,
+      <SyncButton
+        unit={{
+          app: "widget-api",
+          project: "example-prod-eu",
+          canSync: false,
+          observing: false,
+        }}
+      />,
     );
     expect(screen.getByRole("button", { name: /sync/i })).toBeDisabled();
   });
@@ -22,7 +29,12 @@ describe("SyncButton", () => {
     const onSynced = vi.fn();
     render(
       <SyncButton
-        unit={{ app: "widget-api", project: "example-prod-eu", canSync: true, observing: false }}
+        unit={{
+          app: "widget-api",
+          project: "example-prod-eu",
+          canSync: true,
+          observing: false,
+        }}
         onSynced={onSynced}
       />,
     );
@@ -48,13 +60,57 @@ describe("SyncButton", () => {
       health: "Healthy",
     });
     render(
-      <SyncButton unit={{ app: "widget-api", project: "example-prod-eu", canSync: true, observing: false }} />,
+      <SyncButton
+        unit={{
+          app: "widget-api",
+          project: "example-prod-eu",
+          canSync: true,
+          observing: false,
+        }}
+      />,
     );
 
     await userEvent.click(screen.getByRole("button", { name: /sync/i }));
-    await userEvent.click(await screen.findByRole("button", { name: /cancel/i }));
+    await userEvent.click(
+      await screen.findByRole("button", { name: /cancel/i }),
+    );
 
     expect(spy).not.toHaveBeenCalled();
+  });
+
+  it("closes the confirmation dialog gracefully if canSync flips false while it's open", async () => {
+    const { rerender } = render(
+      <SyncButton
+        unit={{
+          app: "widget-api",
+          project: "example-prod-eu",
+          canSync: true,
+          observing: false,
+        }}
+      />,
+    );
+
+    await userEvent.click(screen.getByRole("button", { name: /sync/i }));
+    expect(
+      await screen.findByRole("button", { name: /sync now/i }),
+    ).toBeInTheDocument();
+
+    rerender(
+      <SyncButton
+        unit={{
+          app: "widget-api",
+          project: "example-prod-eu",
+          canSync: false,
+          observing: false,
+        }}
+      />,
+    );
+
+    await waitFor(() =>
+      expect(
+        screen.queryByRole("button", { name: /sync now/i }),
+      ).not.toBeInTheDocument(),
+    );
   });
 
   it("shows the server error inline instead of silently failing", async () => {
@@ -62,11 +118,20 @@ describe("SyncButton", () => {
       new api.ApiError("forbidden: no role grants sync access", 403),
     );
     render(
-      <SyncButton unit={{ app: "widget-api", project: "example-prod-eu", canSync: true, observing: false }} />,
+      <SyncButton
+        unit={{
+          app: "widget-api",
+          project: "example-prod-eu",
+          canSync: true,
+          observing: false,
+        }}
+      />,
     );
 
     await userEvent.click(screen.getByRole("button", { name: /sync/i }));
-    await userEvent.click(await screen.findByRole("button", { name: /sync now/i }));
+    await userEvent.click(
+      await screen.findByRole("button", { name: /sync now/i }),
+    );
 
     await waitFor(() =>
       expect(

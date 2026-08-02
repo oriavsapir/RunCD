@@ -174,7 +174,15 @@ func (e *Evaluator) maybeNotify(ctx context.Context, res reconcile.Result, rule,
 		return fmt.Errorf("send notification for %s/%s/%s: %w", res.Unit.App, res.Unit.Project, rule, err)
 	}
 
-	if _, err := e.DB.ExecContext(ctx, `
+	// context.WithoutCancel, same as the revert path above: the send just
+	// succeeded, so a cancellation landing right now (leadership lost,
+	// SIGTERM) must not stop this write — without it, the claim expires on
+	// its own in claimTTL with last_notified_at never bumped, and the same
+	// alert fires again well inside the debounce window (the mirror image
+	// of the dropped-notification bug this two-phase claim was built to fix).
+	confirmCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
+	defer cancel()
+	if _, err := e.DB.ExecContext(confirmCtx, `
 		UPDATE notification_debounce SET last_notified_at = now(), claim_expires_at = NULL
 		WHERE application = $1 AND target_gcp_project = $2 AND rule = $3`,
 		res.Unit.App, res.Unit.Project, rule,

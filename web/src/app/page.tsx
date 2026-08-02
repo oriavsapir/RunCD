@@ -33,6 +33,31 @@ import { usePolling } from "@/lib/use-polling";
 type ViewMode = "projects" | "table" | "tree";
 const VIEW_MODES: ViewMode[] = ["projects", "table", "tree"];
 
+function deriveViewState(searchParams: URLSearchParams): {
+  view: ViewMode;
+  selectedProject: string | null;
+} {
+  const project = searchParams.get("project");
+  const rawView = searchParams.get("view");
+  if (project) {
+    // A project filter paired with the "projects" grid (or no view at all)
+    // is a self-perpetuating inconsistent state — the "Project: X" chip
+    // shows, but the grid still lists every project. Table is the natural
+    // fallback (the same view clicking a project card lands on), while an
+    // explicit tree stays respected.
+    return {
+      view: rawView === "tree" ? "tree" : "table",
+      selectedProject: project,
+    };
+  }
+  return {
+    view: VIEW_MODES.includes(rawView as ViewMode)
+      ? (rawView as ViewMode)
+      : "projects",
+    selectedProject: null,
+  };
+}
+
 // Without this, a live rollout (or another operator's sync) looks frozen
 // until someone happens to click Refresh — this is a silent background
 // poll, not tied to `refreshing`, so it doesn't spin the Refresh button or
@@ -98,33 +123,33 @@ function SyncUnitsPage() {
   // correct and just as useful for "is this stale" during an incident.
   const [lastUpdatedAt, setLastUpdatedAt] = useState<Date | null>(null);
   const [query, setQuery] = useState("");
-  // Separate from query (free-text substring search): a project card click
-  // means "only this exact project," not "anything containing this
-  // string" — reusing query's substring match would also show, say,
-  // "acme-staging" when the user clicked "acme".
-  //
-  // Both seeded from the URL (and kept in sync with it below) so a
-  // refresh — or a shared link — lands back on the same drill-down
-  // instead of always resetting to the project-grid default.
-  const [selectedProject, setSelectedProject] = useState<string | null>(() =>
-    searchParams.get("project"),
-  );
-  // Projects first: at real scale (many projects, each with a handful of
-  // apps) a flat table/tree of every sync unit stops being scannable —
-  // this is "which project needs my attention," with table/tree reachable
-  // by drilling into one project or switching manually.
-  const [view, setView] = useState<ViewMode>(() => {
-    const v = searchParams.get("view");
-    return VIEW_MODES.includes(v as ViewMode) ? (v as ViewMode) : "projects";
-  });
+  // view/selectedProject live only in the URL, not in local state — a
+  // separate useState copy synced back and forth via an effect either goes
+  // stale (browser Back/Forward wouldn't touch it) or fights the effect
+  // that writes it. Deriving fresh from searchParams every render means
+  // there's exactly one source of truth, and Back/Forward "just work"
+  // since Next re-renders this page with updated searchParams on its own.
+  const { view, selectedProject } = deriveViewState(searchParams);
 
-  useEffect(() => {
+  function updateViewState(patch: {
+    view?: ViewMode;
+    selectedProject?: string | null;
+  }) {
+    const nextView = patch.view ?? view;
+    const nextProject =
+      "selectedProject" in patch ? patch.selectedProject : selectedProject;
     const params = new URLSearchParams();
-    if (view !== "projects") params.set("view", view);
-    if (selectedProject) params.set("project", selectedProject);
+    if (nextProject) {
+      params.set("project", nextProject);
+      // Table is deriveViewState's default for a project filter; only tree
+      // needs to be spelled out explicitly to round-trip correctly.
+      if (nextView === "tree") params.set("view", "tree");
+    } else if (nextView !== "projects") {
+      params.set("view", nextView);
+    }
     const qs = params.toString();
     router.replace(qs ? `${pathname}?${qs}` : pathname, { scroll: false });
-  }, [view, selectedProject, pathname, router]);
+  }
 
   useEffect(() => {
     let cancelled = false;
@@ -326,7 +351,7 @@ function SyncUnitsPage() {
                   {selectedProject}
                   <button
                     type="button"
-                    onClick={() => setSelectedProject(null)}
+                    onClick={() => updateViewState({ selectedProject: null })}
                     aria-label={`Clear project filter (${selectedProject})`}
                     className="hover:text-foreground"
                   >
@@ -342,7 +367,7 @@ function SyncUnitsPage() {
                   value={query}
                   onChange={(e) => {
                     setQuery(e.target.value);
-                    setSelectedProject(null);
+                    updateViewState({ selectedProject: null });
                   }}
                   placeholder="Filter by app, project, or environment…"
                   aria-label="Filter by app, project, or environment"
@@ -354,8 +379,11 @@ function SyncUnitsPage() {
                 value={[view]}
                 onValueChange={(v) => {
                   const next = v.find((x) => x !== view) ?? v[0];
-                  if (next === "projects") setSelectedProject(null);
-                  if (next) setView(next as ViewMode);
+                  if (!next) return;
+                  updateViewState({
+                    view: next as ViewMode,
+                    ...(next === "projects" ? { selectedProject: null } : {}),
+                  });
                 }}
               >
                 <ToggleGroupItem value="projects" aria-label="Project view">
@@ -372,10 +400,9 @@ function SyncUnitsPage() {
             {view === "projects" ? (
               <ProjectGrid
                 units={filtered ?? []}
-                onSelectProject={(project) => {
-                  setSelectedProject(project);
-                  setView("table");
-                }}
+                onSelectProject={(project) =>
+                  updateViewState({ selectedProject: project, view: "table" })
+                }
               />
             ) : view === "table" ? (
               <UnitTable

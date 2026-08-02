@@ -63,6 +63,20 @@ export function SyncButton({
     };
   }, []);
 
+  const syncAllowed = unit.canSync && !unit.observing;
+
+  // canSync is re-derived server-side and can flip false mid-session (an
+  // RBAC hot-reload landing between polls) while the confirm dialog is
+  // open. Rendering the disabled Tooltip branch below unconditionally on
+  // !syncAllowed would unmount the open AlertDialog out from under the
+  // user instead of closing it — adjusting state during render (not in an
+  // effect) closes it first, within the same render that noticed the flip.
+  const [prevSyncAllowed, setPrevSyncAllowed] = useState(syncAllowed);
+  if (syncAllowed !== prevSyncAllowed) {
+    setPrevSyncAllowed(syncAllowed);
+    if (!syncAllowed) setOpen(false);
+  }
+
   async function handleConfirm() {
     if (fadeTimer.current) {
       clearTimeout(fadeTimer.current);
@@ -93,7 +107,6 @@ export function SyncButton({
     }
   }
 
-  const syncAllowed = unit.canSync && !unit.observing;
   const button = (
     <Button size={size} variant="outline" disabled={!syncAllowed || pending}>
       <RefreshCw className={pending ? "animate-spin" : undefined} />
@@ -103,7 +116,7 @@ export function SyncButton({
 
   return (
     <div className="flex flex-col items-end gap-1">
-      {syncAllowed ? (
+      {syncAllowed || open ? (
         <AlertDialog
           open={open}
           onOpenChange={(next) => {
