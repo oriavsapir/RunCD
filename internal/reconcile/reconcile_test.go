@@ -1624,6 +1624,33 @@ func TestDryRun_ObserveModeSurfacesObserving(t *testing.T) {
 	}
 }
 
+// TestDryRun_ObservingSetEvenWhenUnitIsMissing is the regression test for a
+// real gap: Observing was only ever set on applyLiveState's success path, so
+// an observing unit that's Missing (not yet provisioned) reported
+// Observing=false — exactly the case an operator most needs the real value
+// for, since it's another reason nothing has deployed yet.
+func TestDryRun_ObservingSetEvenWhenUnitIsMissing(t *testing.T) {
+	db := testutil.NewPostgres(t)
+	cr := &fakeCloudRun{services: map[string]*cloudrun.LiveService{}}
+	r := &Reconciler{
+		DB:            db,
+		ManagedFields: []string{"image"},
+		Manifests:     &fakeManifests{byApp: map[string][]byte{"widget-api": serviceYAML()}},
+		CloudRun:      cr,
+		Preconditions: &fakePreconditions{},
+	}
+
+	unit := expander.SyncUnit{App: "widget-api", Project: "example-prod-us", Sync: observeSync()}
+	res := r.DryRun(context.Background(), unit)
+
+	if res.Status != StatusMissing {
+		t.Fatalf("expected Missing status for an unprovisioned unit, got %+v", res)
+	}
+	if !res.Observing {
+		t.Fatalf("expected Observing=true even on the Missing/fetch-error path, got %+v", res)
+	}
+}
+
 func TestDryRun_DoesNotBlockAConcurrentRealSync(t *testing.T) {
 	db := testutil.NewPostgres(t)
 	cr := &fakeCloudRun{services: map[string]*cloudrun.LiveService{

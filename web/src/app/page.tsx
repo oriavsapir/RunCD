@@ -351,7 +351,15 @@ function SyncUnitsPage() {
                   {selectedProject}
                   <button
                     type="button"
-                    onClick={() => updateViewState({ selectedProject: null })}
+                    onClick={() => {
+                      // Also clears query, not just selectedProject —
+                      // leaving a stale, possibly-forgotten search term in
+                      // place would otherwise silently reactivate the
+                      // moment the project filter clears, re-filtering the
+                      // table with no visible explanation for why.
+                      setQuery("");
+                      updateViewState({ selectedProject: null });
+                    }}
                     aria-label={`Clear project filter (${selectedProject})`}
                     className="hover:text-foreground"
                   >
@@ -367,7 +375,12 @@ function SyncUnitsPage() {
                   value={query}
                   onChange={(e) => {
                     setQuery(e.target.value);
-                    updateViewState({ selectedProject: null });
+                    // Only when there's actually a project filter to clear
+                    // — otherwise every keystroke would fire a
+                    // router.replace with nothing to change.
+                    if (selectedProject) {
+                      updateViewState({ selectedProject: null });
+                    }
                   }}
                   placeholder="Filter by app, project, or environment…"
                   aria-label="Filter by app, project, or environment"

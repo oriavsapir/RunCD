@@ -120,4 +120,60 @@ describe("Home", () => {
     );
     expect(screen.queryByText("widget-api")).not.toBeInTheDocument();
   });
+
+  it("clearing the project filter chip also clears a stale search query", async () => {
+    vi.spyOn(api, "listUnits").mockResolvedValue([
+      unit({ app: "widget-api", project: "acme" }),
+      unit({ app: "other-app", project: "acme-staging" }),
+    ]);
+
+    render(<Home />);
+    await waitFor(() => expect(screen.getByText("acme")).toBeInTheDocument());
+
+    // Type a query first, then select a project — selecting a project
+    // doesn't clear a pre-existing query, it's just superseded while a
+    // project filter is active. "widget" still leaves the "acme" card
+    // visible (it still has a matching unit), unlike a query that would
+    // filter the card away entirely before it could be clicked.
+    await userEvent.type(
+      screen.getByPlaceholderText(/filter by app, project/i),
+      "widget",
+    );
+    await userEvent.click(screen.getByText("acme"));
+    await waitFor(() =>
+      expect(screen.getByText("widget-api")).toBeInTheDocument(),
+    );
+
+    await userEvent.click(
+      screen.getByRole("button", { name: /clear project filter/i }),
+    );
+
+    // Without the fix, the stale "widget" query would silently reactivate
+    // once the project filter cleared, hiding other-app again.
+    await waitFor(() =>
+      expect(screen.getByText("widget-api")).toBeInTheDocument(),
+    );
+    expect(screen.getByText("other-app")).toBeInTheDocument();
+    expect(screen.getByPlaceholderText(/filter by app, project/i)).toHaveValue(
+      "",
+    );
+  });
+
+  it("typing in search while no project is selected doesn't call router.replace", async () => {
+    vi.spyOn(api, "listUnits").mockResolvedValue([
+      unit({ app: "widget-api", project: "acme" }),
+      unit({ app: "other-app", project: "acme-staging" }),
+    ]);
+
+    render(<Home />);
+    await waitFor(() => expect(screen.getByText("acme")).toBeInTheDocument());
+
+    replaceMock.mockClear();
+    await userEvent.type(
+      screen.getByPlaceholderText(/filter by app, project/i),
+      "widget",
+    );
+
+    expect(replaceMock).not.toHaveBeenCalled();
+  });
 });

@@ -22,7 +22,12 @@ function groupByEnv(units: Unit[]): Map<string, Unit[]> {
     groups.set(u.env, list);
   }
   for (const list of groups.values()) {
-    list.sort((a, b) => (a.project + a.app).localeCompare(b.project + b.app));
+    // "\x00"-joined, not a bare concatenation — project/app names could
+    // otherwise collide across the boundary (e.g. "acme"+"api" ==
+    // "acmea"+"pi"), same convention as gitsource's cache key.
+    list.sort((a, b) =>
+      `${a.project}\x00${a.app}`.localeCompare(`${b.project}\x00${b.app}`),
+    );
   }
   return groups;
 }

@@ -1,6 +1,9 @@
 package config
 
-import "testing"
+import (
+	"fmt"
+	"testing"
+)
 
 func TestParse_Valid(t *testing.T) {
 	yaml := []byte(`
@@ -148,6 +151,45 @@ notify:
 `)
 	if _, err := Parse(yaml); err == nil {
 		t.Fatal("expected error for outOfSyncGated missing forHours")
+	}
+}
+
+// TestParse_NonPositiveForMinutesRejected guards against a negative or zero
+// forMinutes reaching internal/notify, where it would embed into the
+// notification_debounce.rule key (e.g. "healthDegraded:-5") and silently
+// fail a DB CHECK constraint on every insert — the rule would just never
+// fire, with nothing surfaced beyond a repeating log line.
+func TestParse_NonPositiveForMinutesRejected(t *testing.T) {
+	for _, v := range []int{0, -5} {
+		yaml := []byte(fmt.Sprintf(`
+environments:
+  dev:
+    projects: [example-dev-01]
+notify:
+  rules:
+    - on: healthDegraded
+      forMinutes: %d
+`, v))
+		if _, err := Parse(yaml); err == nil {
+			t.Fatalf("expected error for healthDegraded forMinutes=%d", v)
+		}
+	}
+}
+
+func TestParse_NonPositiveForHoursRejected(t *testing.T) {
+	for _, v := range []int{0, -1} {
+		yaml := []byte(fmt.Sprintf(`
+environments:
+  dev:
+    projects: [example-dev-01]
+notify:
+  rules:
+    - on: outOfSyncGated
+      forHours: %d
+`, v))
+		if _, err := Parse(yaml); err == nil {
+			t.Fatalf("expected error for outOfSyncGated forHours=%d", v)
+		}
 	}
 }
 

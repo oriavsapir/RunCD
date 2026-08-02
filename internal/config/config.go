@@ -325,9 +325,21 @@ func Parse(data []byte) (*Root, error) {
 			if rule.ForMinutes == nil {
 				return nil, fmt.Errorf("notify.rules: %q requires forMinutes", rule.On)
 			}
+			// A non-positive value isn't just semantically odd — it embeds
+			// into the notification_debounce.rule key as
+			// "healthDegraded:<n>", which a DB CHECK constraint restricts to
+			// digits only (internal/store/migrations/00002_notify.sql); a
+			// negative n fails that constraint on every insert, so the rule
+			// would never fire at all, silently.
+			if *rule.ForMinutes <= 0 {
+				return nil, fmt.Errorf("notify.rules: %q forMinutes must be positive, got %d", rule.On, *rule.ForMinutes)
+			}
 		case "outOfSyncGated":
 			if rule.ForHours == nil {
 				return nil, fmt.Errorf("notify.rules: %q requires forHours", rule.On)
+			}
+			if *rule.ForHours <= 0 {
+				return nil, fmt.Errorf("notify.rules: %q forHours must be positive, got %d", rule.On, *rule.ForHours)
 			}
 		default:
 			return nil, fmt.Errorf("notify.rules: %q is not a known rule (syncFailed, healthDegraded, outOfSyncGated)", rule.On)

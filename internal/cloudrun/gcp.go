@@ -87,14 +87,21 @@ func (c *GCPAdminClient) servicesClient(ctx context.Context, region string) (*ru
 		}
 		c.mu.Unlock()
 
-		// context.WithoutCancel: shared via singleflight across every
-		// concurrent caller for this region, not just the one that
-		// triggered it — see the identical note in precondition/gcp.go.
-		// Rebounded with apiCallTimeout so a hung dial can't wedge every
-		// other caller sharing this singleflight key forever.
-		constructCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), apiCallTimeout)
-		defer cancel()
-		sc, err := run.NewServicesClient(constructCtx, regionalEndpoint(region))
+		// context.WithoutCancel, deliberately with no additional deadline:
+		// shared via singleflight across every concurrent caller for this
+		// region, not just the one that triggered it (see the identical
+		// note in precondition/gcp.go) — AND this client is cached for the
+		// life of the process, so whatever context we hand NewServicesClient
+		// here is retained by its resolved credentials for every future
+		// token refresh, not just this construction call. For JSON-key/
+		// authorized-user ADC (golang.org/x/oauth2/jwt's jwtSource captures
+		// exactly the context TokenSource(ctx) is given), a context.WithTimeout
+		// here — even with cancel() only deferred, never explicitly fired —
+		// still expires on its own deadline and permanently breaks every
+		// later refresh on this cached client. A hung construction call is
+		// the lesser risk: it only ever affects the region that's actually
+		// wedged, not every previously-constructed client for every region.
+		sc, err := run.NewServicesClient(context.WithoutCancel(ctx), regionalEndpoint(region))
 		if err != nil {
 			return nil, fmt.Errorf("create Cloud Run services client for %s: %w", region, err)
 		}
@@ -125,11 +132,8 @@ func (c *GCPAdminClient) workerPoolsClient(ctx context.Context, region string) (
 		}
 		c.mu.Unlock()
 
-		// Rebounded with apiCallTimeout — see the identical note in
-		// servicesClient above.
-		constructCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), apiCallTimeout)
-		defer cancel()
-		wc, err := run.NewWorkerPoolsClient(constructCtx, regionalEndpoint(region))
+		// No deadline here — see the identical note in servicesClient above.
+		wc, err := run.NewWorkerPoolsClient(context.WithoutCancel(ctx), regionalEndpoint(region))
 		if err != nil {
 			return nil, fmt.Errorf("create Cloud Run workerPools client for %s: %w", region, err)
 		}
@@ -160,11 +164,8 @@ func (c *GCPAdminClient) jobsClient(ctx context.Context, region string) (*run.Jo
 		}
 		c.mu.Unlock()
 
-		// Rebounded with apiCallTimeout — see the identical note in
-		// servicesClient above.
-		constructCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), apiCallTimeout)
-		defer cancel()
-		jc, err := run.NewJobsClient(constructCtx, regionalEndpoint(region))
+		// No deadline here — see the identical note in servicesClient above.
+		jc, err := run.NewJobsClient(context.WithoutCancel(ctx), regionalEndpoint(region))
 		if err != nil {
 			return nil, fmt.Errorf("create Cloud Run jobs client for %s: %w", region, err)
 		}
@@ -195,11 +196,8 @@ func (c *GCPAdminClient) executionsClient(ctx context.Context, region string) (*
 		}
 		c.mu.Unlock()
 
-		// Rebounded with apiCallTimeout — see the identical note in
-		// servicesClient above.
-		constructCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), apiCallTimeout)
-		defer cancel()
-		ec, err := run.NewExecutionsClient(constructCtx, regionalEndpoint(region))
+		// No deadline here — see the identical note in servicesClient above.
+		ec, err := run.NewExecutionsClient(context.WithoutCancel(ctx), regionalEndpoint(region))
 		if err != nil {
 			return nil, fmt.Errorf("create Cloud Run executions client for %s: %w", region, err)
 		}

@@ -273,6 +273,14 @@ func (r *Reconciler) reconcileOne(ctx context.Context, unit expander.SyncUnit, n
 
 func (r *Reconciler) reconcile(ctx context.Context, unit expander.SyncUnit, opts syncOptions) Result {
 	res := Result{Unit: unit}
+	// Set here, unconditionally, before any early return (manifest fetch/
+	// parse failure, the job+managed-env rejection below, or the fetch
+	// failure paths in applyLiveState) — Observing's contract per its own
+	// doc comment is "computed unconditionally," and a unit that's Missing
+	// or hit a transient fetch error is exactly when an operator most needs
+	// to know shadow mode is the reason nothing deployed, not the one case
+	// where the field silently reports false regardless of the real value.
+	res.Observing = observeModeEnabled(unit.Sync)
 
 	raw, err := r.Manifests.Get(ctx, unit)
 	if err != nil {
@@ -435,11 +443,9 @@ func (r *Reconciler) applyLiveState(ctx context.Context, res Result, unit expand
 	}
 
 	blocked := res.Status == StatusInvalid || res.Status == StatusMissing
-	observing := observeModeEnabled(unit.Sync)
-	res.Observing = observing
 	autoAllowed := autoSyncEnabled(unit.Sync) && config.WindowsAllow(unit.Sync.SyncWindows, opts.now)
 	wouldDeploy := !opts.dryRun && !blocked && (opts.force || (res.Status == string(diff.OutOfSync) && autoAllowed))
-	if wouldDeploy && observing {
+	if wouldDeploy && res.Observing {
 		// Auto-sync just silently skips the deploy this tick — Status/
 		// Health above already reflect real drift, which is the entire
 		// point of shadow mode (record the decision, don't act on it). A

@@ -22,12 +22,14 @@ import (
 // stale indefinitely.
 const DefaultExistsCacheTTL = 60 * time.Second
 
-// precondCallTimeout bounds both the singleflight-shared client construction
-// below and the actual Exists call — both run under context.WithoutCancel
-// (detached from whichever caller happened to trigger them), so without an
-// upper bound of their own a hung dial/RPC would block forever and wedge
-// every other concurrent caller sharing that singleflight key, not just the
-// one that started it. Same value and rationale as cloudrun.apiCallTimeout.
+// precondCallTimeout bounds the actual Exists RPC in checkExists, which runs
+// under context.WithoutCancel (detached from whichever caller happened to
+// trigger it via singleflight) — without an upper bound of its own, a hung
+// RPC would block forever and wedge every other concurrent caller sharing
+// that singleflight key, not just the one that started it. Deliberately NOT
+// used for client()'s construction call — see its own comment for why a
+// cached, credentialed client can't be handed a context with any deadline,
+// not even one whose cancel() is only deferred.
 const precondCallTimeout = 30 * time.Second
 
 type existsCacheEntry struct {
@@ -84,15 +86,20 @@ func (c *GCPChecker) client(ctx context.Context, project string) (*pubsub.Client
 		}
 		c.mu.Unlock()
 
-		// context.WithoutCancel: this construction is shared via
-		// singleflight across every concurrent caller for this project,
-		// not just the one whose ctx happened to trigger it — using that
-		// caller's ctx directly would fail every other waiter's client
-		// lookup too if that one caller's context is cancelled/times out
-		// mid-construction, even though their own contexts are still valid.
-		constructCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), precondCallTimeout)
-		defer cancel()
-		cl, err := pubsub.NewClient(constructCtx, project)
+		// context.WithoutCancel, deliberately with no additional deadline:
+		// this construction is shared via singleflight across every
+		// concurrent caller for this project, not just the one whose ctx
+		// happened to trigger it — AND this client is cached for the life
+		// of the process, so whatever context pubsub.NewClient is handed
+		// here is retained by its resolved credentials for every future
+		// token refresh, not just this call. For JSON-key/authorized-user
+		// ADC (golang.org/x/oauth2/jwt's jwtSource captures exactly the
+		// context TokenSource(ctx) is given), a context.WithTimeout here —
+		// even with cancel() only deferred, never explicitly fired — still
+		// expires on its own deadline and permanently breaks every later
+		// refresh on this cached client. See the identical note in
+		// cloudrun/gcp.go's servicesClient.
+		cl, err := pubsub.NewClient(context.WithoutCancel(ctx), project)
 		if err != nil {
 			return nil, fmt.Errorf("create pubsub client for %s: %w", project, err)
 		}
@@ -132,9 +139,13 @@ func (c *GCPChecker) checkExists(ctx context.Context, kind, project, name string
 			return false, err
 		}
 		// context.WithoutCancel: shared via singleflight across every
-		// concurrent caller for this kind/project/name — see the identical
-		// note on client() above. Rebounded with precondCallTimeout for the
-		// same reason.
+		// concurrent caller for this kind/project/name — same reasoning as
+		// client()'s WithoutCancel above. Unlike client(), this one call is
+		// safe to also bound with a deadline: it's a single per-RPC Exists
+		// check on an already-constructed, already-cached client, not
+		// something whose resolved credentials retain this context for
+		// future token refreshes — so a timeout here can't cause the
+		// permanent-refresh-breakage client() has to avoid.
 		fetchCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), precondCallTimeout)
 		defer cancel()
 		exists, err := fetch(fetchCtx, cl)
