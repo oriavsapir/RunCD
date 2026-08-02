@@ -1,7 +1,7 @@
 // Package cloudrun defines the controller's view of live Cloud Run state.
-// No real Cloud Run Admin API calls are wired up yet (Phase 1 is read-only,
-// diff/health only) — AdminClient is an interface so the reconcile loop can
-// be built and tested against a fake today and a real client later.
+// AdminClient is an interface so the reconcile loop can be tested against a
+// fake instead of live GCP calls; GCPAdminClient (gcp.go) is the real
+// implementation.
 package cloudrun
 
 import (
@@ -15,9 +15,7 @@ import (
 // desired digest on an existing resource" (§7).
 var ErrNotProvisioned = errors.New("resource not provisioned: run Terraform first")
 
-// SecretRef is one env var sourced from Secret Manager: name is the env var
-// exposed in the container, Secret/Version identify the Secret Manager
-// secret+version.
+// SecretRef is one env var sourced from Secret Manager.
 type SecretRef struct {
 	Secret  string
 	Version string

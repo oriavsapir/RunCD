@@ -34,7 +34,8 @@ type unit struct {
 	IgnorePreconditions []string `json:"ignorePreconditions"`
 }
 
-// syncEvent mirrors internal/api/units.go's sync_events JSON shape.
+// syncEvent mirrors internal/api/units.go's sync_events shape (see unit's
+// comment for why this is a copy, not an import).
 type syncEvent struct {
 	ID         int64  `json:"id"`
 	Trigger    string `json:"trigger"`
@@ -96,10 +97,14 @@ func (e *apiError) Error() string {
 	return fmt.Sprintf("%s: %s", text, strings.TrimSpace(e.body))
 }
 
+// maxResponseBytes bounds every response body this CLI reads — a
+// misbehaving backend or proxy shouldn't be able to OOM this process on a
+// huge response.
+const maxResponseBytes = 10 << 20 // 10 MiB
+
 // client is a thin wrapper around the runcd HTTP API — no retries, no
 // connection pooling beyond http.DefaultClient's own, matching how small
-// this surface is (five endpoints, all fast, all idempotent-safe to just
-// fail and let the user re-run).
+// and fast this surface is.
 //
 // No client-level Timeout: sync blocks synchronously through the
 // controller's fetch->diff->precondition->deploy->re-fetch sequence,
@@ -107,11 +112,6 @@ func (e *apiError) Error() string {
 // the read endpoints (units/get/history/rbac). Each call site instead
 // gets its own context deadline sized for what it actually does — see
 // main.go.
-// maxResponseBytes bounds every response body this CLI reads — a
-// misbehaving backend or proxy shouldn't be able to OOM this process on a
-// huge response.
-const maxResponseBytes = 10 << 20 // 10 MiB
-
 type client struct {
 	baseURL string
 	token   string // "" if the API isn't behind IAP (or auth is handled some other way in front of this process)
@@ -143,9 +143,6 @@ func (c *client) do(ctx context.Context, method, path string, out any) error {
 	}
 	defer func() { _ = resp.Body.Close() }()
 
-	// Capped at maxResponseBytes, same class of guard already applied to
-	// internal/githubapp's reads — an unbounded io.ReadAll would let a
-	// misbehaving backend or proxy OOM this process on a huge response.
 	body, err := io.ReadAll(io.LimitReader(resp.Body, maxResponseBytes+1))
 	if err != nil {
 		return err
@@ -204,10 +201,9 @@ func (c *client) listOrphans(ctx context.Context) ([]orphan, error) {
 	return orphans, err
 }
 
-// identityTokenTimeout bounds the gcloud subprocess — unlike every network
-// call this CLI makes (each gets its own readTimeout/syncTimeout deadline),
-// this had none at all: a hung or interactive gcloud (a re-auth prompt, a
-// DNS stall) would otherwise block the CLI forever.
+// identityTokenTimeout bounds the gcloud subprocess: a hung or interactive
+// gcloud (a re-auth prompt, a DNS stall) would otherwise block the CLI
+// forever.
 const identityTokenTimeout = 30 * time.Second
 
 // identityToken shells out to gcloud for a Google-signed identity token

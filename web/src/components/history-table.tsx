@@ -52,11 +52,9 @@ function shortDigest(digest?: string): string {
   return i === -1 ? digest.slice(0, 12) : digest.slice(0, i + 9);
 }
 
-// For a finished row this is the real deploy duration; for an in_progress
-// row it's how long it's been running so far — without this, a row stuck
-// in_progress (e.g. the controller crashed mid-deploy before it could
-// update sync_events) looks identical to one that started a second ago,
-// with nothing hinting that it might need attention.
+// For in_progress rows this is elapsed-so-far, not a fixed duration — so a
+// row stuck from a mid-deploy controller crash is visibly stale rather than
+// looking like it just started.
 function formatElapsed(startedAt: string, finishedAt?: string): string {
   const ms =
     (finishedAt ? new Date(finishedAt) : new Date()).getTime() -
@@ -68,7 +66,6 @@ function formatElapsed(startedAt: string, finishedAt?: string): string {
   return `${Math.round(minutes / 60)}h`;
 }
 
-// Sync-history view backed by sync_events, per §5.11.
 export function HistoryTable({ events }: { events: SyncEvent[] }) {
   if (events.length === 0) {
     return (

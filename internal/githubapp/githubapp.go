@@ -64,9 +64,8 @@ type Client struct {
 
 	mu     sync.Mutex
 	tokens map[string]cachedToken // keyed "owner/repo"
-	// installationIDs caches the (effectively permanent) installation ID
-	// per owner/repo so a token remint only has to hit GitHub's
-	// access_tokens endpoint, not also re-discover the installation.
+	// installationIDs caches the installation ID per owner/repo (see
+	// cachedInstallationID for why).
 	installationIDs map[string]int64
 	// minting is a singleflight group keyed "owner/repo" so concurrent
 	// cache misses for the same repo coalesce into one JWT + token-mint

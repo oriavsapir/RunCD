@@ -84,10 +84,8 @@ func bearerToken(r *http.Request) (string, bool) {
 // keys.
 const iapJWKSURL = "https://www.gstatic.com/iap/verify/public_key-jwk"
 
-// iapIssuer is the fixed issuer IAP signs its assertions as.
 const iapIssuer = "https://cloud.google.com/iap"
 
-// jwksFetchTimeout bounds the remote key set's fetch of iapJWKSURL.
 const jwksFetchTimeout = 10 * time.Second
 
 // iapAssertionHeader is the header carrying IAP's signed identity

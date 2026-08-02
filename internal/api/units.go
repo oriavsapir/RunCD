@@ -19,8 +19,6 @@ type UnitLister interface {
 	List() []expander.SyncUnit
 }
 
-// unitView is the dashboard's read model for one sync unit: its declared
-// config plus whatever's been persisted about it, if anything yet.
 type unitView struct {
 	App              string     `json:"app"`
 	Project          string     `json:"project"`
@@ -43,11 +41,10 @@ type unitView struct {
 	// let a human hit Sync and get back a 409 they didn't expect.
 	Observing bool `json:"observing"`
 	// IgnoreFields/IgnorePreconditions surface this app's resource
-	// exclusions (config.App) — without these, a unit whose Status
-	// reflects a diff on an excluded field (e.g. OutOfSync from a traffic
-	// mismatch when ignoreFields: [traffic]) has no way to explain that to
-	// the dashboard, which otherwise only ever compares desiredImage vs
-	// liveImage and would render something contradicting the badge above it.
+	// exclusions (config.App) — without these, a unit whose Status reflects
+	// a diff on an excluded field (e.g. OutOfSync from a traffic mismatch
+	// under ignoreFields: [traffic]) has no way to explain that to the
+	// dashboard, which otherwise only compares desiredImage vs liveImage.
 	IgnoreFields        []string `json:"ignoreFields,omitempty"`
 	IgnorePreconditions []string `json:"ignorePreconditions,omitempty"`
 }
@@ -132,8 +129,6 @@ func (h *Handler) handleListUnits(w http.ResponseWriter, r *http.Request) {
 	_ = json.NewEncoder(w).Encode(views)
 }
 
-// handleUnitDetail serves one sync unit's full state — the same fields as
-// the list view, used by the dashboard's diff view (desired vs live).
 func (h *Handler) handleUnitDetail(w http.ResponseWriter, r *http.Request) {
 	email, ok := verify(w, r, h.Auth)
 	if !ok {
@@ -183,10 +178,9 @@ type dryRunView struct {
 	Observing bool `json:"observing"`
 }
 
-// handleDryRun previews a manual sync (§ dry-run/diff preview): the same
-// fetch/precondition/diff/health computation ManualSync does, but never
-// deploys and never touches the DB — safe to call right before a real sync,
-// or repeatedly, with no side effects.
+// handleDryRun previews a manual sync: the same fetch/precondition/diff/
+// health computation ManualSync does, but never deploys and never touches
+// the DB — safe to call repeatedly with no side effects.
 //
 // RBAC-checked like handleSync, unlike the rest of the read views: those
 // only ever read Postgres, but a dry run makes the same real Cloud
@@ -276,12 +270,10 @@ func (h *Handler) handleOrphans(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	// HasAnyGrant only proved the caller has *some* sync grant somewhere —
-	// scanning is fleet-wide (no single unit to scope the check above
-	// against), but the response must not leak every project's orphans to
-	// a caller only scoped to, say, one env. A project counts as visible
-	// here if the caller can sync at least one currently-configured unit in
-	// it — the same set of projects DetectOrphans itself scanned.
+	// HasAnyGrant only proved the caller has *some* sync grant somewhere; the
+	// response must not leak every project's orphans to a caller scoped to
+	// just one env. A project is visible here if the caller can sync at
+	// least one currently-configured unit in it.
 	folderMembership := h.RBAC.FolderMembership()
 	allowedProjects := make(map[string]bool)
 	for _, u := range units {
@@ -301,15 +293,13 @@ func (h *Handler) handleOrphans(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 	if err != nil {
 		// orphans != nil here (the err/nil-orphans case already returned
-		// above) — some but not all project/region scans failed. 206 says
-		// "this list may be incomplete" rather than a plain 200 a caller
-		// would otherwise read as "these are definitively all the orphans."
+		// above): some but not all project/region scans failed. 206 says
+		// "may be incomplete" rather than a plain 200 read as definitive.
 		w.WriteHeader(http.StatusPartialContent)
 	}
 	_ = json.NewEncoder(w).Encode(views)
 }
 
-// syncEventView is the JSON shape for one sync_events row.
 type syncEventView struct {
 	ID         int64      `json:"id"`
 	Trigger    string     `json:"trigger"`
@@ -322,10 +312,9 @@ type syncEventView struct {
 	Error      string     `json:"error,omitempty"`
 }
 
-// defaultHistoryLimit caps how many sync_events rows the history view
-// returns by default — sync_events is append-only and never pruned (§5.2),
-// so an unbounded query would grow without limit over a unit's lifetime.
-// maxHistoryLimit bounds the "?limit=" override for the same reason.
+// defaultHistoryLimit/maxHistoryLimit bound how many sync_events rows the
+// history view returns — sync_events is append-only and never pruned
+// (§5.2), so an unbounded query (or override) would grow without limit.
 const (
 	defaultHistoryLimit = 50
 	maxHistoryLimit     = 500

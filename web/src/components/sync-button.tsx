@@ -27,20 +27,12 @@ interface SyncButtonProps {
   size?: "default" | "sm";
 }
 
-// justSynced fades on its own after this long — long enough to notice,
-// short enough not to linger once the caller's own refresh has already
-// shown the new status.
 const SUCCESS_MESSAGE_MS = 4000;
 
 // Gated per §5.11: disabled entirely (not just erroring on click) when the
 // logged-in user's RBAC scope doesn't cover this unit. canSync is computed
 // server-side (internal/api/units.go) — the dashboard has no way to
 // evaluate rbac.CanSync itself.
-//
-// A confirmation step before the real deploy fires (this triggers an
-// actual Cloud Run revision, not a preview), plus explicit success
-// feedback afterward — a one-click sync with only a spinner as feedback
-// left no visible confirmation the sync actually happened.
 export function SyncButton({
   unit,
   onSynced,

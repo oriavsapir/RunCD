@@ -75,12 +75,11 @@ func TestAssessService_TrafficMismatchWhileManagedIsProgressing(t *testing.T) {
 // TestAssessService_HealthyWhenTrafficManagedButManifestOmitsIt
 // regression-tests a permanent-Progressing bug: desired.TrafficLatestRevisionPercent
 // is nil whenever the manifest manages traffic but doesn't set a traffic:
-// block, while a real Cloud Run client's live percent is never nil —
-// treating nil-vs-non-nil as a mismatch would report Progressing forever
-// for an otherwise perfectly healthy service (diff.Compute already has
-// this same guard).
+// block, while a real Cloud Run client's live percent is never nil — treating
+// nil-vs-non-nil as a mismatch would report Progressing forever for an
+// otherwise healthy service (diff.Compute has this same guard).
 func TestAssessService_HealthyWhenTrafficManagedButManifestOmitsIt(t *testing.T) {
-	desired := cloudrun.ServiceState{ImageDigest: "sha256:abc"} // no TrafficLatestRevisionPercent
+	desired := cloudrun.ServiceState{ImageDigest: "sha256:abc"}
 	live := cloudrun.LiveService{
 		ServiceState:                cloudrun.ServiceState{ImageDigest: "sha256:abc", TrafficLatestRevisionPercent: intPtr(100)},
 		HasRevisionForDesiredDigest: true,

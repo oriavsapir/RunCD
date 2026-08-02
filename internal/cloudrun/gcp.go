@@ -132,7 +132,7 @@ func (c *GCPAdminClient) workerPoolsClient(ctx context.Context, region string) (
 		}
 		c.mu.Unlock()
 
-		// No deadline here — see the identical note in servicesClient above.
+		// Same singleflight/context.WithoutCancel rationale as servicesClient above.
 		wc, err := run.NewWorkerPoolsClient(context.WithoutCancel(ctx), regionalEndpoint(region))
 		if err != nil {
 			return nil, fmt.Errorf("create Cloud Run workerPools client for %s: %w", region, err)
@@ -164,7 +164,7 @@ func (c *GCPAdminClient) jobsClient(ctx context.Context, region string) (*run.Jo
 		}
 		c.mu.Unlock()
 
-		// No deadline here — see the identical note in servicesClient above.
+		// Same singleflight/context.WithoutCancel rationale as servicesClient above.
 		jc, err := run.NewJobsClient(context.WithoutCancel(ctx), regionalEndpoint(region))
 		if err != nil {
 			return nil, fmt.Errorf("create Cloud Run jobs client for %s: %w", region, err)
@@ -196,7 +196,7 @@ func (c *GCPAdminClient) executionsClient(ctx context.Context, region string) (*
 		}
 		c.mu.Unlock()
 
-		// No deadline here — see the identical note in servicesClient above.
+		// Same singleflight/context.WithoutCancel rationale as servicesClient above.
 		ec, err := run.NewExecutionsClient(context.WithoutCancel(ctx), regionalEndpoint(region))
 		if err != nil {
 			return nil, fmt.Errorf("create Cloud Run executions client for %s: %w", region, err)
@@ -294,8 +294,7 @@ func (c *GCPAdminClient) ListServiceNames(ctx context.Context, project, region s
 	return names, nil
 }
 
-// lastPathSegment extracts a resource's short name from its full path, e.g.
-// "projects/p/locations/r/services/name" -> "name".
+// lastPathSegment: "projects/p/locations/r/services/name" -> "name".
 func lastPathSegment(fullName string) string {
 	i := strings.LastIndex(fullName, "/")
 	if i < 0 {
@@ -335,11 +334,8 @@ func (c *GCPAdminClient) DeployService(ctx context.Context, project, region, nam
 			Percent: percent,
 		}}
 	}
-	// nil EnvVars/SecretRefs (env unmanaged) leaves Env completely
-	// untouched on this freshly-fetched live object — the same
-	// "don't-touch-what-isn't-managed" behavior traffic gets above, just
-	// via omission rather than a nil check, since there's nothing to
-	// assign in that case.
+	// nil EnvVars/SecretRefs (env unmanaged) leaves Env untouched here, same
+	// don't-touch-what-isn't-managed behavior traffic gets above.
 	if desired.EnvVars != nil || desired.SecretRefs != nil {
 		svc.Template.Containers[0].Env = buildEnvVars(desired.EnvVars, desired.SecretRefs)
 	}

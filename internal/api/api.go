@@ -18,16 +18,14 @@ import (
 )
 
 // UnitLookup resolves an (app, project) pair to the sync unit currently
-// known for it. A real implementation is refreshed each reconcile pass;
-// nothing wires that up yet (no git polling exists yet either — see
-// PROGRESS.md), so this stays an interface.
+// known for it. The real implementation (cmd/controller's dynamicUnits) is
+// refreshed each reconcile pass.
 type UnitLookup interface {
 	Find(app, project string) (expander.SyncUnit, bool)
 }
 
 // StaticUnits is the simplest UnitLookup: a fixed map, keyed "app/project".
-// Useful for tests and as a placeholder until a real, live-refreshed lookup
-// exists.
+// Used in tests.
 type StaticUnits map[string]expander.SyncUnit
 
 func (m StaticUnits) Find(app, project string) (expander.SyncUnit, bool) {
@@ -35,7 +33,6 @@ func (m StaticUnits) Find(app, project string) (expander.SyncUnit, bool) {
 	return u, ok
 }
 
-// List implements UnitLister.
 func (m StaticUnits) List() []expander.SyncUnit {
 	out := make([]expander.SyncUnit, 0, len(m))
 	for _, u := range m {
@@ -115,10 +112,8 @@ func (h *Handler) handleSync(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// §5.9: RBAC-checked — everyone authenticated gets read-only by
-	// default, only an admin/syncer rule whose scope covers this unit may
-	// trigger a sync. CanSyncFolders (not plain CanSync) so a rule scoped
-	// via "folder:<id>" is honored too.
+	// CanSyncFolders, not plain CanSync, so a rule scoped via "folder:<id>"
+	// is honored too (§5.9).
 	if !rbac.CanSyncFolders(h.RBAC.Get(), h.RBAC.FolderMembership(), email, unit) {
 		http.Error(w, "forbidden: no role grants sync access to this app/project", http.StatusForbidden)
 		return
@@ -150,13 +145,11 @@ func (h *Handler) handleSync(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if res.Err != nil {
-		// res.Err mixes business-level outcomes (a failed precondition,
-		// say) with genuine infra errors (a raw wrapped GCP/DB error from a
-		// failed live-state fetch or deploy, see reconcile.go) — there's no
-		// reliable way to tell which from here, so none of it goes in the
-		// response body. res.Status/res.Health already tell the caller
-		// something's wrong (Invalid/Missing); the specific reason lives in
-		// sync_events and the server log, not the HTTP response.
+		// res.Err mixes business-level outcomes (failed precondition) with
+		// genuine infra errors (raw wrapped GCP/DB error, see reconcile.go)
+		// with no reliable way to tell which from here, so none of it goes
+		// in the response body — res.Status/res.Health say enough
+		// (Invalid/Missing), the detail lives in sync_events and the log.
 		logSensitive(app, project, email, res.Err)
 	}
 
@@ -164,11 +157,9 @@ func (h *Handler) handleSync(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 	if res.DeployFailed {
 		// A blocked-before-deploy sync (bad manifest, failed precondition)
-		// still gets 200 — res.Status already says Invalid, and nothing
-		// was actually attempted against Cloud Run. A deploy that was
-		// actually attempted and failed is different: a caller gating on
-		// exit code/2xx (the CLI, CI) must not read that as success just
-		// because a JSON body got encoded.
+		// still gets 200 (res.Status already says Invalid). A deploy that
+		// was actually attempted and failed must not read as success to a
+		// caller gating on exit code/2xx (the CLI, CI).
 		w.WriteHeader(http.StatusUnprocessableEntity)
 	}
 	_ = json.NewEncoder(w).Encode(resp)

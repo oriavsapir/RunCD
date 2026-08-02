@@ -57,10 +57,10 @@ func Parse(data []byte) (*Config, error) {
 // posture); a group listed in rbac.yaml only matches if it's passed in
 // directly as subject, not by resolving its members.
 //
-// Equivalent to CanSyncFolders with a nil folderMembership — a "folder:<id>"
-// scope just never matches. Kept as its own function so every call site
-// that doesn't have a resolved folder membership map (most of this
-// package's tests) doesn't need to thread one through for no reason.
+// Equivalent to CanSyncFolders with a nil folderMembership (a "folder:<id>"
+// scope then never matches) — kept as its own function so callers without a
+// resolved folder membership map (most of this package's tests) don't need
+// to thread one through for no reason.
 func CanSync(cfg *Config, subject string, unit expander.SyncUnit) bool {
 	return CanSyncFolders(cfg, nil, subject, unit)
 }
@@ -137,12 +137,8 @@ func HasAnyGrant(cfg *Config, subject string) bool {
 
 // isRecognizedScope reports whether scope is one of the forms scopeMatches
 // actually knows how to evaluate — "*", "env:", "app:", or "folder:" — AND
-// well-formed enough to ever actually match a real unit under those same
-// rules. A typo like "evn:prod" has a non-empty Scope but would never match
-// a real CanSync/CanSyncFolders check, so len(Scope) > 0 alone isn't enough
-// for HasAnyGrant; neither is a bare prefix check — "app:someapp" (missing
-// the "@project" scopeMatches requires) has a recognized prefix but,
-// exactly like the typo, can never match any unit either.
+// well-formed enough to ever match a real unit under those same rules (see
+// HasAnyGrant for why a merely non-empty Scope isn't sufficient).
 func isRecognizedScope(scope string) bool {
 	if scope == "*" {
 		return true

@@ -183,8 +183,6 @@ func newReconcilerPointer(r *reconcile.Reconciler) *atomic.Pointer[reconcile.Rec
 	return p
 }
 
-// postSync builds and sends a sync request, failing the test immediately
-// on any request-construction error rather than risking a nil dereference.
 func postSync(t *testing.T, url, bearerToken string) *http.Response {
 	t.Helper()
 	req, err := http.NewRequestWithContext(context.Background(), http.MethodPost, url, nil)
@@ -288,11 +286,8 @@ func TestHandleSync_InfraErrorReturns500WithoutLeakingDetail(t *testing.T) {
 	}
 }
 
-// TestHandleSync_LockedUnitReturns409 checks that a unit currently locked
-// by another in-flight deploy attempt (see internal/reconcile's
-// sync_locks-backed lock) surfaces as 409, not a generic 500/200 — unlike
-// most res.Err cases, "someone else is already syncing this" is
-// unambiguous and worth telling the caller.
+// TestHandleSync_LockedUnitReturns409 checks a unit locked by another
+// in-flight deploy attempt surfaces as 409, not 500/200.
 func TestHandleSync_LockedUnitReturns409(t *testing.T) {
 	h, _ := newTestHandler(t)
 	db := h.Reconciler.Load().DB.(*sql.DB)
@@ -312,10 +307,8 @@ func TestHandleSync_LockedUnitReturns409(t *testing.T) {
 	}
 }
 
-// TestHandleSync_ObserveModeUnitReturns409 checks a manual sync against a
-// unit whose SyncPolicy has Observe set gets an explicit, actionable 409 —
-// not a 200 that looks like the sync happened when shadow mode silently
-// blocked the deploy.
+// TestHandleSync_ObserveModeUnitReturns409 checks a manual sync against an
+// observe-mode unit gets an explicit 409, not a 200 that looks like success.
 func TestHandleSync_ObserveModeUnitReturns409(t *testing.T) {
 	h, _ := newTestHandler(t)
 	observe := true
@@ -435,8 +428,6 @@ func TestHandleSync_FolderScopeGrantsAccessViaResolvedMembership(t *testing.T) {
 	}
 }
 
-// getWithBearer issues a GET request with an optional bearer token,
-// failing the test immediately on any request-construction error.
 func getWithBearer(t *testing.T, url, bearerToken string) *http.Response {
 	t.Helper()
 	req, err := http.NewRequestWithContext(context.Background(), http.MethodGet, url, nil)
@@ -592,9 +583,6 @@ func TestHandleListUnits_PendingBeforeAnySync(t *testing.T) {
 	}
 }
 
-// TestHandleListUnits_ReflectsPersistedStateAfterSync checks that once a
-// unit has been synced, the list (and detail) endpoints reflect its real
-// persisted status/health instead of Pending.
 func TestHandleListUnits_ReflectsPersistedStateAfterSync(t *testing.T) {
 	h, _ := newTestHandler(t)
 	srv := httptest.NewServer(NewMux(h))
@@ -733,10 +721,8 @@ func TestHandleOrphans_FlagsLiveServiceAbsentFromConfig(t *testing.T) {
 	}
 }
 
-// TestHandleOrphans_NoRBACGrantForbidden guards the review finding: orphan
-// detection fans out real Cloud Run calls with no per-unit scope to check,
-// so it requires the caller to have some sync grant at all rather than
-// being open to any authenticated caller like the rest of the read views.
+// TestHandleOrphans_NoRBACGrantForbidden checks orphans requires some sync
+// grant at all (see handleOrphans' HasAnyGrant comment), not just auth.
 func TestHandleOrphans_NoRBACGrantForbidden(t *testing.T) {
 	h, _ := newTestHandler(t)
 	srv := httptest.NewServer(NewMux(h))
@@ -825,10 +811,8 @@ func TestHandleDryRun_UnknownUnitRejected(t *testing.T) {
 	}
 }
 
-// TestHandleDryRun_OutOfScopeSubjectForbidden guards against dry-run's own
-// review finding: it fires real Cloud Run/Pub-Sub calls, so it needs the
-// same RBAC gate as a real sync, not the open-to-any-authenticated-caller
-// posture the rest of the read views have.
+// TestHandleDryRun_OutOfScopeSubjectForbidden checks dry-run needs the same
+// RBAC gate as a real sync (see handleDryRun's comment), not open reads.
 func TestHandleDryRun_OutOfScopeSubjectForbidden(t *testing.T) {
 	h, _ := newTestHandler(t)
 	srv := httptest.NewServer(NewMux(h))
@@ -912,10 +896,8 @@ func TestHandleMetrics_RequiresNoAuth(t *testing.T) {
 	}
 }
 
-// TestHandleUnitHistory_OutOfScopeSubjectForbidden guards the review
-// finding: sync_events.error carries raw deploy/DB error text, so history
-// needs the same RBAC gate handleSync/handleDryRun have, not the
-// open-to-any-authenticated-caller posture the rest of the read views use.
+// TestHandleUnitHistory_OutOfScopeSubjectForbidden checks history needs the
+// same RBAC gate as sync/dry-run (see handleUnitHistory's comment).
 func TestHandleUnitHistory_OutOfScopeSubjectForbidden(t *testing.T) {
 	h, _ := newTestHandler(t)
 	srv := httptest.NewServer(NewMux(h))
@@ -929,8 +911,6 @@ func TestHandleUnitHistory_OutOfScopeSubjectForbidden(t *testing.T) {
 	}
 }
 
-// TestHandleUnitHistory_ReturnsSyncEventAfterSync checks the history
-// endpoint surfaces the audit trail a manual sync writes to sync_events.
 func TestHandleUnitHistory_ReturnsSyncEventAfterSync(t *testing.T) {
 	h, _ := newTestHandler(t)
 	srv := httptest.NewServer(NewMux(h))

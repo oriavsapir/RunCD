@@ -25,7 +25,7 @@ import (
 	"github.com/runcd/runcd/internal/precondition"
 )
 
-// DefaultWorkers matches §5.4's default bounded worker pool size.
+// DefaultWorkers is §5.4's default worker pool size.
 const DefaultWorkers = 16
 
 // ErrSyncInProgress means another deploy attempt for this exact unit is
@@ -51,9 +51,9 @@ var ErrObserveMode = errors.New("unit is in observe mode (sync.observe) — depl
 // GCP API round-trips, not a multi-minute wait.
 const lockTTL = 2 * time.Minute
 
-// ManifestSource supplies a sync unit's service definition. Fetching it from
-// git is a separate concern (not built yet); this interface keeps the
-// reconcile loop testable without one.
+// ManifestSource supplies a sync unit's service definition (git-backed in
+// production, via gitsource); this interface keeps the reconcile loop
+// testable without a real git fetch.
 type ManifestSource interface {
 	Get(ctx context.Context, unit expander.SyncUnit) ([]byte, error)
 }
@@ -159,11 +159,9 @@ func (r *Reconciler) RunOnce(ctx context.Context, units []expander.SyncUnit) ([]
 		g.Go(func() error {
 			res := r.reconcileOne(ctx, unit, now)
 			if errors.Is(res.Err, ErrSyncInProgress) {
-				// See the identical guard in ManualSync: a concurrent
-				// manual sync elsewhere already owns (or will own) this
-				// pass's applications row for this unit — upserting this
-				// attempt's stale pre-lock result would be a last-write-
-				// wins race against that write.
+				// Skip the upsert — see ManualSync's identical guard for why
+				// this attempt's stale pre-lock result must not race the
+				// winner's write.
 				results[i] = res
 				r.notify(ctx, res)
 				return nil
@@ -273,13 +271,9 @@ func (r *Reconciler) reconcileOne(ctx context.Context, unit expander.SyncUnit, n
 
 func (r *Reconciler) reconcile(ctx context.Context, unit expander.SyncUnit, opts syncOptions) Result {
 	res := Result{Unit: unit}
-	// Set here, unconditionally, before any early return (manifest fetch/
-	// parse failure, the job+managed-env rejection below, or the fetch
-	// failure paths in applyLiveState) — Observing's contract per its own
-	// doc comment is "computed unconditionally," and a unit that's Missing
-	// or hit a transient fetch error is exactly when an operator most needs
-	// to know shadow mode is the reason nothing deployed, not the one case
-	// where the field silently reports false regardless of the real value.
+	// Set before any early return: a unit that's Missing or hit a transient
+	// fetch error is exactly when an operator most needs to know shadow mode
+	// is why nothing deployed, not a case where Observing should read false.
 	res.Observing = observeModeEnabled(unit.Sync)
 
 	raw, err := r.Manifests.Get(ctx, unit)
@@ -360,10 +354,7 @@ func (r *Reconciler) reconcile(ctx context.Context, unit expander.SyncUnit, opts
 	// Per §5.7: service and workerPool are both revision-based (workerPool
 	// just has no traffic concept); job is execution-based. Only the
 	// per-resourceType fetch/assess/deploy calls differ — the rest of the
-	// loop (precondition check, diff, deploy-and-audit) is shared. fetch is
-	// a real GetService/GetJob call each time it's invoked — deploySyncUnit
-	// calls it again after a deploy to genuinely re-check Cloud Run, not to
-	// re-read a stale pre-deploy snapshot.
+	// loop (precondition check, diff, deploy-and-audit) is shared.
 	switch sd.ResourceType {
 	case manifest.ResourceService:
 		fetch := func(ctx context.Context) (cloudrun.ServiceState, string, error) {
@@ -471,7 +462,6 @@ func observeModeEnabled(sync config.SyncPolicy) bool {
 	return sync.Observe != nil && *sync.Observe
 }
 
-// fieldManaged reports whether name is in managedFields.
 func fieldManaged(managedFields []string, name string) bool {
 	for _, f := range managedFields {
 		if f == name {
@@ -502,8 +492,8 @@ func effectiveManagedFields(base, ignore []string) []string {
 }
 
 // filterPreconditions drops any requires entry named "type:name" in ignore
-// — an app-level override for a precondition that's legitimately not
-// applicable to one specific app (config.App.IgnorePreconditions).
+// (config.App.IgnorePreconditions) — an app-level override for a
+// precondition that's legitimately not applicable to one specific app.
 func filterPreconditions(requires []manifest.Precondition, ignore []string) []manifest.Precondition {
 	if len(ignore) == 0 {
 		return requires
@@ -714,10 +704,8 @@ func (r *Reconciler) upsert(ctx context.Context, res Result) (Result, error) {
 			-- setting it) — don't let that blank out a previously-recorded
 			-- desired_image; keep the last known-good value instead.
 			desired_image = CASE WHEN EXCLUDED.desired_image = '' THEN applications.desired_image ELSE EXCLUDED.desired_image END,
-			-- Same exposure as desired_image above: a transient live-state
-			-- fetch failure leaves res.LiveImage empty (nullIfEmpty turns
-			-- that into NULL) for that pass — don't let that blank out a
-			-- previously-observed live_image.
+			-- Same exposure as desired_image above (nullIfEmpty turns a blank
+			-- res.LiveImage into NULL on a transient fetch failure).
 			live_image = CASE WHEN EXCLUDED.live_image IS NULL THEN applications.live_image ELSE EXCLUDED.live_image END,
 			status = EXCLUDED.status,
 			health = EXCLUDED.health,

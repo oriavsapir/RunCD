@@ -110,12 +110,6 @@ export default function SettingsPage() {
   const [rolesError, setRolesError] = useState<string | null>(null);
   const [configError, setConfigError] = useState<string | null>(null);
   const [refreshKey, setRefreshKey] = useState(0);
-  // Set only by the manual Refresh button, cleared by any fetch-effect
-  // completion — correct today since nothing else re-triggers the effect.
-  // If a poller is ever added to this page (matching page.tsx's), it would
-  // clear this flag on its own tick too, cutting a manual refresh's
-  // spinner short mid-flight; give it its own state at that point rather
-  // than sharing this one.
   const [refreshing, setRefreshing] = useState(false);
 
   // Promise.allSettled, not .all: one section's fetch failing (e.g.

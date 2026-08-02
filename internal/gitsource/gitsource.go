@@ -66,10 +66,9 @@ func (s *Source) Get(ctx context.Context, unit expander.SyncUnit) ([]byte, error
 		return data, nil
 	}
 
-	// singleflight.Group.Do needs a string key. "\x00" is not a valid byte
-	// in a git repo URL or a file path on any real system, so this join is
-	// unambiguous — unlike the plain "@"-joined string this replaced,
-	// which could collide since repo values already contain "@".
+	// singleflight.Group.Do needs a string key, not a struct like cacheKey —
+	// "\x00" is not a valid byte in a repo URL or file path, so the join is
+	// unambiguous (same reasoning as cacheKey above).
 	groupKey := unit.SourceRepo + "\x00" + unit.SourcePath
 	v, err, _ := s.group.Do(groupKey, func() (any, error) {
 		if data, ok := s.cached(key, ttl); ok {

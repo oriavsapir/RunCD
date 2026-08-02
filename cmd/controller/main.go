@@ -42,9 +42,9 @@ import (
 	"github.com/runcd/runcd/internal/store"
 )
 
-// shutdownWaitTimeout bounds how long shutdown waits for the server/leader-
-// election/reconcile-loop goroutines to exit after ctx is cancelled, before
-// giving up and returning anyway — see its use in run().
+// shutdownWaitTimeout bounds how long shutdown waits for the goroutines to
+// exit after ctx is cancelled (see its use in run() for why it can't wait
+// forever).
 const shutdownWaitTimeout = 15 * time.Second
 
 func main() {
@@ -59,9 +59,8 @@ func main() {
 	}
 }
 
-// requiredEnv returns os.Getenv(key), or an error if it's unset — every
-// trust-boundary/deploy-target input fails startup loudly rather than
-// silently defaulting (§7).
+// requiredEnv fails startup loudly rather than silently defaulting (§7) —
+// for every trust-boundary/deploy-target input.
 func requiredEnv(key string) (string, error) {
 	v := os.Getenv(key)
 	if v == "" {
@@ -77,10 +76,9 @@ func envOrDefault(key, def string) string {
 	return def
 }
 
-// randomID returns an 8-byte random hex string, generated once at process
-// startup for holderID (see its own comment) — crypto/rand, not math/rand,
-// since two instances racing to start at the exact same instant must not
-// be able to collide on a predictable seed.
+// randomID uses crypto/rand, not math/rand: two instances racing to start
+// at the exact same instant must not be able to collide on a predictable
+// seed.
 func randomID() string {
 	b := make([]byte, 8)
 	if _, err := rand.Read(b); err != nil {
@@ -93,18 +91,13 @@ func randomID() string {
 	return hex.EncodeToString(b)
 }
 
-// openDB opens the controller's database connection. Two modes, chosen by
-// whether CLOUDSQL_INSTANCE_CONNECTION_NAME is set:
-//
-//   - Set: dial the named Cloud SQL instance via the Cloud SQL Go Connector
-//     with IAM database authentication — no password, no DATABASE_URL. The
-//     connecting user (CLOUDSQL_IAM_DB_USER) must be a Cloud SQL user
-//     mapped to an IAM principal (a human user or service account already
-//     granted access via IAM), and IAM auth must be enabled on the
-//     instance. This is the preferred path: no DB password to manage or
-//     leak, consistent with everything else here being IAM/IAP-gated.
-//   - Unset: DATABASE_URL, a plain connection string — unchanged fallback
-//     for anyone not using Cloud SQL IAM auth.
+// openDB opens the controller's database connection, via the Cloud SQL Go
+// Connector with IAM database auth if CLOUDSQL_INSTANCE_CONNECTION_NAME is
+// set (preferred: no DB password to manage or leak, consistent with
+// everything else here being IAM/IAP-gated), else a plain DATABASE_URL
+// connection string. The connecting user (CLOUDSQL_IAM_DB_USER) must
+// already be a Cloud SQL user mapped to an IAM principal, with IAM auth
+// enabled on the instance.
 //
 // The returned close func closes both db itself and (in Cloud SQL IAM mode)
 // the dialer's background token-refresh goroutines — one call for the
@@ -197,20 +190,12 @@ func run() error {
 		return fmt.Errorf("RECONCILE_INTERVAL: %w", err)
 	}
 
-	// Neither $HOSTNAME nor os.Hostname() reliably return anything
-	// per-instance-unique on Cloud Run (unlike Kubernetes, where HOSTNAME is
-	// the pod name) — observed in practice resolving to the literal string
-	// "localhost" for every concurrently-running instance once the service
-	// autoscaled past one replica, which made two genuinely different
-	// containers indistinguishable to the leader_lease claim logic: each
-	// kept "stealing" the lease from what looked like itself, flapping
-	// leadership every few seconds and cancelling every in-flight
-	// reconcile pass mid-tick. holderID only needs to be unique among
-	// currently-running processes, not stable across restarts, so a random
-	// suffix generated once at boot is sufficient — prefixed with
-	// K_REVISION (Cloud Run's own env var, same across every replica of one
-	// revision) purely so the sync_locks/leader_lease holder column stays
-	// readable in logs/DB inspection.
+	// Unlike Kubernetes (HOSTNAME = pod name), $HOSTNAME/os.Hostname() both
+	// resolve to the literal "localhost" on Cloud Run for every replica —
+	// made two different containers indistinguishable to the leader_lease
+	// claim logic and caused real leadership flapping in production. A
+	// random suffix per boot fixes that; K_REVISION is prefixed only to
+	// keep the holder column readable in logs/DB inspection.
 	holderID := envOrDefault("K_REVISION", "controller") + "-" + randomID()
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
@@ -478,8 +463,7 @@ func (l *leadershipContext) set(parent context.Context, leading bool) {
 	l.ctx, l.cancel = ctx, cancel
 }
 
-// Current returns the context for whatever leadership term is active right
-// now — cancelled already if this replica isn't leader.
+// Current is already cancelled if this replica isn't leader.
 func (l *leadershipContext) Current() context.Context {
 	l.mu.Lock()
 	defer l.mu.Unlock()
@@ -526,11 +510,9 @@ func loadUnits(ctx context.Context, gh *githubapp.Client, cs configSource, resol
 	return root, units, nil
 }
 
-// loadRBACFolderMembership resolves every folder ID rbacCfg's rules
-// reference via "folder:<id>" scopes into its member projects — a separate
-// resolution pass from loadUnits' own environments[].folders (a distinct
-// set of folder IDs, potentially overlapping but not assumed to), stored
-// via rbacStore.SetFolderMembership.
+// loadRBACFolderMembership is a separate resolution pass from loadUnits'
+// own environments[].folders — a distinct set of folder IDs, potentially
+// overlapping but not assumed to.
 func loadRBACFolderMembership(ctx context.Context, resolver folders.Resolver, rbacCfg *rbac.Config) (map[string][]string, error) {
 	ids := rbac.FolderScopes(rbacCfg)
 	if len(ids) == 0 {
@@ -591,7 +573,6 @@ func (d *dynamicUnits) Find(app, project string) (expander.SyncUnit, bool) {
 	return u, ok
 }
 
-// List implements api.UnitLister.
 func (d *dynamicUnits) List() []expander.SyncUnit {
 	d.mu.RLock()
 	defer d.mu.RUnlock()
@@ -647,10 +628,7 @@ func reconcileLoop(ctx context.Context, interval time.Duration, lc *leadershipCo
 			} else {
 				rbacStore.Set(newRBAC)
 				if membership, err := loadRBACFolderMembership(ctx, folderResolver, newRBAC); err != nil {
-					// Keep serving the last-known-good membership map, same
-					// posture as a failed rbac.yaml reload above — a
-					// transient Resource Manager error shouldn't revoke
-					// every folder-scoped grant.
+					// Same fail-open posture as the rbac.yaml reload above.
 					slog.Error("reconcile: resolve rbac folder scopes", "error", err)
 				} else {
 					rbacStore.SetFolderMembership(membership)
@@ -661,10 +639,7 @@ func reconcileLoop(ctx context.Context, interval time.Duration, lc *leadershipCo
 				continue // no fresh unit list to run this tick's reconcile pass over
 			}
 
-			// passCtx is this leadership term's context, not the raw ctx —
-			// if leadership is lost partway through RunOnce, passCtx is
-			// cancelled and in-flight work for this pass aborts.
-			passCtx := lc.Current()
+			passCtx := lc.Current() // this leadership term's context, not the raw ctx
 			if passCtx.Err() != nil {
 				continue // not leader
 			}

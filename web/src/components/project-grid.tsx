@@ -13,11 +13,9 @@ interface ProjectSummary {
   observing: number;
 }
 
-// Grouped by project, not environment — at real scale (many projects, each
-// with a handful of apps) a flat list of every sync unit stops being
-// scannable; this is the "which project needs my attention" overview,
-// mirroring what internal/reconcile ultimately targets: one Cloud Run
-// project per deploy destination.
+// Grouped by project, not environment — at real scale a flat list of every
+// sync unit stops being scannable; this is the "which project needs my
+// attention" overview.
 export function summarizeByProject(units: Unit[]): ProjectSummary[] {
   const byProject = new Map<string, ProjectSummary>();
   for (const u of units) {

@@ -1,7 +1,7 @@
 // Package precondition checks the `requires` entries on a service
-// definition (§5.10) before a sync unit is considered deployable. No real
-// GCP Pub/Sub calls are wired up yet — Checker is an interface so this can
-// be tested against a fake today.
+// definition (§5.10) before a sync unit is considered deployable. Checker is
+// an interface so this can be tested against a fake instead of live Pub/Sub
+// calls; GCPChecker (gcp.go) is the real implementation.
 package precondition
 
 import (

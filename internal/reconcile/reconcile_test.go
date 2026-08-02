@@ -384,9 +384,8 @@ requires:
 
 // TestRunOnce_PreconditionFailureNotOverwrittenByJobEnvValidation proves a
 // real precondition-failure reason survives even when the same unit also
-// hits the (separate) job+managed-env rejection — previously the job+env
-// check unconditionally overwrote res.Err, silently discarding the actual,
-// more specific reason a unit couldn't sync.
+// hits the (separate) job+managed-env rejection, rather than being silently
+// overwritten by that later, less specific check.
 func TestRunOnce_PreconditionFailureNotOverwrittenByJobEnvValidation(t *testing.T) {
 	db := testutil.NewPostgres(t)
 	manifestWithRequires := []byte(fmt.Sprintf(`
@@ -1498,15 +1497,9 @@ func TestManualSync_LockReleasedAfterAttemptCompletes(t *testing.T) {
 }
 
 // TestManualSync_LockContention_DoesNotUpsertStaleResult is the regression
-// test for a race the lock itself doesn't close: a losing attempt still
-// computed a result from its own pre-lock fetch (e.g. OutOfSync, from
-// before the winner's deploy) — unconditionally upserting that anyway,
-// like ManualSync/RunOnce used to, is a last-write-wins race against the
-// winner's own write. If this write lands after the winner's, it clobbers
-// the winner's fresher status back to the loser's stale one and
-// incorrectly resets status_since (which the notifier's duration-based
-// rules key off). ManualSync must skip the upsert entirely when it loses
-// the lock, not just skip the deploy.
+// test for the race described on ManualSync's ErrSyncInProgress guard: a
+// losing attempt must skip the upsert entirely, not just the deploy, or its
+// stale pre-lock result can clobber the winner's write.
 func TestManualSync_LockContention_DoesNotUpsertStaleResult(t *testing.T) {
 	db := testutil.NewPostgres(t)
 	unit := expander.SyncUnit{App: "widget-api", Project: "example-prod-us", Sync: manualSync()}
@@ -1592,9 +1585,6 @@ func TestDryRun_ComputesResultWithoutDeployingOrPersisting(t *testing.T) {
 	}
 }
 
-// TestDryRun_DoesNotBlockAConcurrentRealSync is the concrete version of "no
-// sync_locks row": a dry run running against a unit a real manual sync is
-// about to touch must not contend for that unit's lock at all.
 // TestDryRun_ObserveModeSurfacesObserving proves DryRun tells a caller when
 // a real sync would be blocked by shadow mode — without this, a preview of
 // an observing unit looks identical to any other non-auto unit's preview,
@@ -1651,6 +1641,9 @@ func TestDryRun_ObservingSetEvenWhenUnitIsMissing(t *testing.T) {
 	}
 }
 
+// TestDryRun_DoesNotBlockAConcurrentRealSync is the concrete version of "no
+// sync_locks row": a dry run running against a unit a real manual sync is
+// about to touch must not contend for that unit's lock at all.
 func TestDryRun_DoesNotBlockAConcurrentRealSync(t *testing.T) {
 	db := testutil.NewPostgres(t)
 	cr := &fakeCloudRun{services: map[string]*cloudrun.LiveService{

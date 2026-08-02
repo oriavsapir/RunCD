@@ -14,7 +14,7 @@ import (
 // restart, or Apply having been run by hand before) doesn't error — every
 // statement in Schema must be safe to re-run.
 func TestApply_IdempotentOnAlreadyAppliedSchema(t *testing.T) {
-	db := testutil.NewPostgres(t) // already ran Apply once
+	db := testutil.NewPostgres(t)
 	if err := store.Apply(context.Background(), db); err != nil {
 		t.Fatalf("second Apply failed: %v", err)
 	}

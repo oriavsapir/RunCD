@@ -50,7 +50,6 @@ interface UnitTableProps {
   onSynced?: () => void;
 }
 
-// Sync-unit list grouped by environment/customer project, per §5.11.
 export function UnitTable({ units, onSynced }: UnitTableProps) {
   if (units.length === 0) {
     return (
@@ -116,8 +115,8 @@ export function UnitTable({ units, onSynced }: UnitTableProps) {
   );
 }
 
-// Same data as UnitTable, as a collapsible env → project → app hierarchy
-// (native <details>/<summary> — no state or JS tree library needed).
+// Collapsible env → project → app hierarchy via native <details>/<summary>
+// — no JS tree library needed.
 //
 // `open` is state-backed, not hardcoded — a bare `open` attribute is
 // reapplied by React on every re-render (any unrelated data refresh, e.g.

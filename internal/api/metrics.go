@@ -30,9 +30,6 @@ type metricsSnapshot struct {
 	eventCounts  []SyncEventCount
 }
 
-// metricsCache serves a single snapshot to every collection within
-// metricsCacheTTL of the last real query, instead of re-querying per
-// scrape.
 type metricsCache struct {
 	mu        sync.Mutex
 	expiresAt time.Time

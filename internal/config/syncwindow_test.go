@@ -22,11 +22,9 @@ func TestWindowsAllow_NoWindowsAlwaysAllowed(t *testing.T) {
 
 func TestWindowsAllow_DenyBlocksOnlyWithinItsWindow(t *testing.T) {
 	windows := []SyncWindow{{Kind: SyncWindowDeny, Days: []string{"Sat", "Sun"}}}
-	// 2026-08-01 is a Saturday (UTC).
 	if WindowsAllow(windows, mustTime(t, "2026-08-01T12:00:00Z")) {
 		t.Fatal("expected Saturday to be denied")
 	}
-	// 2026-08-03 is a Monday.
 	if !WindowsAllow(windows, mustTime(t, "2026-08-03T12:00:00Z")) {
 		t.Fatal("expected Monday to be allowed (outside the deny window)")
 	}
@@ -34,15 +32,12 @@ func TestWindowsAllow_DenyBlocksOnlyWithinItsWindow(t *testing.T) {
 
 func TestWindowsAllow_AllowOnlyPermitsInsideItsWindow(t *testing.T) {
 	windows := []SyncWindow{{Kind: SyncWindowAllow, Days: []string{"Mon", "Tue", "Wed", "Thu", "Fri"}, StartHour: 9, EndHour: 17}}
-	// Monday 10:00 UTC — inside.
 	if !WindowsAllow(windows, mustTime(t, "2026-08-03T10:00:00Z")) {
 		t.Fatal("expected weekday business hours to be allowed")
 	}
-	// Monday 20:00 UTC — outside the hour range.
 	if WindowsAllow(windows, mustTime(t, "2026-08-03T20:00:00Z")) {
 		t.Fatal("expected outside business hours to be denied once an allow window exists")
 	}
-	// Saturday — outside the day range entirely.
 	if WindowsAllow(windows, mustTime(t, "2026-08-01T10:00:00Z")) {
 		t.Fatal("expected weekend to be denied once an allow window exists")
 	}
@@ -94,7 +89,6 @@ func TestWindowsAllow_HourWrapWithDaysChecksThePriorDayAfterMidnight(t *testing.
 	if WindowsAllow(windows, mustTime(t, "2026-08-08T02:00:00Z")) {
 		t.Fatal("expected every Saturday 02:00 to be inside the Fri-night window")
 	}
-	// A Sunday, by contrast, follows a Saturday night, not a Friday one.
 	if !WindowsAllow(windows, mustTime(t, "2026-08-02T02:00:00Z")) {
 		t.Fatal("expected Sunday 02:00 (follows Saturday, not Friday) to be outside the window")
 	}

@@ -1,19 +1,26 @@
-import { ArrowRight, GitCompare, Info, MapPin, Zap, ZapOff } from "lucide-react";
+import {
+  ArrowRight,
+  GitCompare,
+  Info,
+  MapPin,
+  Zap,
+  ZapOff,
+} from "lucide-react";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { StatusBadge } from "@/components/status-badge";
 import type { Unit } from "@/lib/types";
 
 function ImageValue({ digest }: { digest?: string }) {
   if (!digest) {
-    return <span className="text-muted-foreground italic">not yet observed</span>;
+    return (
+      <span className="text-muted-foreground italic">not yet observed</span>
+    );
   }
   return <code className="text-xs break-all">{digest}</code>;
 }
 
-// Per-unit diff view: desired vs live state, per §5.11.
 export function DiffView({ unit }: { unit: Unit }) {
-  const inSync =
-    !!unit.desiredImage && unit.desiredImage === unit.liveImage;
+  const inSync = !!unit.desiredImage && unit.desiredImage === unit.liveImage;
   const hasExclusions =
     (unit.ignoreFields?.length ?? 0) > 0 ||
     (unit.ignorePreconditions?.length ?? 0) > 0 ||
@@ -51,8 +58,8 @@ export function DiffView({ unit }: { unit: Unit }) {
               {unit.observing && (
                 <span>
                   This app is in observe mode (sync.observe) — Status/Health
-                  above are tracked as usual, but sync is disabled until
-                  observe mode is turned off.
+                  above are tracked as usual, but sync is disabled until observe
+                  mode is turned off.
                 </span>
               )}
               {unit.ignoreFields && unit.ignoreFields.length > 0 && (
@@ -62,12 +69,13 @@ export function DiffView({ unit }: { unit: Unit }) {
                   comparison below can&apos;t show.
                 </span>
               )}
-              {unit.ignorePreconditions && unit.ignorePreconditions.length > 0 && (
-                <span>
-                  This app skips these preconditions:{" "}
-                  {unit.ignorePreconditions.join(", ")}
-                </span>
-              )}
+              {unit.ignorePreconditions &&
+                unit.ignorePreconditions.length > 0 && (
+                  <span>
+                    This app skips these preconditions:{" "}
+                    {unit.ignorePreconditions.join(", ")}
+                  </span>
+                )}
             </div>
           </div>
         )}

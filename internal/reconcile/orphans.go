@@ -41,14 +41,12 @@ type orphanScope struct{ project, region string }
 // (the roadmap's own bar) is what this covers.
 // resourceType isn't checked: expander.SyncUnit doesn't carry it (that
 // lives in the per-app manifest, fetched from git — a call this function
-// deliberately doesn't make, to keep a scan cheap and git-independent).
-// Combined with ListServiceNames only ever listing Cloud Run *services*
-// (see its own doc comment), a declared job or workerPool unit's app name
-// still counts as "expected" here — so a live orphaned *service* sharing a
-// name with a declared job/workerPool (a real possibility: Cloud Run
-// services and jobs don't share a name namespace) would be hidden instead
-// of flagged. Same class of gap as the services-only narrowing already
-// accepted for v1's "even just flagging" bar, not a new one.
+// deliberately skips to keep a scan cheap and git-independent). Combined
+// with ListServiceNames only listing Cloud Run *services*, a declared job
+// or workerPool's app name still counts as "expected" here, so a live
+// orphaned *service* sharing a name with a declared job/workerPool (Cloud
+// Run services and jobs don't share a name namespace) is hidden instead of
+// flagged — the same accepted gap as the services-only narrowing above.
 func (r *Reconciler) DetectOrphans(ctx context.Context, units []expander.SyncUnit) ([]Orphan, error) {
 	expectedApps := make(map[orphanScope]map[string]bool)
 	for _, u := range units {
@@ -76,10 +74,10 @@ func (r *Reconciler) DetectOrphans(ctx context.Context, units []expander.SyncUni
 		g.Go(func() error {
 			names, err := r.CloudRun.ListServiceNames(ctx, key.project, key.region)
 			results[i] = scopeResult{names: names, err: err}
-			return nil // never fail the group — a project's error is collected below, not fatal to the others
+			return nil // collected below, not fatal to the others
 		})
 	}
-	_ = g.Wait() // g.Go above never returns a non-nil error, so Wait never does either
+	_ = g.Wait()
 
 	// orphans is deliberately non-nil from here on (even if it stays
 	// empty): a nil []Orphan and a nil error together is this function's

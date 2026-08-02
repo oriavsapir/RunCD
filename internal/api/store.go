@@ -15,8 +15,7 @@ type statusDB interface {
 	QueryRowContext(ctx context.Context, query string, args ...any) *sql.Row
 }
 
-// ApplicationRow is one applications table row — the last-persisted
-// reconcile result for a sync unit.
+// ApplicationRow is the last-persisted reconcile result for a sync unit.
 type ApplicationRow struct {
 	App              string
 	Project          string
@@ -27,7 +26,7 @@ type ApplicationRow struct {
 	LastReconciledAt time.Time
 }
 
-// SyncEvent is one sync_events row — a single deploy attempt's audit record.
+// SyncEvent is a single deploy attempt's audit record.
 type SyncEvent struct {
 	ID         int64
 	Trigger    string

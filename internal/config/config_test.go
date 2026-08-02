@@ -287,11 +287,9 @@ apps:
 	}
 }
 
-// TestParse_SameAppNameAcrossDifferentProjectsAllowed is the fix for an
-// overly strict check: sync units key on (app, project) everywhere
-// downstream (Postgres primary keys, API routes, lookup maps), never app
-// alone, so reusing an app name across unrelated environments/projects is
-// legitimate and shouldn't be rejected.
+// TestParse_SameAppNameAcrossDifferentProjectsAllowed guards against
+// over-rejecting: sync units key on (app, project), not app alone, so
+// reusing an app name across unrelated projects is legitimate.
 func TestParse_SameAppNameAcrossDifferentProjectsAllowed(t *testing.T) {
 	yaml := []byte(`
 environments:
@@ -317,9 +315,8 @@ apps:
 }
 
 // TestParse_SameAppSameProjectViaDifferentEnvironmentsRejected proves the
-// fix is correctly scoped to the real (app, project) collision, not just
-// "same environment" — two environments that happen to share a project
-// must still catch a real clobber.
+// (app, project) check isn't scoped to "same environment" — two
+// environments sharing a project must still catch a real clobber.
 func TestParse_SameAppSameProjectViaDifferentEnvironmentsRejected(t *testing.T) {
 	yaml := []byte(`
 environments:

@@ -138,9 +138,8 @@ func run(args []string, stdout, stderr io.Writer) error {
 			return err
 		}
 		if dryRun {
-			// dry-run makes the same real Cloud Run/Pub-Sub calls a sync
-			// does (just without deploying), so it needs the same generous
-			// timeout as orphans/sync, not the fast read-only budget.
+			// syncTimeout, not readTimeout: dry-run makes the same real
+			// Cloud Run/Pub-Sub calls a sync does, just without deploying.
 			ctx, cancel := context.WithTimeout(background, syncTimeout)
 			defer cancel()
 			res, err := c.dryRun(ctx, project, app)
@@ -170,10 +169,8 @@ func run(args []string, stdout, stderr io.Writer) error {
 		return nil
 
 	case "orphans":
-		// syncTimeout, not readTimeout: unlike every other read endpoint
-		// (Postgres-only), orphans fans out live Cloud Run ListServices
-		// calls across every project/region in the config — on a
-		// real-sized fleet that can legitimately take longer than 30s.
+		// syncTimeout, not readTimeout: orphans fans out live Cloud Run
+		// ListServices calls fleet-wide, unlike every other read endpoint.
 		ctx, cancel := context.WithTimeout(background, syncTimeout)
 		defer cancel()
 		orphans, err := c.listOrphans(ctx)

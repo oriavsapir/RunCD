@@ -25,7 +25,6 @@ func TestCompute_ImageMismatchIsOutOfSync(t *testing.T) {
 }
 
 func TestCompute_UnmanagedFieldsIgnored(t *testing.T) {
-	// traffic differs but isn't in managedFields — must not affect status.
 	desired := cloudrun.ServiceState{ImageDigest: "sha256:abc", TrafficLatestRevisionPercent: intPtr(100)}
 	live := cloudrun.ServiceState{ImageDigest: "sha256:abc", TrafficLatestRevisionPercent: intPtr(50)}
 	if got := Compute(desired, live, []string{"image"}, "service"); got != Synced {
@@ -60,11 +59,10 @@ func TestCompute_TrafficIgnoredForJobEvenIfManaged(t *testing.T) {
 // TestCompute_TrafficManagedButManifestOmitsItIsSynced regression-tests a
 // permanent-redeploy bug: a real Cloud Run client always reports a non-nil
 // live traffic percent, but desired.TrafficLatestRevisionPercent is nil
-// whenever the manifest simply doesn't set a traffic block. nil-vs-non-nil
-// must not be treated as a mismatch, or the unit would be OutOfSync (and
-// redeployed) on every single poll forever.
+// whenever the manifest simply doesn't set a traffic block — nil-vs-non-nil
+// must not read as a mismatch.
 func TestCompute_TrafficManagedButManifestOmitsItIsSynced(t *testing.T) {
-	desired := cloudrun.ServiceState{ImageDigest: "sha256:abc"} // no TrafficLatestRevisionPercent
+	desired := cloudrun.ServiceState{ImageDigest: "sha256:abc"}
 	live := cloudrun.ServiceState{ImageDigest: "sha256:abc", TrafficLatestRevisionPercent: intPtr(100)}
 	if got := Compute(desired, live, []string{"image", "traffic"}, "service"); got != Synced {
 		t.Fatalf("expected Synced (nothing to enforce on traffic), got %s", got)
@@ -80,7 +78,7 @@ func TestCompute_JobImageMismatchIsOutOfSync(t *testing.T) {
 }
 
 func TestCompute_EnvNotManagedIsSynced(t *testing.T) {
-	desired := cloudrun.ServiceState{ImageDigest: "sha256:abc"} // no EnvVars/SecretRefs
+	desired := cloudrun.ServiceState{ImageDigest: "sha256:abc"}
 	live := cloudrun.ServiceState{ImageDigest: "sha256:abc", EnvVars: map[string]string{"FOO": "bar"}}
 	if got := Compute(desired, live, []string{"image", "env"}, "service"); got != Synced {
 		t.Fatalf("expected Synced (env not part of the declared spec), got %s", got)
@@ -137,7 +135,7 @@ func TestCompute_EnvIgnoredForJobEvenIfManaged(t *testing.T) {
 
 func TestCompute_EnvManagedAndEmptyIsSyncedAgainstEmptyLive(t *testing.T) {
 	desired := cloudrun.ServiceState{ImageDigest: "sha256:abc", EnvVars: map[string]string{}, SecretRefs: map[string]cloudrun.SecretRef{}}
-	live := cloudrun.ServiceState{ImageDigest: "sha256:abc"} // nil EnvVars/SecretRefs
+	live := cloudrun.ServiceState{ImageDigest: "sha256:abc"}
 	if got := Compute(desired, live, []string{"image", "env"}, "service"); got != Synced {
 		t.Fatalf("expected Synced (nil live env == empty desired env), got %s", got)
 	}

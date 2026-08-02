@@ -13,8 +13,7 @@ import { ApiError, getUnit, getUnitHistory } from "@/lib/api";
 import type { SyncEvent, Unit } from "@/lib/types";
 import { usePolling } from "@/lib/use-polling";
 
-// Same silent background poll as the units list (page.tsx) — without it, a
-// live rollout looks frozen on this page too until a manual reload.
+// Silent background poll, same as the units list (page.tsx).
 const POLL_INTERVAL_MS = 15000;
 
 // decodeURIComponent throws URIError on a malformed percent-escape (e.g. a
@@ -44,10 +43,8 @@ export default function UnitDetailPage() {
   // not a real failure worth a destructive-styled error banner.
   const [eventsForbidden, setEventsForbidden] = useState(false);
   const [refreshKey, setRefreshKey] = useState(0);
-  // Distinguishes "refetching after a sync/poll" from the initial load —
-  // without it, a just-synced success indicator could sit next to a diff
-  // view still showing the pre-sync state until the refetch resolves, with
-  // no signal that a fresher answer is on the way.
+  // Distinguishes "refetching after a sync/poll" from the initial load, so
+  // the diff view can show a "Refreshing…" hint instead of looking stale.
   const [refreshing, setRefreshing] = useState(false);
   const [lastUpdatedAt, setLastUpdatedAt] = useState<Date | null>(null);
 
@@ -101,14 +98,9 @@ export default function UnitDetailPage() {
       unit.status === "Invalid" ||
       unit.health === "Degraded" ||
       unit.health === "Invalid");
-  // Only shown as "the reason" if the *most recent* sync attempt is itself
-  // the failure — events is sorted most-recent-first, so if anything newer
-  // has happened since (a later success, or even a later in_progress
-  // attempt), an older failure's error text is likely stale/resolved and
-  // showing it would be actively misleading. A wall-clock cutoff instead
-  // (e.g. "only if within the last hour") would get this backwards: it'd
-  // hide a real, still-unresolved error exactly when it's been failing the
-  // longest and someone finally checks.
+  // events is sorted most-recent-first, so only the newest attempt's
+  // failure is shown as "the reason" — an older failure superseded by a
+  // later success (or later in_progress attempt) is likely stale/resolved.
   const recentFailure =
     events?.[0]?.result === "failed" ? events[0] : undefined;
 

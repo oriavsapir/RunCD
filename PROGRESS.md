@@ -1656,7 +1656,7 @@ growing the exclude list — a two-line guard costs less than losing nilaway
 coverage over the rest of those two files. Confirmed clean by running CI's
 exact command locally afterward.
 
-## A real production incident, onboarding a-heavier-project
+## A real production incident, onboarding a heavier project
 
 Onboarding a real, heavier project (26 workloads across 7 services/11
 jobs/8 worker pools, in observe mode) surfaced several real bugs that a
@@ -1712,7 +1712,7 @@ lighter 8-app sandbox environment never exercised:
 - Granted `runcd-controller@...`'s service account org-wide `roles/run.admin`
   (confirmed explicitly with the user given the blast radius) so it could
   reach the new project at all — the org had never granted it anything
-  outside `the-sandbox-project` before.
+  outside its original sandbox project before.
 
 ## Ninth-ish review pass — precondition overwrite, notify's connection hold, config drift, and more
 
@@ -1829,6 +1829,77 @@ Dashboard, same pass:
   has no `LIMIT`/pagination (fine at current scale, will matter as
   project/unit count grows); the unit-detail failure alert doesn't
   link/scroll to its matching sync-history row below.
+
+## Bugs found and fixed in an eleventh review pass — detached-context timeouts (and a self-inflicted regression), sync-window midnight wrap, malformed RBAC scopes, non-positive notify durations, and more
+
+- [x] **Singleflight-shared client construction and precondition's `Exists`
+  RPC had no timeout of their own** (`internal/cloudrun/gcp.go`,
+  `internal/precondition/gcp.go`) — both already used `context.WithoutCancel`
+  so one caller's cancellation can't spuriously fail every other concurrent
+  caller sharing that singleflight key, but with no deadline of its own a
+  genuinely hung dial/RPC would wedge all of them forever. First fixed by
+  wrapping both with a bounded timeout (`apiCallTimeout` / `precondCallTimeout`).
+- [x] **...which turned out to be a real regression for client construction
+  specifically** — these clients are cached for the life of the process, and
+  JSON-key/authorized-user ADC (`golang.org/x/oauth2/jwt`'s `jwtSource`)
+  captures exactly the context its `TokenSource` was constructed with for
+  every future token refresh. A `context.WithTimeout` here, even one whose
+  `cancel()` is only ever deferred and never explicitly fired, still expires
+  on its own deadline and permanently breaks every later refresh on that
+  cached client — not reachable on metadata-server ADC (today's production
+  posture) but real for any key-file-credentialed deployment. Reverted client
+  construction back to bare `context.WithoutCancel` with no additional
+  deadline; precondition's single-RPC `Exists` fetch (not a cached,
+  credentialed client) keeps its timeout, since it has no such capture.
+- [x] **A sync window wrapping past midnight stopped matching at midnight**
+  (`internal/config/syncwindow.go`) — day-of-week and hour-wrap were checked
+  independently, so `{Days: ["Fri"], StartHour: 22, EndHour: 6}` matched
+  Friday night but silently stopped the instant the clock crossed into
+  Saturday. Fixed: the post-midnight portion of a wrapped window now checks
+  the *prior* day's weekday, not the current one.
+- [x] **A malformed `"app:someapp"` RBAC scope (missing `@project`) passed
+  `HasAnyGrant`** (`internal/rbac/rbac.go`) — `isRecognizedScope` only checked
+  a scope's prefix, so a typo'd or incomplete scope counted as "some real
+  grant" for `/api/orphans` despite `scopeMatches` never actually matching it
+  under `CanSync`/`CanSyncFolders`. Fixed: `isRecognizedScope` now validates
+  well-formedness per prefix (`app:` requires a non-empty name *and*
+  `@project`, `env:`/`folder:` require a non-empty value after the colon).
+- [x] **`notify.rules`' `forMinutes`/`forHours` accepted non-positive
+  values** (`internal/config/config.go`) — a negative or zero value embeds
+  into `notification_debounce.rule` (e.g. `"healthDegraded:-5"`), which fails
+  a DB `CHECK` constraint restricted to digits, so the rule would silently
+  never fire. Now rejected at config-parse time.
+- [x] **`Result.Observing` was only set on `applyLiveState`'s success path**
+  (`internal/reconcile/reconcile.go`) — a `Missing` unit, or one that hit a
+  transient fetch error before `applyLiveState` ran, always reported
+  `Observing: false` regardless of the unit's real `Sync.Observe`. Fixed:
+  `Result.Observing` is now set once, unconditionally, at the very top of
+  `reconcile()`.
+- [x] **The units list page's view/project drill-down only lived in React
+  state** (`web/src/app/page.tsx`) — refreshing, sharing a link, or using
+  Back/Forward always reset back to the project-grid view. Fixed:
+  `view`/`selectedProject` are now derived directly from `searchParams` every
+  render instead of mirrored into local state via an effect — Back/Forward
+  now works, a bare `?project=X` URL normalizes to the filtered table view
+  (not the ungated project grid), and clearing the project filter chip also
+  clears any stale search query instead of letting it silently reactivate.
+- [x] **The sync confirmation dialog could be unmounted out from under the
+  user** (`web/src/components/sync-button.tsx`) — `canSync` is recomputed
+  server-side and can flip `false` mid-session (an RBAC hot-reload landing
+  between polls) while the confirm dialog is open; unconditionally rendering
+  the disabled-Tooltip branch on `!syncAllowed` unmounted an open dialog
+  instead of just closing it. Fixed by adjusting state during render
+  (comparing against the previous `canSync`) to close the dialog first,
+  within the same render that notices the flip.
+- [x] **`notify.go`'s debounce "confirm" write had no cancellation
+  protection** — unlike its sibling revert write, a cancellation landing
+  between a successful Slack send and this `UPDATE` could let the claim
+  self-expire with `last_notified_at` never bumped, causing a premature
+  duplicate send. Fixed to match: `context.WithoutCancel` + a timeout.
+- [x] **`unit-table.tsx`'s `groupByEnv` sort key was an ambiguous bare
+  concatenation** of project/app — switched to joining with `"\x00"`,
+  matching the fix already applied to `gitsource`'s cache key for the same
+  class of collision.
 
 ## Infra / delivery
 

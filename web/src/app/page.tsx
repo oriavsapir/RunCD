@@ -58,10 +58,8 @@ function deriveViewState(searchParams: URLSearchParams): {
   };
 }
 
-// Without this, a live rollout (or another operator's sync) looks frozen
-// until someone happens to click Refresh — this is a silent background
-// poll, not tied to `refreshing`, so it doesn't spin the Refresh button or
-// otherwise announce itself.
+// Not tied to `refreshing` — this is a silent background poll, so it
+// doesn't spin the Refresh button or otherwise announce itself.
 const POLL_INTERVAL_MS = 15000;
 
 const STAT_TILES: Array<{
@@ -69,9 +67,8 @@ const STAT_TILES: Array<{
   match: (u: Unit) => boolean;
   icon: typeof Layers;
   className: string;
-  // Only the Progressing tile's icon spins, and only while it's actually
-  // counting something — a spinner next to "0" reads as "something's
-  // happening" when nothing is.
+  // Only spin while the count is actually nonzero — a spinner next to "0"
+  // is misleading.
   spinWhenNonZero?: boolean;
 }> = [
   {
@@ -118,9 +115,6 @@ function SyncUnitsPage() {
   const [error, setError] = useState<string | null>(null);
   const [refreshKey, setRefreshKey] = useState(0);
   const [refreshing, setRefreshing] = useState(false);
-  // Absolute, not "Xs ago" — a relative time would need its own ticking
-  // timer to stay accurate; an absolute timestamp is trivially always
-  // correct and just as useful for "is this stale" during an incident.
   const [lastUpdatedAt, setLastUpdatedAt] = useState<Date | null>(null);
   const [query, setQuery] = useState("");
   // view/selectedProject live only in the URL, not in local state — a

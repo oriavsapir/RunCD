@@ -127,10 +127,8 @@ image:
 }
 
 // TestParse_TrafficPercentOutOfRangeRejected covers both out-of-[0,100]
-// values and, crucially, in-range-but-unsupported ones (e.g. 50) — the
-// real deploy path (cloudrun.validatedPercent) only ever accepts exactly
-// 100, so anything else must fail here at parse time, not repeatedly at
-// deploy time forever.
+// values and, crucially, in-range-but-unsupported ones (e.g. 50) — the real
+// deploy path (cloudrun.validatedPercent) only ever accepts exactly 100.
 func TestParse_TrafficPercentOutOfRangeRejected(t *testing.T) {
 	for _, percent := range []int{-1, 0, 1, 50, 99, 101, 500} {
 		yaml := []byte(`
