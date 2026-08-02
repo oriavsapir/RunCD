@@ -1901,6 +1901,62 @@ Dashboard, same pass:
   matching the fix already applied to `gitsource`'s cache key for the same
   class of collision.
 
+## Image updater — semantic-version/track tracking with git write-back
+
+- [x] **`internal/imageupdater`** — the git-write-back half of an
+  `argocd-image-updater` equivalent, an optional add-on layered in front of
+  the existing digest-pinned reconcile loop, not a replacement for it.
+  `image.track` (follow one literal tag) / `image.version` (semver
+  constraint: `"1"`, `"1.2"`, `"1.2.3"`, resolved via `golang.org/x/mod/semver`
+  by picking the highest matching tag, silently skipping non-semver tags)
+  were already parsed and validated by `manifest.Parse` but never consumed by
+  anything (§5.1) — this is what finally resolves them. `image.repository`
+  is now required alongside either, since `image.digest` is always a bare
+  digest with nothing else in the manifest identifying which Artifact
+  Registry image to list tags on.
+  - `Resolver` interface + `GCPResolver` (Artifact Registry Admin API,
+    `ListDockerImages`), same interface+fake pattern as
+    `cloudrun.AdminClient`/`precondition.Checker`.
+  - `githubapp` gained `GetFileWithSHA` (Contents API, JSON envelope, for the
+    blob SHA optimistic-concurrency needs) and `PutFile` (commits straight to
+    the manifest repo's default branch) — the GitHub App needs Contents:write
+    granted for this to actually succeed; until then it just fails
+    per-manifest (logged, not fatal), the same fail-safe posture as any other
+    unconfigured add-on here.
+  - The commit itself is a targeted regex rewrite of just the `digest:` line,
+    never an unmarshal-then-remarshal — `yaml.Marshal` reorders keys, drops
+    comments, and restyles quoting, which would turn a one-line digest bump
+    into a whole-file diff and defeat the entire point of writing back a
+    resolved digest instead of tracking a floating tag live. Guarded by
+    re-parsing the rewritten bytes and asserting the resulting digest matches.
+  - Runs leader-gated inside `cmd/controller`'s `reconcileLoop` tick (via
+    `runImageUpdater`), deduped to one resolve+commit per distinct
+    `(SourceRepo, SourcePath)` — every environment an app targets shares one
+    `service.yaml`, so this resolves and commits once, not once per sync
+    unit. A commit lands in git on this tick; the *next* tick's normal
+    fetch/diff/deploy path is what actually rolls it out, exactly like any
+    other manifest change — `imageupdater` itself never deploys anything.
+  - Deliberately no per-environment opt-in: one manifest, one resolved
+    digest, applied to every environment that app targets simultaneously
+    (a `runcd.yaml`-level per-environment gate was considered and explicitly
+    ruled out of scope).
+  - **Known constraint, documented rather than enforced in code**:
+    `image.repository` is only ever used to resolve tags — the actual deploy
+    (`cloudrun.withDigest`) splices the resolved digest onto whatever image
+    prefix is already live on each target environment's Cloud Run service,
+    never reading `image.repository` itself. If `image.repository` names a
+    different registry than a given environment's live image, that
+    environment's deploy fails every tick, silently except for
+    `sync_events.error` — there's no I/O-free way to catch this at
+    `manifest.Parse` time (one manifest, many environments, each with its
+    own live state), so it's called out loudly in `Image.Repository`'s doc
+    comment instead.
+  - No new env var to enable it — inert by construction unless some app's
+    `service.yaml` actually sets `track`/`version`. The already-shipped
+    image-events Eventarc trigger nudges the same `tick()` this runs inside,
+    so an Artifact Registry push shortens the latency for both the updater
+    and the reconcile pass through one shared path, no second trigger needed.
+
 ## Infra / delivery
 
 - [x] **Dockerfile** — multi-stage (`golang:1.26-alpine` build →

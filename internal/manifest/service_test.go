@@ -29,6 +29,7 @@ func TestParse_DigestWithTrackIsValid(t *testing.T) {
 image:
   digest: ` + validDigest + `
   track: main
+  repository: us-central1-docker.pkg.dev/proj/repo/image
 `)
 	if _, err := Parse(yaml); err != nil {
 		t.Fatalf("expected valid, got error: %v", err)
@@ -40,6 +41,7 @@ func TestParse_DigestWithVersionIsValid(t *testing.T) {
 image:
   digest: ` + validDigest + `
   version: v1.4.2
+  repository: us-central1-docker.pkg.dev/proj/repo/image
 `)
 	if _, err := Parse(yaml); err != nil {
 		t.Fatalf("expected valid, got error: %v", err)
@@ -52,9 +54,32 @@ image:
   digest: ` + validDigest + `
   track: main
   version: v1.4.2
+  repository: us-central1-docker.pkg.dev/proj/repo/image
 `)
 	if _, err := Parse(yaml); err == nil {
 		t.Fatal("expected error when both track and version are set")
+	}
+}
+
+func TestParse_TrackWithoutRepositoryRejected(t *testing.T) {
+	yaml := []byte(`
+image:
+  digest: ` + validDigest + `
+  track: main
+`)
+	if _, err := Parse(yaml); err == nil {
+		t.Fatal("expected error when track is set without repository")
+	}
+}
+
+func TestParse_VersionWithoutRepositoryRejected(t *testing.T) {
+	yaml := []byte(`
+image:
+  digest: ` + validDigest + `
+  version: v1.4.2
+`)
+	if _, err := Parse(yaml); err == nil {
+		t.Fatal("expected error when version is set without repository")
 	}
 }
 

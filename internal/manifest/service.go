@@ -1,7 +1,10 @@
 // Package manifest parses service definitions (§5.1): one YAML file per
 // service, environment-agnostic. The controller/diff engine only ever reads
-// image.digest — track/version are resolver metadata, never a live mutable
-// reference the reconcile loop has to track (NFR2).
+// image.digest — track/version are resolver metadata for the optional
+// internal/imageupdater add-on, never a live mutable reference the reconcile
+// loop itself has to track (NFR2): the reconcile loop always deploys exactly
+// whatever digest is committed, whether that digest was hand-written or
+// last resolved by imageupdater.
 package manifest
 
 import (
@@ -21,9 +24,29 @@ const (
 )
 
 type Image struct {
-	Digest  string `yaml:"digest"`
-	Track   string `yaml:"track,omitempty"`
+	Digest string `yaml:"digest"`
+	Track  string `yaml:"track,omitempty"`
+	// Version is a semver constraint (e.g. "1", "1.2", "1.2.3") — the
+	// tracked equivalent of Track, resolved by picking the highest matching
+	// tag instead of following one fixed tag name.
 	Version string `yaml:"version,omitempty"`
+	// Repository identifies the Artifact Registry image Track/Version
+	// resolve against (e.g. "us-central1-docker.pkg.dev/proj/repo/image") —
+	// required whenever either is set, since Digest alone (a bare
+	// "sha256:...", never a full reference, see digestPattern) gives
+	// internal/imageupdater nothing to list tags on. Unused, and optional,
+	// when only Digest is set.
+	//
+	// This must be the same registry/project/repo prefix every environment
+	// this app targets already deploys from — cloudrun.withDigest deploys by
+	// splicing the resolved digest onto whatever image prefix is already
+	// live on each target Cloud Run service, it never reads Repository at
+	// deploy time. A Repository pointing at a different registry than a
+	// given environment's live service silently resolves and commits a
+	// digest that environment's deploy can never actually pull — surfacing
+	// only as a deploy failure in that unit's sync_events.error, every tick,
+	// until Repository (or that environment's live image) is corrected.
+	Repository string `yaml:"repository,omitempty"`
 }
 
 type Traffic struct {
@@ -150,6 +173,9 @@ func validateImage(img Image) error {
 	}
 	if img.Track != "" && img.Version != "" {
 		return fmt.Errorf("image may set track or version, not both (§5.1)")
+	}
+	if (img.Track != "" || img.Version != "") && img.Repository == "" {
+		return fmt.Errorf("image.repository is required when track or version is set — internal/imageupdater needs it to know which Artifact Registry image to resolve against")
 	}
 	return nil
 }

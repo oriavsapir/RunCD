@@ -1,6 +1,7 @@
-// Package githubapp authenticates to GitHub as a GitHub App and fetches
-// manifest files over the Contents API — no local clone, no git binary, so
-// the controller's distroless runtime image stays git-free.
+// Package githubapp authenticates to GitHub as a GitHub App and reads (and,
+// for internal/imageupdater, writes) files over the Contents API — no local
+// clone, no git binary, so the controller's distroless runtime image stays
+// git-free.
 package githubapp
 
 import (
@@ -170,6 +171,127 @@ func (c *Client) GetFile(ctx context.Context, repo, ref, path string) ([]byte, e
 		return nil, fmt.Errorf("fetch %s/%s:%s: %s: %s", owner, name, path, resp.Status, body)
 	}
 	return readLimited(resp.Body)
+}
+
+// contentsResponse is the Contents API's JSON shape (application/vnd.github+json),
+// as opposed to GetFile's application/vnd.github.raw request, which returns
+// the file's raw bytes directly with no envelope.
+type contentsResponse struct {
+	SHA      string `json:"sha"`
+	Content  string `json:"content"`
+	Encoding string `json:"encoding"`
+}
+
+// GetFileWithSHA is GetFile plus the blob SHA the Contents API's write
+// endpoint requires as its optimistic-concurrency token (PutFile's sha
+// parameter) — GetFile itself can't be reused for this since it requests
+// the raw-bytes representation, which carries no SHA at all.
+func (c *Client) GetFileWithSHA(ctx context.Context, repo, ref, path string) ([]byte, string, error) {
+	owner, name, err := parseOwnerRepo(repo)
+	if err != nil {
+		return nil, "", err
+	}
+	tok, err := c.installationToken(ctx, owner, name)
+	if err != nil {
+		return nil, "", err
+	}
+
+	u := &url.URL{
+		Scheme: "https",
+		Host:   "api.github.com",
+		Path:   fmt.Sprintf("/repos/%s/%s/contents/%s", owner, name, strings.TrimPrefix(path, "/")),
+	}
+	if ref != "" {
+		q := u.Query()
+		q.Set("ref", ref)
+		u.RawQuery = q.Encode()
+	}
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, u.String(), nil)
+	if err != nil {
+		return nil, "", fmt.Errorf("build request for %s/%s:%s: %w", owner, name, path, err)
+	}
+	req.Header.Set("Authorization", "token "+tok)
+	req.Header.Set("Accept", "application/vnd.github+json")
+
+	resp, err := c.httpClient().Do(req)
+	if err != nil {
+		return nil, "", fmt.Errorf("fetch %s/%s:%s: %w", owner, name, path, err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+
+	if resp.StatusCode != http.StatusOK {
+		body, _ := readLimited(resp.Body)
+		return nil, "", fmt.Errorf("fetch %s/%s:%s: %s: %s", owner, name, path, resp.Status, body)
+	}
+	var out contentsResponse
+	if err := decodeJSONLimited(resp.Body, &out); err != nil {
+		return nil, "", fmt.Errorf("decode contents response for %s/%s:%s: %w", owner, name, path, err)
+	}
+	if out.Encoding != "base64" {
+		return nil, "", fmt.Errorf("fetch %s/%s:%s: unexpected content encoding %q", owner, name, path, out.Encoding)
+	}
+	// GitHub's base64 content is chunked with embedded newlines.
+	content, err := base64.StdEncoding.DecodeString(strings.ReplaceAll(out.Content, "\n", ""))
+	if err != nil {
+		return nil, "", fmt.Errorf("decode base64 content for %s/%s:%s: %w", owner, name, path, err)
+	}
+	return content, out.SHA, nil
+}
+
+type putFileRequest struct {
+	Message string `json:"message"`
+	Content string `json:"content"`
+	SHA     string `json:"sha"`
+	Branch  string `json:"branch,omitempty"`
+}
+
+// PutFile commits content to path, overwriting the version identified by
+// sha (as returned by GetFileWithSHA) — GitHub rejects the write with a 409
+// if sha doesn't match the file's current blob SHA, which is the API's own
+// optimistic-concurrency guard against two callers racing to update the
+// same file. branch empty means the repo's default branch, matching
+// GetFile/GetFileWithSHA's ref convention.
+func (c *Client) PutFile(ctx context.Context, repo, branch, path, message string, content []byte, sha string) error {
+	owner, name, err := parseOwnerRepo(repo)
+	if err != nil {
+		return err
+	}
+	tok, err := c.installationToken(ctx, owner, name)
+	if err != nil {
+		return err
+	}
+
+	body, err := json.Marshal(putFileRequest{
+		Message: message,
+		Content: base64.StdEncoding.EncodeToString(content),
+		SHA:     sha,
+		Branch:  branch,
+	})
+	if err != nil {
+		return fmt.Errorf("marshal put-file request for %s/%s:%s: %w", owner, name, path, err)
+	}
+
+	u := fmt.Sprintf("https://api.github.com/repos/%s/%s/contents/%s", owner, name, strings.TrimPrefix(path, "/"))
+	req, err := http.NewRequestWithContext(ctx, http.MethodPut, u, bytes.NewReader(body))
+	if err != nil {
+		return fmt.Errorf("build put-file request for %s/%s:%s: %w", owner, name, path, err)
+	}
+	req.Header.Set("Authorization", "token "+tok)
+	req.Header.Set("Accept", "application/vnd.github+json")
+	req.Header.Set("Content-Type", "application/json")
+
+	resp, err := c.httpClient().Do(req)
+	if err != nil {
+		return fmt.Errorf("put %s/%s:%s: %w", owner, name, path, err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+
+	if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusCreated {
+		respBody, _ := readLimited(resp.Body)
+		return fmt.Errorf("put %s/%s:%s: %s: %s", owner, name, path, resp.Status, respBody)
+	}
+	return nil
 }
 
 // installationToken returns a cached token for owner/repo, minting a fresh

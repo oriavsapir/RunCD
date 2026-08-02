@@ -3,6 +3,7 @@ module github.com/runcd/runcd
 go 1.26.5
 
 require (
+	cloud.google.com/go/artifactregistry v1.26.0
 	cloud.google.com/go/cloudsqlconn v1.23.0
 	cloud.google.com/go/pubsub v1.51.0
 	cloud.google.com/go/resourcemanager v1.16.0
@@ -16,6 +17,7 @@ require (
 	go.opentelemetry.io/otel/exporters/prometheus v0.66.0
 	go.opentelemetry.io/otel/metric v1.44.0
 	go.opentelemetry.io/otel/sdk/metric v1.44.0
+	golang.org/x/mod v0.38.0
 	golang.org/x/sync v0.22.0
 	google.golang.org/api v0.291.0
 	google.golang.org/grpc v1.82.1

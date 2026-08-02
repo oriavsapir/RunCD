@@ -34,6 +34,7 @@ import (
 	"github.com/runcd/runcd/internal/folders"
 	"github.com/runcd/runcd/internal/githubapp"
 	"github.com/runcd/runcd/internal/gitsource"
+	"github.com/runcd/runcd/internal/imageupdater"
 	"github.com/runcd/runcd/internal/leader"
 	"github.com/runcd/runcd/internal/notify"
 	"github.com/runcd/runcd/internal/precondition"
@@ -274,6 +275,21 @@ func run() error {
 	preconditions := precondition.NewGCPChecker()
 	defer func() { _ = preconditions.Close() }()
 
+	// Add-on, same posture as the image-events trigger: unlike that one,
+	// this needs no env var to opt in — it stays inert on its own, since
+	// nothing calls it unless some app's service.yaml actually sets
+	// image.track/image.version (manifest.Parse requires image.repository
+	// alongside them, giving this its Artifact Registry target). The
+	// GitHub App itself does need Contents:write granted for a commit to
+	// actually succeed; until then this only fails (logged, not fatal) for
+	// the specific apps that opted in, same fail-safe posture as every
+	// other add-on here.
+	imgResolver, err := imageupdater.NewGCPResolver(ctx)
+	if err != nil {
+		return fmt.Errorf("build artifact registry client: %w", err)
+	}
+	defer func() { _ = imgResolver.Close() }()
+
 	reconcilerPtr := &atomic.Pointer[reconcile.Reconciler]{}
 	reconcilerPtr.Store(&reconcile.Reconciler{
 		DB:            db,
@@ -382,7 +398,7 @@ func run() error {
 
 	go func() {
 		defer wg.Done()
-		reconcileLoop(ctx, reconcileInterval, lc, ghClient, cfgSrc, db, reconcilerPtr, dynUnits, rbacStore, folderResolver, nudgeCh)
+		reconcileLoop(ctx, reconcileInterval, lc, ghClient, cfgSrc, db, reconcilerPtr, dynUnits, rbacStore, folderResolver, imgResolver, nudgeCh)
 	}()
 
 	// A bind/serve failure (e.g. the port is already taken) is fatal, not a
@@ -617,13 +633,42 @@ func (d *dynamicUnits) List() []expander.SyncUnit {
 	return out
 }
 
+// runImageUpdater resolves image.track/image.version for every distinct
+// manifest referenced by units, committing an updated image.digest where
+// the resolved digest has moved. Deduped to one Update call per (repo,
+// path) — every environment an app targets shares the same manifest
+// (§5.1), so without this, N sync units for one app would otherwise
+// attempt N redundant (and, if the digest genuinely changed, N racing)
+// commits of the identical file. A per-manifest error is logged and
+// skipped, not fatal to the tick — this is a best-effort add-on layered in
+// front of the reconcile pass, not part of its correctness.
+func runImageUpdater(ctx context.Context, gh *githubapp.Client, resolver imageupdater.Resolver, units []expander.SyncUnit) {
+	seen := make(map[imageupdater.Manifest]bool)
+	for _, u := range units {
+		m := imageupdater.Manifest{Repo: u.SourceRepo, Path: u.SourcePath}
+		if seen[m] {
+			continue
+		}
+		seen[m] = true
+
+		digest, err := imageupdater.Update(ctx, gh, resolver, m)
+		if err != nil {
+			slog.Error("imageupdater", "repo", m.Repo, "path", m.Path, "error", err)
+			continue
+		}
+		if digest != "" {
+			slog.Info("imageupdater: committed resolved digest", "repo", m.Repo, "path", m.Path, "digest", digest)
+		}
+	}
+}
+
 // nudgeCh optionally carries early-wakeup signals from the image-events
 // add-on (see internal/api's handleImageEvent) — nil means the feature was
 // never configured, which read-only-nil-channel-receives-never (a nil
 // channel blocks forever in a select, exactly like "this case never
 // fires"), so the loop degrades to plain ticker-only polling with no extra
 // branch needed.
-func reconcileLoop(ctx context.Context, interval time.Duration, lc *leadershipContext, gh *githubapp.Client, cs configSource, db *sql.DB, reconcilerPtr *atomic.Pointer[reconcile.Reconciler], units *dynamicUnits, rbacStore *rbac.Store, folderResolver folders.Resolver, nudgeCh <-chan struct{}) {
+func reconcileLoop(ctx context.Context, interval time.Duration, lc *leadershipContext, gh *githubapp.Client, cs configSource, db *sql.DB, reconcilerPtr *atomic.Pointer[reconcile.Reconciler], units *dynamicUnits, rbacStore *rbac.Store, folderResolver folders.Resolver, imgResolver imageupdater.Resolver, nudgeCh <-chan struct{}) {
 	ticker := time.NewTicker(interval)
 	defer ticker.Stop()
 	// lastNotify/lastManagedFields track what the currently-stored
@@ -682,6 +727,9 @@ func reconcileLoop(ctx context.Context, interval time.Duration, lc *leadershipCo
 		if passCtx.Err() != nil {
 			return // not leader
 		}
+
+		runImageUpdater(passCtx, gh, imgResolver, expanded)
+
 		results, err := reconcilerPtr.Load().RunOnce(passCtx, expanded)
 		if err != nil {
 			slog.Error("reconcile: run once", "error", err)
