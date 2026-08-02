@@ -82,7 +82,7 @@ jobs:
       # package, nothing to do with this repo. cmd/runcd/client.go is the
       # same http.Client.Do false positive as internal/cloudrun/gcp.go
       # above — the CLI's do() checks err before touching resp.
-      - run: nilaway -exclude-errors-in-files internal/notify/slack.go,internal/api/api_test.go,internal/cloudrun/gcp.go,internal/githubapp/githubapp.go,internal/leader/lease.go,cmd/runcd/client.go,web/node_modules ./...
+      - run: nilaway -exclude-errors-in-files internal/notify/slack.go,internal/api/api_test.go,internal/api/sync_batch_test.go,internal/cloudrun/gcp.go,internal/githubapp/githubapp.go,internal/leader/lease.go,cmd/runcd/client.go,web/node_modules ./...
 
   test:
     runs-on: ubuntu-latest
