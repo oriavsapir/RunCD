@@ -11,6 +11,15 @@
 # managed by this module (or any Terraform in this repo) — this data source
 # only reads its already-deployed state, to surface the exact audience URL
 # the controller's RUNCD_IMAGE_EVENTS_AUDIENCE must be set to.
+locals {
+  # Single source of truth for both the trigger's destination path and
+  # outputs.tf's expected_audience — the same real end-to-end test that
+  # caught the path/audience mismatch (see the destination block's comment
+  # below) would have caught a repeat of it here too if these two values
+  # were computed independently in two places again.
+  destination_path = "/api/events/image"
+}
+
 data "google_cloud_run_v2_service" "target" {
   project  = var.project_id
   location = var.region
@@ -106,6 +115,13 @@ resource "google_eventarc_trigger" "image_push" {
     cloud_run_service {
       service = data.google_cloud_run_v2_service.target.name
       region  = var.region
+      # Without this, events deliver to "/" (Cloud Run's own default), not
+      # the handler's actual route. Confirmed against a real end-to-end
+      # test push: Eventarc's Pub/Sub push subscription signs the OIDC
+      # token's audience as the full destination URL *including this
+      # path*, not just the bare service origin — see expected_audience's
+      # doc comment in outputs.tf, which must match.
+      path = local.destination_path
     }
   }
 
