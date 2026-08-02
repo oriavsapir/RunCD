@@ -25,6 +25,12 @@ export interface Unit {
   auto: boolean;
   desiredImage?: string;
   liveImage?: string;
+  // Mirror the manifest's image.track/image.version/image.repository
+  // (internal/imageupdater's resolver input) — empty for a unit that only
+  // sets image.digest.
+  track?: string;
+  version?: string;
+  repository?: string;
   status: UnitStatus;
   health: UnitHealth;
   lastReconciledAt?: string;
@@ -61,6 +67,23 @@ export interface SyncResponse {
   project: string;
   status: UnitStatus;
   health: UnitHealth;
+}
+
+export type BatchSyncSkipReason =
+  | "forbidden"
+  | "observing"
+  | "inProgress"
+  | "error";
+
+// One unit's outcome from a bulk sync (POST /api/sync). skipped is empty
+// when the sync was actually attempted — status/health then reflect its
+// outcome the same way SyncResponse does for a single unit.
+export interface BatchSyncResult {
+  app: string;
+  project: string;
+  status?: UnitStatus;
+  health?: UnitHealth;
+  skipped?: BatchSyncSkipReason;
 }
 
 export type RbacRole = "admin" | "syncer";

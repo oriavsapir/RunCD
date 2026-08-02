@@ -1,6 +1,6 @@
 import { useState } from "react";
 import Link from "next/link";
-import { ChevronRight, FolderGit2 } from "lucide-react";
+import { ChevronRight, FolderGit2, Tag } from "lucide-react";
 import { StatusBadge } from "@/components/status-badge";
 import { SyncButton } from "@/components/sync-button";
 import { Badge } from "@/components/ui/badge";
@@ -12,7 +12,30 @@ import {
   TableHeader,
   TableRow,
 } from "@/components/ui/table";
+import {
+  Tooltip,
+  TooltipContent,
+  TooltipTrigger,
+} from "@/components/ui/tooltip";
 import type { Unit } from "@/lib/types";
+
+// TrackingBadge marks a unit whose manifest sets image.track/image.version
+// (internal/imageupdater's resolver input) — otherwise there's no visual
+// difference in the table between a plain digest-pinned app and one being
+// auto-tracked, even though the digest can change under it without a
+// manual commit.
+function TrackingBadge({ unit }: { unit: Unit }) {
+  if (!unit.track && !unit.version) return null;
+  const label = unit.track ? `tag "${unit.track}"` : `version "${unit.version}"`;
+  return (
+    <Tooltip>
+      <TooltipTrigger render={<span tabIndex={0} />}>
+        <Tag className="text-muted-foreground size-3 shrink-0" />
+      </TooltipTrigger>
+      <TooltipContent>Tracking {label}</TooltipContent>
+    </Tooltip>
+  );
+}
 
 function groupByEnv(units: Unit[]): Map<string, Unit[]> {
   const groups = new Map<string, Unit[]>();
@@ -86,12 +109,15 @@ export function UnitTable({ units, onSynced }: UnitTableProps) {
               {groups.get(env)!.map((u) => (
                 <TableRow key={`${u.app}/${u.project}`}>
                   <TableCell className="font-medium">
-                    <Link
-                      href={`/units/${encodeURIComponent(u.project)}/${encodeURIComponent(u.app)}`}
-                      className="hover:text-primary hover:underline"
-                    >
-                      {u.app}
-                    </Link>
+                    <span className="flex items-center gap-1.5">
+                      <Link
+                        href={`/units/${encodeURIComponent(u.project)}/${encodeURIComponent(u.app)}`}
+                        className="hover:text-primary hover:underline"
+                      >
+                        {u.app}
+                      </Link>
+                      <TrackingBadge unit={u} />
+                    </span>
                   </TableCell>
                   <TableCell className="text-muted-foreground">
                     {u.project}
@@ -187,12 +213,15 @@ export function UnitTree({ units, onSynced }: UnitTableProps) {
                           key={u.app}
                           className="hover:bg-accent/40 flex flex-wrap items-center justify-between gap-2 rounded-md px-2 py-1.5"
                         >
-                          <Link
-                            href={`/units/${encodeURIComponent(u.project)}/${encodeURIComponent(u.app)}`}
-                            className="hover:text-primary text-sm font-medium hover:underline"
-                          >
-                            {u.app}
-                          </Link>
+                          <span className="flex items-center gap-1.5">
+                            <Link
+                              href={`/units/${encodeURIComponent(u.project)}/${encodeURIComponent(u.app)}`}
+                              className="hover:text-primary text-sm font-medium hover:underline"
+                            >
+                              {u.app}
+                            </Link>
+                            <TrackingBadge unit={u} />
+                          </span>
                           <div className="flex items-center gap-2">
                             <StatusBadge value={u.status} />
                             <StatusBadge value={u.health} />

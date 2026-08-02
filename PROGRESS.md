@@ -1957,6 +1957,42 @@ Dashboard, same pass:
     so an Artifact Registry push shortens the latency for both the updater
     and the reconcile pass through one shared path, no second trigger needed.
 
+## Bulk sync ("Sync All" / "sync out-of-sync") and dashboard tracking visibility
+
+- [x] **`POST /api/sync`** — the ArgoCD-style bulk sync action this
+  dashboard was missing (`internal/api/sync_batch.go`). Fans a manual sync
+  out over every unit the caller's RBAC covers, narrowed by optional
+  `?project=` and `?filter=outOfSync` query params, bounded concurrency
+  (`reconcile.DefaultWorkers`, same as `RunOnce`'s own pool). A unit outside
+  the caller's RBAC scope, already mid-sync, in observe mode, or whose
+  `ManualSync` call itself errors is reported per-unit
+  (`skipped: "forbidden" | "inProgress" | "observing" | "error"`) rather
+  than failing the whole batch or being silently dropped — same
+  one-bad-unit-can't-take-down-the-rest posture `RunOnce` already has for
+  the auto loop. `?filter=outOfSync` treats a unit with no persisted row
+  yet (never reconciled) as "not confirmed synced," not as excluded.
+  - Dashboard: `SyncAllButton` (two instances — "Sync out-of-sync" and
+    "Sync all") next to the existing search/view controls, scoped to the
+    current project filter when one's selected. Deliberately hidden when a
+    free-text search (no project selected) is narrowing the visible list —
+    the confirm dialog's count comes from the client-side filtered list,
+    and the API's own filtering is project-scoped only, so showing the
+    buttons against a text-filtered view would confirm a count that doesn't
+    match what actually gets synced.
+- [x] **`image.track`/`image.version`/`image.repository` surfaced in the
+  dashboard** — previously computed by `imageupdater` but never exposed
+  anywhere in the API or UI, so there was no way to tell a plain
+  digest-pinned app from one being auto-tracked just by looking. Persisted
+  onto `applications` (new `track`/`version`/`repository` columns,
+  `migrations/00006_image_track_version.sql`), set in `reconcile.Result`
+  alongside `DesiredImage` and preserved across a transient manifest-fetch
+  failure the same way `desired_image` already is — but keyed off
+  `desired_image`'s own emptiness as the "did the fetch actually fail" gate,
+  since (unlike `desired_image`) an empty `track`/`version`/`repository` is
+  a legitimate, permanent value for the vast majority of units, not itself
+  a failure signal. Surfaced in `unitView` and shown as a small tag-icon
+  badge (table/tree rows) and a "Tracking" row (unit detail page).
+
 ## Infra / delivery
 
 - [x] **Dockerfile** — multi-stage (`golang:1.26-alpine` build →

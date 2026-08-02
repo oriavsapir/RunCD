@@ -71,8 +71,16 @@ type Result struct {
 	Unit         expander.SyncUnit
 	DesiredImage string
 	LiveImage    string // empty when live state couldn't be read
-	Status       string
-	Health       string
+	// Track/Version/Repository mirror the manifest's image.track/
+	// image.version/image.repository (internal/imageupdater's resolver
+	// input) — empty for a manifest that only sets image.digest. Purely
+	// informational: never compared against live state, unlike
+	// DesiredImage/LiveImage.
+	Track      string
+	Version    string
+	Repository string
+	Status     string
+	Health     string
 	// StatusSince/HealthSince are when Status/Health last *changed* (not
 	// merely last reconciled) — the Notifier's healthDegraded/
 	// outOfSyncGated rules (§5.8) key off these. Only populated after a
@@ -287,6 +295,7 @@ func (r *Reconciler) reconcile(ctx context.Context, unit expander.SyncUnit, opts
 		return res
 	}
 	res.DesiredImage = sd.Image.Digest
+	res.Track, res.Version, res.Repository = sd.Image.Track, sd.Image.Version, sd.Image.Repository
 
 	if err := precondition.Check(ctx, r.Preconditions, unit.Project, filterPreconditions(sd.Requires, unit.IgnorePreconditions)); err != nil {
 		res.Status, res.Err = StatusInvalid, err
@@ -696,8 +705,8 @@ func nullIfEmpty(s string) sql.NullString {
 // the Notifier's duration-based rules (§5.8) depend on these being accurate.
 func (r *Reconciler) upsert(ctx context.Context, res Result) (Result, error) {
 	err := r.DB.QueryRowContext(ctx, `
-		INSERT INTO applications (name, target_gcp_project, desired_image, live_image, status, health, status_since, health_since, last_reconciled_at)
-		VALUES ($1, $2, $3, $4, $5, $6, now(), now(), now())
+		INSERT INTO applications (name, target_gcp_project, desired_image, live_image, track, version, repository, status, health, status_since, health_since, last_reconciled_at)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, now(), now(), now())
 		ON CONFLICT (name, target_gcp_project) DO UPDATE SET
 			-- A transient manifest-fetch failure leaves res.DesiredImage
 			-- empty for that pass (reconcile() never reached the point of
@@ -707,13 +716,22 @@ func (r *Reconciler) upsert(ctx context.Context, res Result) (Result, error) {
 			-- Same exposure as desired_image above (nullIfEmpty turns a blank
 			-- res.LiveImage into NULL on a transient fetch failure).
 			live_image = CASE WHEN EXCLUDED.live_image IS NULL THEN applications.live_image ELSE EXCLUDED.live_image END,
+			-- track/version/repository are legitimately empty for most
+			-- manifests (only image.digest set) — unlike desired_image, an
+			-- empty string here isn't itself a signal of a failed fetch, so
+			-- this piggybacks on desired_image's own empty-means-failed-fetch
+			-- signal instead of checking these columns' own emptiness.
+			track      = CASE WHEN EXCLUDED.desired_image = '' THEN applications.track ELSE EXCLUDED.track END,
+			version    = CASE WHEN EXCLUDED.desired_image = '' THEN applications.version ELSE EXCLUDED.version END,
+			repository = CASE WHEN EXCLUDED.desired_image = '' THEN applications.repository ELSE EXCLUDED.repository END,
 			status = EXCLUDED.status,
 			health = EXCLUDED.health,
 			status_since = CASE WHEN applications.status = EXCLUDED.status THEN applications.status_since ELSE now() END,
 			health_since = CASE WHEN applications.health = EXCLUDED.health THEN applications.health_since ELSE now() END,
 			last_reconciled_at = now()
 		RETURNING status_since, health_since`,
-		res.Unit.App, res.Unit.Project, res.DesiredImage, nullIfEmpty(res.LiveImage), res.Status, res.Health,
+		res.Unit.App, res.Unit.Project, res.DesiredImage, nullIfEmpty(res.LiveImage),
+		res.Track, res.Version, res.Repository, res.Status, res.Health,
 	).Scan(&res.StatusSince, &res.HealthSince)
 	return res, err
 }

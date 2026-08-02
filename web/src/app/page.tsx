@@ -19,6 +19,7 @@ import {
 import Link from "next/link";
 import { usePathname, useRouter, useSearchParams } from "next/navigation";
 import { ProjectGrid } from "@/components/project-grid";
+import { SyncAllButton } from "@/components/sync-all-button";
 import { UnitTable, UnitTree } from "@/components/unit-table";
 import { Skeleton } from "@/components/ui/skeleton";
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
@@ -381,6 +382,29 @@ function SyncUnitsPage() {
                   className="h-9 pl-8"
                 />
               </div>
+              {/* Only shown when the visible set exactly matches what the
+                  bulk-sync API call would actually operate on (every unit,
+                  or every unit in one project) — a free-text search with no
+                  project selected narrows this view client-side only, which
+                  the API has no way to replicate, so showing a count here
+                  in that case would promise something the confirm dialog
+                  can't keep. */}
+              {(selectedProject || !query.trim()) && (
+                <>
+                  <SyncAllButton
+                    units={filtered ?? []}
+                    project={selectedProject}
+                    mode="outOfSync"
+                    onSynced={() => setRefreshKey((k) => k + 1)}
+                  />
+                  <SyncAllButton
+                    units={filtered ?? []}
+                    project={selectedProject}
+                    mode="all"
+                    onSynced={() => setRefreshKey((k) => k + 1)}
+                  />
+                </>
+              )}
               <ToggleGroup
                 variant="outline"
                 value={[view]}

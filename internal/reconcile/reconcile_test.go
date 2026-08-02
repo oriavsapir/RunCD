@@ -1279,6 +1279,81 @@ func TestUpsert_EmptyLiveImageDoesNotOverwritePreviousValue(t *testing.T) {
 	}
 }
 
+// TestUpsert_PersistsTrackVersionRepository checks the three new columns
+// round-trip through upsert alongside desired_image.
+func TestUpsert_PersistsTrackVersionRepository(t *testing.T) {
+	db := testutil.NewPostgres(t)
+	r := &Reconciler{DB: db}
+
+	_, err := r.upsert(context.Background(), Result{
+		Unit:         expander.SyncUnit{App: "widget-api", Project: "example-dev-01"},
+		DesiredImage: validDigest,
+		Track:        "stable",
+		Repository:   "us-central1-docker.pkg.dev/proj/repo/image",
+		Status:       "Synced",
+		Health:       "Healthy",
+	})
+	if err != nil {
+		t.Fatalf("upsert: %v", err)
+	}
+
+	var track, version, repository string
+	err = db.QueryRowContext(context.Background(),
+		`SELECT COALESCE(track, ''), COALESCE(version, ''), COALESCE(repository, '') FROM applications WHERE name = 'widget-api' AND target_gcp_project = 'example-dev-01'`,
+	).Scan(&track, &version, &repository)
+	if err != nil {
+		t.Fatalf("query: %v", err)
+	}
+	if track != "stable" || version != "" || repository != "us-central1-docker.pkg.dev/proj/repo/image" {
+		t.Fatalf("got track=%q version=%q repository=%q", track, version, repository)
+	}
+}
+
+// TestUpsert_EmptyDesiredImagePreservesTrackVersionRepository mirrors
+// TestUpsert_EmptyDesiredImageDoesNotOverwritePreviousValue: a transient
+// manifest-fetch failure must not blank out a previously-recorded
+// track/version/repository either, even though (unlike desired_image) an
+// empty string is also a legitimate, permanent value for these three.
+func TestUpsert_EmptyDesiredImagePreservesTrackVersionRepository(t *testing.T) {
+	db := testutil.NewPostgres(t)
+	r := &Reconciler{DB: db}
+
+	_, err := r.upsert(context.Background(), Result{
+		Unit:         expander.SyncUnit{App: "widget-api", Project: "example-dev-01"},
+		DesiredImage: validDigest,
+		Version:      "1.2",
+		Repository:   "us-central1-docker.pkg.dev/proj/repo/image",
+		Status:       "Synced",
+		Health:       "Healthy",
+	})
+	if err != nil {
+		t.Fatalf("first upsert: %v", err)
+	}
+
+	// Simulate a pass whose manifest fetch failed: DesiredImage (and
+	// therefore Track/Version/Repository, set from the same manifest)
+	// never got set.
+	_, err = r.upsert(context.Background(), Result{
+		Unit:   expander.SyncUnit{App: "widget-api", Project: "example-dev-01"},
+		Status: "Invalid",
+		Health: "Invalid",
+	})
+	if err != nil {
+		t.Fatalf("second upsert: %v", err)
+	}
+
+	var version, repository string
+	err = db.QueryRowContext(context.Background(),
+		`SELECT COALESCE(version, ''), COALESCE(repository, '') FROM applications WHERE name = 'widget-api' AND target_gcp_project = 'example-dev-01'`,
+	).Scan(&version, &repository)
+	if err != nil {
+		t.Fatalf("query: %v", err)
+	}
+	if version != "1.2" || repository != "us-central1-docker.pkg.dev/proj/repo/image" {
+		t.Fatalf("expected version/repository to survive the empty-DesiredImage upsert, got version=%q repository=%q", version, repository)
+	}
+}
+
 type fakeNotifier struct {
 	evaluated []Result
 }

@@ -1,4 +1,5 @@
 import type {
+  BatchSyncResult,
   RbacRule,
   RuntimeConfig,
   SyncEvent,
@@ -96,4 +97,17 @@ export function syncUnit(
     `/api/sync/${encodeURIComponent(project)}/${encodeURIComponent(app)}`,
     { method: "POST" },
   );
+}
+
+export function syncBatch(opts: {
+  project?: string;
+  onlyOutOfSync?: boolean;
+}): Promise<BatchSyncResult[]> {
+  const params = new URLSearchParams();
+  if (opts.project) params.set("project", opts.project);
+  if (opts.onlyOutOfSync) params.set("filter", "outOfSync");
+  const qs = params.toString();
+  return request<BatchSyncResult[]>(`/api/sync${qs ? `?${qs}` : ""}`, {
+    method: "POST",
+  });
 }

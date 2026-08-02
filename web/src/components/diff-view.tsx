@@ -3,6 +3,7 @@ import {
   GitCompare,
   Info,
   MapPin,
+  Tag,
   Zap,
   ZapOff,
 } from "lucide-react";
@@ -90,6 +91,29 @@ export function DiffView({ unit }: { unit: Unit }) {
           <dd>
             <ImageValue digest={unit.liveImage} />
           </dd>
+
+          {(unit.track || unit.version) && (
+            <>
+              <dt className="text-muted-foreground">Tracking</dt>
+              <dd className="flex items-center gap-1.5">
+                <Tag className="text-muted-foreground size-3.5 shrink-0" />
+                <span>
+                  {unit.track
+                    ? `tag "${unit.track}"`
+                    : `version "${unit.version}"`}
+                  {unit.repository && (
+                    <>
+                      {" "}
+                      in{" "}
+                      <code className="text-xs break-all">
+                        {unit.repository}
+                      </code>
+                    </>
+                  )}
+                </span>
+              </dd>
+            </>
+          )}
 
           {!inSync && unit.desiredImage && unit.liveImage && (
             <>

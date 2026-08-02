@@ -17,10 +17,16 @@ type statusDB interface {
 
 // ApplicationRow is the last-persisted reconcile result for a sync unit.
 type ApplicationRow struct {
-	App              string
-	Project          string
-	DesiredImage     string
-	LiveImage        string
+	App          string
+	Project      string
+	DesiredImage string
+	LiveImage    string
+	// Track/Version/Repository mirror the manifest's image.track/
+	// image.version/image.repository — empty for a manifest that only sets
+	// image.digest (see reconcile.Result's identical fields).
+	Track            string
+	Version          string
+	Repository       string
 	Status           string
 	Health           string
 	LastReconciledAt time.Time
@@ -66,7 +72,9 @@ type PostgresStatusStore struct {
 
 func (s *PostgresStatusStore) ListApplications(ctx context.Context) ([]ApplicationRow, error) {
 	rows, err := s.DB.QueryContext(ctx, `
-		SELECT name, target_gcp_project, desired_image, COALESCE(live_image, ''), status, health, last_reconciled_at
+		SELECT name, target_gcp_project, desired_image, COALESCE(live_image, ''),
+		       COALESCE(track, ''), COALESCE(version, ''), COALESCE(repository, ''),
+		       status, health, last_reconciled_at
 		FROM applications`)
 	if err != nil {
 		return nil, fmt.Errorf("list applications: %w", err)
@@ -76,7 +84,8 @@ func (s *PostgresStatusStore) ListApplications(ctx context.Context) ([]Applicati
 	var out []ApplicationRow
 	for rows.Next() {
 		var r ApplicationRow
-		if err := rows.Scan(&r.App, &r.Project, &r.DesiredImage, &r.LiveImage, &r.Status, &r.Health, &r.LastReconciledAt); err != nil {
+		if err := rows.Scan(&r.App, &r.Project, &r.DesiredImage, &r.LiveImage,
+			&r.Track, &r.Version, &r.Repository, &r.Status, &r.Health, &r.LastReconciledAt); err != nil {
 			return nil, fmt.Errorf("scan application row: %w", err)
 		}
 		out = append(out, r)
@@ -90,9 +99,12 @@ func (s *PostgresStatusStore) ListApplications(ctx context.Context) ([]Applicati
 func (s *PostgresStatusStore) GetApplication(ctx context.Context, app, project string) (ApplicationRow, bool, error) {
 	var r ApplicationRow
 	err := s.DB.QueryRowContext(ctx, `
-		SELECT name, target_gcp_project, desired_image, COALESCE(live_image, ''), status, health, last_reconciled_at
+		SELECT name, target_gcp_project, desired_image, COALESCE(live_image, ''),
+		       COALESCE(track, ''), COALESCE(version, ''), COALESCE(repository, ''),
+		       status, health, last_reconciled_at
 		FROM applications WHERE name = $1 AND target_gcp_project = $2`, app, project,
-	).Scan(&r.App, &r.Project, &r.DesiredImage, &r.LiveImage, &r.Status, &r.Health, &r.LastReconciledAt)
+	).Scan(&r.App, &r.Project, &r.DesiredImage, &r.LiveImage,
+		&r.Track, &r.Version, &r.Repository, &r.Status, &r.Health, &r.LastReconciledAt)
 	if errors.Is(err, sql.ErrNoRows) {
 		return ApplicationRow{}, false, nil
 	}

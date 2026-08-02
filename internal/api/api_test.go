@@ -618,6 +618,36 @@ func TestHandleListUnits_ReflectsPersistedStateAfterSync(t *testing.T) {
 	}
 }
 
+// TestHandleUnitDetail_SurfacesTrackVersionRepository checks a manifest
+// that sets image.version/image.repository (imageupdater's resolver
+// input) has those values surfaced in the unit detail response, not just
+// the resolved digest — the dashboard has no other way to show what an
+// app is actually tracking.
+func TestHandleUnitDetail_SurfacesTrackVersionRepository(t *testing.T) {
+	h, _ := newTestHandler(t)
+	h.Reconciler.Load().Manifests = &fakeManifests{byApp: map[string][]byte{
+		"widget-api": []byte(fmt.Sprintf("image:\n  digest: %s\n  version: \"1\"\n  repository: us-central1-docker.pkg.dev/proj/repo/image\n", validDigest)),
+	}}
+	srv := httptest.NewServer(NewMux(h))
+	defer srv.Close()
+
+	syncResp := postSync(t, srv.URL+"/api/sync/example-prod-eu/widget-api", "admin-token")
+	defer func() { _ = syncResp.Body.Close() }()
+	if syncResp.StatusCode != http.StatusOK {
+		t.Fatalf("expected sync to succeed, got %d", syncResp.StatusCode)
+	}
+
+	detailResp := getWithBearer(t, srv.URL+"/api/units/example-prod-eu/widget-api", "admin-token")
+	defer func() { _ = detailResp.Body.Close() }()
+	var detail unitView
+	if err := json.NewDecoder(detailResp.Body).Decode(&detail); err != nil {
+		t.Fatalf("decode detail response: %v", err)
+	}
+	if detail.Version != "1" || detail.Repository != "us-central1-docker.pkg.dev/proj/repo/image" {
+		t.Fatalf("expected version=1 repository=us-central1-docker.pkg.dev/proj/repo/image, got %+v", detail)
+	}
+}
+
 // TestHandleListUnits_CanSyncReflectsCallersOwnRBACScope regression-tests
 // the gated Sync button's data source: the dashboard can't evaluate
 // rbac.CanSync itself, so canSync must be computed per the caller's own

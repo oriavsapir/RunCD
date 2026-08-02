@@ -20,13 +20,21 @@ type UnitLister interface {
 }
 
 type unitView struct {
-	App              string     `json:"app"`
-	Project          string     `json:"project"`
-	Env              string     `json:"env"`
-	Region           string     `json:"region"`
-	Auto             bool       `json:"auto"`
-	DesiredImage     string     `json:"desiredImage,omitempty"`
-	LiveImage        string     `json:"liveImage,omitempty"`
+	App          string `json:"app"`
+	Project      string `json:"project"`
+	Env          string `json:"env"`
+	Region       string `json:"region"`
+	Auto         bool   `json:"auto"`
+	DesiredImage string `json:"desiredImage,omitempty"`
+	LiveImage    string `json:"liveImage,omitempty"`
+	// Track/Version/Repository mirror the manifest's image.track/
+	// image.version/image.repository (internal/imageupdater's resolver
+	// input) — empty for a unit that only sets image.digest. Populated from
+	// the last reconcile pass's persisted row (applyRow below), same as
+	// DesiredImage/LiveImage, not read live per request.
+	Track            string     `json:"track,omitempty"`
+	Version          string     `json:"version,omitempty"`
+	Repository       string     `json:"repository,omitempty"`
 	Status           string     `json:"status"`
 	Health           string     `json:"health"`
 	LastReconciledAt *time.Time `json:"lastReconciledAt,omitempty"`
@@ -77,6 +85,9 @@ func unitViewFrom(u expander.SyncUnit, rbacCfg *rbac.Config, folderMembership ma
 func applyRow(v *unitView, row ApplicationRow) {
 	v.DesiredImage = row.DesiredImage
 	v.LiveImage = row.LiveImage
+	v.Track = row.Track
+	v.Version = row.Version
+	v.Repository = row.Repository
 	v.Status = row.Status
 	v.Health = row.Health
 	t := row.LastReconciledAt
