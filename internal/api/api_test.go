@@ -648,6 +648,32 @@ func TestHandleUnitDetail_SurfacesTrackVersionRepository(t *testing.T) {
 	}
 }
 
+// TestHandleUnitDetail_SurfacesResourceType checks a manifest's
+// resourceType is surfaced in the unit detail response — the dashboard
+// needs it to know whether Health means "is this continuously up" (service/
+// workerPool) or "did the most recent execution succeed" (job).
+func TestHandleUnitDetail_SurfacesResourceType(t *testing.T) {
+	h, _ := newTestHandler(t)
+	h.Reconciler.Load().Manifests = &fakeManifests{byApp: map[string][]byte{
+		"widget-api": []byte(fmt.Sprintf("resourceType: job\nimage:\n  digest: %s\n", validDigest)),
+	}}
+	srv := httptest.NewServer(NewMux(h))
+	defer srv.Close()
+
+	syncResp := postSync(t, srv.URL+"/api/sync/example-prod-eu/widget-api", "admin-token")
+	defer func() { _ = syncResp.Body.Close() }()
+
+	detailResp := getWithBearer(t, srv.URL+"/api/units/example-prod-eu/widget-api", "admin-token")
+	defer func() { _ = detailResp.Body.Close() }()
+	var detail unitView
+	if err := json.NewDecoder(detailResp.Body).Decode(&detail); err != nil {
+		t.Fatalf("decode detail response: %v", err)
+	}
+	if detail.ResourceType != "job" {
+		t.Fatalf("expected resourceType=job, got %+v", detail)
+	}
+}
+
 // TestHandleListUnits_CanSyncReflectsCallersOwnRBACScope regression-tests
 // the gated Sync button's data source: the dashboard can't evaluate
 // rbac.CanSync itself, so canSync must be computed per the caller's own

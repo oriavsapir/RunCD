@@ -1,7 +1,7 @@
 import { useState } from "react";
 import Link from "next/link";
 import { ChevronRight, FolderGit2, Tag } from "lucide-react";
-import { StatusBadge } from "@/components/status-badge";
+import { HealthBadge, StatusBadge } from "@/components/status-badge";
 import { SyncButton } from "@/components/sync-button";
 import { Badge } from "@/components/ui/badge";
 import {
@@ -126,7 +126,7 @@ export function UnitTable({ units, onSynced }: UnitTableProps) {
                     <StatusBadge value={u.status} />
                   </TableCell>
                   <TableCell>
-                    <StatusBadge value={u.health} />
+                    <HealthBadge health={u.health} resourceType={u.resourceType} />
                   </TableCell>
                   <TableCell className="text-right">
                     <SyncButton unit={u} onSynced={onSynced} size="sm" />
@@ -224,7 +224,7 @@ export function UnitTree({ units, onSynced }: UnitTableProps) {
                           </span>
                           <div className="flex items-center gap-2">
                             <StatusBadge value={u.status} />
-                            <StatusBadge value={u.health} />
+                            <HealthBadge health={u.health} resourceType={u.resourceType} />
                             <SyncButton
                               unit={u}
                               onSynced={onSynced}

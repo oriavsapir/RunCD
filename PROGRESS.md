@@ -1992,6 +1992,17 @@ Dashboard, same pass:
   a legitimate, permanent value for the vast majority of units, not itself
   a failure signal. Surfaced in `unitView` and shown as a small tag-icon
   badge (table/tree rows) and a "Tracking" row (unit detail page).
+- [x] **Jobs no longer show a "Health" status in the dashboard** — a job
+  runs to completion and stops, so `Healthy`/`Progressing`/`Missing` for one
+  is really "did the most recent execution succeed," a fundamentally
+  different (and noisier — an execution can be triggered by something
+  outside RunCD entirely) signal than a service's continuous up/down state.
+  `resourceType` persisted onto `applications` alongside track/version/
+  repository (`migrations/00007_resource_type.sql`, same "keyed off
+  `desired_image`'s emptiness, not its own" preserve-on-failed-fetch
+  pattern), surfaced in `unitView`, and the dashboard's Health column/badge
+  (`HealthBadge`) shows a plain "Job" badge for job units instead of trying
+  to render an execution outcome as if it were an ongoing health status.
 
 ## Infra / delivery
 

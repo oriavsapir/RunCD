@@ -8,7 +8,7 @@ import {
   ZapOff,
 } from "lucide-react";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
-import { StatusBadge } from "@/components/status-badge";
+import { HealthBadge, StatusBadge } from "@/components/status-badge";
 import type { Unit } from "@/lib/types";
 
 function ImageValue({ digest }: { digest?: string }) {
@@ -38,7 +38,7 @@ export function DiffView({ unit }: { unit: Unit }) {
       <CardContent className="flex flex-col gap-4">
         <div className="flex items-center gap-3">
           <StatusBadge value={unit.status} />
-          <StatusBadge value={unit.health} />
+          <HealthBadge health={unit.health} resourceType={unit.resourceType} />
           {inSync && (
             <span className="text-muted-foreground text-xs">
               image digest matches

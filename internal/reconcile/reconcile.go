@@ -79,8 +79,15 @@ type Result struct {
 	Track      string
 	Version    string
 	Repository string
-	Status     string
-	Health     string
+	// ResourceType mirrors the manifest's resourceType ("service", "job", or
+	// "workerPool") — the dashboard uses it to decide whether Health even
+	// makes sense to show as a status (a job runs to completion and stops;
+	// Health for one is really "did the most recent execution succeed," a
+	// fundamentally different, noisier signal than a service's continuous
+	// up/down state).
+	ResourceType string
+	Status       string
+	Health       string
 	// StatusSince/HealthSince are when Status/Health last *changed* (not
 	// merely last reconciled) — the Notifier's healthDegraded/
 	// outOfSyncGated rules (§5.8) key off these. Only populated after a
@@ -296,6 +303,7 @@ func (r *Reconciler) reconcile(ctx context.Context, unit expander.SyncUnit, opts
 	}
 	res.DesiredImage = sd.Image.Digest
 	res.Track, res.Version, res.Repository = sd.Image.Track, sd.Image.Version, sd.Image.Repository
+	res.ResourceType = string(sd.ResourceType)
 
 	if err := precondition.Check(ctx, r.Preconditions, unit.Project, filterPreconditions(sd.Requires, unit.IgnorePreconditions)); err != nil {
 		res.Status, res.Err = StatusInvalid, err
@@ -705,8 +713,8 @@ func nullIfEmpty(s string) sql.NullString {
 // the Notifier's duration-based rules (§5.8) depend on these being accurate.
 func (r *Reconciler) upsert(ctx context.Context, res Result) (Result, error) {
 	err := r.DB.QueryRowContext(ctx, `
-		INSERT INTO applications (name, target_gcp_project, desired_image, live_image, track, version, repository, status, health, status_since, health_since, last_reconciled_at)
-		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, now(), now(), now())
+		INSERT INTO applications (name, target_gcp_project, desired_image, live_image, track, version, repository, resource_type, status, health, status_since, health_since, last_reconciled_at)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, now(), now(), now())
 		ON CONFLICT (name, target_gcp_project) DO UPDATE SET
 			-- A transient manifest-fetch failure leaves res.DesiredImage
 			-- empty for that pass (reconcile() never reached the point of
@@ -724,6 +732,10 @@ func (r *Reconciler) upsert(ctx context.Context, res Result) (Result, error) {
 			track      = CASE WHEN EXCLUDED.desired_image = '' THEN applications.track ELSE EXCLUDED.track END,
 			version    = CASE WHEN EXCLUDED.desired_image = '' THEN applications.version ELSE EXCLUDED.version END,
 			repository = CASE WHEN EXCLUDED.desired_image = '' THEN applications.repository ELSE EXCLUDED.repository END,
+			-- resource_type always accompanies a successful manifest parse
+			-- (manifest.Parse defaults it to "service" when unset, never
+			-- blank) — same failed-fetch gate as track/version/repository.
+			resource_type = CASE WHEN EXCLUDED.desired_image = '' THEN applications.resource_type ELSE EXCLUDED.resource_type END,
 			status = EXCLUDED.status,
 			health = EXCLUDED.health,
 			status_since = CASE WHEN applications.status = EXCLUDED.status THEN applications.status_since ELSE now() END,
@@ -731,7 +743,7 @@ func (r *Reconciler) upsert(ctx context.Context, res Result) (Result, error) {
 			last_reconciled_at = now()
 		RETURNING status_since, health_since`,
 		res.Unit.App, res.Unit.Project, res.DesiredImage, nullIfEmpty(res.LiveImage),
-		res.Track, res.Version, res.Repository, res.Status, res.Health,
+		res.Track, res.Version, res.Repository, res.ResourceType, res.Status, res.Health,
 	).Scan(&res.StatusSince, &res.HealthSince)
 	return res, err
 }

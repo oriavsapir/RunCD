@@ -1354,6 +1354,57 @@ func TestUpsert_EmptyDesiredImagePreservesTrackVersionRepository(t *testing.T) {
 	}
 }
 
+// TestUpsert_PersistsResourceType checks resource_type round-trips through
+// upsert, and survives a transient manifest-fetch failure the same way
+// track/version/repository do (keyed off desired_image's own emptiness,
+// since "job"/"workerPool"/"service" is never itself a legitimate empty
+// value — manifest.Parse always defaults it).
+func TestUpsert_PersistsResourceType(t *testing.T) {
+	db := testutil.NewPostgres(t)
+	r := &Reconciler{DB: db}
+
+	_, err := r.upsert(context.Background(), Result{
+		Unit:         expander.SyncUnit{App: "sweep-job", Project: "example-dev-01"},
+		DesiredImage: validDigest,
+		ResourceType: "job",
+		Status:       "Synced",
+		Health:       "Healthy",
+	})
+	if err != nil {
+		t.Fatalf("first upsert: %v", err)
+	}
+
+	var resourceType string
+	err = db.QueryRowContext(context.Background(),
+		`SELECT COALESCE(resource_type, '') FROM applications WHERE name = 'sweep-job' AND target_gcp_project = 'example-dev-01'`,
+	).Scan(&resourceType)
+	if err != nil {
+		t.Fatalf("query: %v", err)
+	}
+	if resourceType != "job" {
+		t.Fatalf("got resource_type=%q, want job", resourceType)
+	}
+
+	// Simulate a pass whose manifest fetch failed: ResourceType never got set.
+	_, err = r.upsert(context.Background(), Result{
+		Unit:   expander.SyncUnit{App: "sweep-job", Project: "example-dev-01"},
+		Status: "Invalid",
+		Health: "Invalid",
+	})
+	if err != nil {
+		t.Fatalf("second upsert: %v", err)
+	}
+	err = db.QueryRowContext(context.Background(),
+		`SELECT COALESCE(resource_type, '') FROM applications WHERE name = 'sweep-job' AND target_gcp_project = 'example-dev-01'`,
+	).Scan(&resourceType)
+	if err != nil {
+		t.Fatalf("query after failed fetch: %v", err)
+	}
+	if resourceType != "job" {
+		t.Fatalf("expected resource_type to survive the empty-DesiredImage upsert, got %q", resourceType)
+	}
+}
+
 type fakeNotifier struct {
 	evaluated []Result
 }

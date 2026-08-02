@@ -24,9 +24,12 @@ type ApplicationRow struct {
 	// Track/Version/Repository mirror the manifest's image.track/
 	// image.version/image.repository — empty for a manifest that only sets
 	// image.digest (see reconcile.Result's identical fields).
-	Track            string
-	Version          string
-	Repository       string
+	Track      string
+	Version    string
+	Repository string
+	// ResourceType mirrors the manifest's resourceType ("service", "job", or
+	// "workerPool") — see reconcile.Result's identical field.
+	ResourceType     string
 	Status           string
 	Health           string
 	LastReconciledAt time.Time
@@ -73,7 +76,7 @@ type PostgresStatusStore struct {
 func (s *PostgresStatusStore) ListApplications(ctx context.Context) ([]ApplicationRow, error) {
 	rows, err := s.DB.QueryContext(ctx, `
 		SELECT name, target_gcp_project, desired_image, COALESCE(live_image, ''),
-		       COALESCE(track, ''), COALESCE(version, ''), COALESCE(repository, ''),
+		       COALESCE(track, ''), COALESCE(version, ''), COALESCE(repository, ''), COALESCE(resource_type, ''),
 		       status, health, last_reconciled_at
 		FROM applications`)
 	if err != nil {
@@ -85,7 +88,7 @@ func (s *PostgresStatusStore) ListApplications(ctx context.Context) ([]Applicati
 	for rows.Next() {
 		var r ApplicationRow
 		if err := rows.Scan(&r.App, &r.Project, &r.DesiredImage, &r.LiveImage,
-			&r.Track, &r.Version, &r.Repository, &r.Status, &r.Health, &r.LastReconciledAt); err != nil {
+			&r.Track, &r.Version, &r.Repository, &r.ResourceType, &r.Status, &r.Health, &r.LastReconciledAt); err != nil {
 			return nil, fmt.Errorf("scan application row: %w", err)
 		}
 		out = append(out, r)
@@ -100,11 +103,11 @@ func (s *PostgresStatusStore) GetApplication(ctx context.Context, app, project s
 	var r ApplicationRow
 	err := s.DB.QueryRowContext(ctx, `
 		SELECT name, target_gcp_project, desired_image, COALESCE(live_image, ''),
-		       COALESCE(track, ''), COALESCE(version, ''), COALESCE(repository, ''),
+		       COALESCE(track, ''), COALESCE(version, ''), COALESCE(repository, ''), COALESCE(resource_type, ''),
 		       status, health, last_reconciled_at
 		FROM applications WHERE name = $1 AND target_gcp_project = $2`, app, project,
 	).Scan(&r.App, &r.Project, &r.DesiredImage, &r.LiveImage,
-		&r.Track, &r.Version, &r.Repository, &r.Status, &r.Health, &r.LastReconciledAt)
+		&r.Track, &r.Version, &r.Repository, &r.ResourceType, &r.Status, &r.Health, &r.LastReconciledAt)
 	if errors.Is(err, sql.ErrNoRows) {
 		return ApplicationRow{}, false, nil
 	}

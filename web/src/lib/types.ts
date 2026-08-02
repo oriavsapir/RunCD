@@ -31,6 +31,11 @@ export interface Unit {
   track?: string;
   version?: string;
   repository?: string;
+  // "service" | "job" | "workerPool" (manifest.ResourceType) — a job runs
+  // to completion and stops, so its `health` really means "did the most
+  // recent execution succeed," not an ongoing state the way a service's
+  // does. Empty only for a unit pending its first reconcile pass.
+  resourceType?: string;
   status: UnitStatus;
   health: UnitHealth;
   lastReconciledAt?: string;

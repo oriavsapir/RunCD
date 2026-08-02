@@ -32,9 +32,15 @@ type unitView struct {
 	// input) — empty for a unit that only sets image.digest. Populated from
 	// the last reconcile pass's persisted row (applyRow below), same as
 	// DesiredImage/LiveImage, not read live per request.
-	Track            string     `json:"track,omitempty"`
-	Version          string     `json:"version,omitempty"`
-	Repository       string     `json:"repository,omitempty"`
+	Track      string `json:"track,omitempty"`
+	Version    string `json:"version,omitempty"`
+	Repository string `json:"repository,omitempty"`
+	// ResourceType mirrors the manifest's resourceType ("service", "job", or
+	// "workerPool") — the dashboard uses it to decide whether Health is even
+	// a meaningful thing to show (a job runs to completion and stops; its
+	// "Health" is really "did the most recent execution succeed," not an
+	// ongoing state the way a service's is).
+	ResourceType     string     `json:"resourceType,omitempty"`
 	Status           string     `json:"status"`
 	Health           string     `json:"health"`
 	LastReconciledAt *time.Time `json:"lastReconciledAt,omitempty"`
@@ -88,6 +94,7 @@ func applyRow(v *unitView, row ApplicationRow) {
 	v.Track = row.Track
 	v.Version = row.Version
 	v.Repository = row.Repository
+	v.ResourceType = row.ResourceType
 	v.Status = row.Status
 	v.Health = row.Health
 	t := row.LastReconciledAt

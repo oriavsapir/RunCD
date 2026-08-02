@@ -1,5 +1,6 @@
 import {
   AlertTriangle,
+  Briefcase,
   CheckCircle2,
   Clock,
   HelpCircle,
@@ -77,4 +78,32 @@ export function StatusBadge({ value }: { value: string }) {
       {value}
     </Badge>
   );
+}
+
+// HealthBadge is StatusBadge's counterpart specifically for the Health
+// column: a job runs to completion and stops, so Healthy/Progressing/
+// Missing for one is really "did the most recent execution succeed" — a
+// fundamentally different, noisier signal than a service's continuous
+// up/down state (and one that can flip from executions RunCD never
+// triggered, e.g. an external scheduler). Rather than dress that up as a
+// health status, a job's Health column just says "Job."
+export function HealthBadge({
+  health,
+  resourceType,
+}: {
+  health: string;
+  resourceType?: string;
+}) {
+  if (resourceType === "job") {
+    return (
+      <Badge
+        variant="outline"
+        className="gap-1 font-medium bg-neutral-100 text-neutral-600 border-neutral-200 dark:bg-neutral-900 dark:text-neutral-400 dark:border-neutral-800"
+      >
+        <Briefcase className="size-3" />
+        Job
+      </Badge>
+    );
+  }
+  return <StatusBadge value={health} />;
 }
