@@ -90,7 +90,11 @@ func (c *GCPAdminClient) servicesClient(ctx context.Context, region string) (*ru
 		// context.WithoutCancel: shared via singleflight across every
 		// concurrent caller for this region, not just the one that
 		// triggered it — see the identical note in precondition/gcp.go.
-		sc, err := run.NewServicesClient(context.WithoutCancel(ctx), regionalEndpoint(region))
+		// Rebounded with apiCallTimeout so a hung dial can't wedge every
+		// other caller sharing this singleflight key forever.
+		constructCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), apiCallTimeout)
+		defer cancel()
+		sc, err := run.NewServicesClient(constructCtx, regionalEndpoint(region))
 		if err != nil {
 			return nil, fmt.Errorf("create Cloud Run services client for %s: %w", region, err)
 		}
@@ -121,7 +125,11 @@ func (c *GCPAdminClient) workerPoolsClient(ctx context.Context, region string) (
 		}
 		c.mu.Unlock()
 
-		wc, err := run.NewWorkerPoolsClient(context.WithoutCancel(ctx), regionalEndpoint(region))
+		// Rebounded with apiCallTimeout — see the identical note in
+		// servicesClient above.
+		constructCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), apiCallTimeout)
+		defer cancel()
+		wc, err := run.NewWorkerPoolsClient(constructCtx, regionalEndpoint(region))
 		if err != nil {
 			return nil, fmt.Errorf("create Cloud Run workerPools client for %s: %w", region, err)
 		}
@@ -152,7 +160,11 @@ func (c *GCPAdminClient) jobsClient(ctx context.Context, region string) (*run.Jo
 		}
 		c.mu.Unlock()
 
-		jc, err := run.NewJobsClient(context.WithoutCancel(ctx), regionalEndpoint(region))
+		// Rebounded with apiCallTimeout — see the identical note in
+		// servicesClient above.
+		constructCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), apiCallTimeout)
+		defer cancel()
+		jc, err := run.NewJobsClient(constructCtx, regionalEndpoint(region))
 		if err != nil {
 			return nil, fmt.Errorf("create Cloud Run jobs client for %s: %w", region, err)
 		}
@@ -183,7 +195,11 @@ func (c *GCPAdminClient) executionsClient(ctx context.Context, region string) (*
 		}
 		c.mu.Unlock()
 
-		ec, err := run.NewExecutionsClient(context.WithoutCancel(ctx), regionalEndpoint(region))
+		// Rebounded with apiCallTimeout — see the identical note in
+		// servicesClient above.
+		constructCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), apiCallTimeout)
+		defer cancel()
+		ec, err := run.NewExecutionsClient(constructCtx, regionalEndpoint(region))
 		if err != nil {
 			return nil, fmt.Errorf("create Cloud Run executions client for %s: %w", region, err)
 		}

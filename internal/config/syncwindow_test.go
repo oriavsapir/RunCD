@@ -73,3 +73,29 @@ func TestWindowsAllow_HourWrapsPastMidnight(t *testing.T) {
 		t.Fatal("expected 02:00 to be inside an overnight 22-06 window")
 	}
 }
+
+func TestWindowsAllow_HourWrapWithDaysChecksThePriorDayAfterMidnight(t *testing.T) {
+	// 2026-07-31 is a Friday; 2026-08-01 is a Saturday. A deny window
+	// documented as "Fri 22:00-06:00 UTC" must still be denying at
+	// 2026-08-01T02:00Z — that instant is on Saturday, but it's still
+	// within the Friday-night window Days: ["Fri"] describes.
+	windows := []SyncWindow{{Kind: SyncWindowDeny, Days: []string{"Fri"}, StartHour: 22, EndHour: 6}}
+	if WindowsAllow(windows, mustTime(t, "2026-07-31T23:00:00Z")) {
+		t.Fatal("expected Friday 23:00 to be inside the Fri-night window")
+	}
+	if WindowsAllow(windows, mustTime(t, "2026-08-01T02:00:00Z")) {
+		t.Fatal("expected Saturday 02:00 to still be inside the Fri-night window (post-midnight)")
+	}
+	if !WindowsAllow(windows, mustTime(t, "2026-08-01T12:00:00Z")) {
+		t.Fatal("expected Saturday midday to be outside the Fri-night window")
+	}
+	// Recurs weekly: the following Saturday's 02:00 also follows a Friday
+	// night, so it matches too — this isn't pinned to one specific date.
+	if WindowsAllow(windows, mustTime(t, "2026-08-08T02:00:00Z")) {
+		t.Fatal("expected every Saturday 02:00 to be inside the Fri-night window")
+	}
+	// A Sunday, by contrast, follows a Saturday night, not a Friday one.
+	if !WindowsAllow(windows, mustTime(t, "2026-08-02T02:00:00Z")) {
+		t.Fatal("expected Sunday 02:00 (follows Saturday, not Friday) to be outside the window")
+	}
+}

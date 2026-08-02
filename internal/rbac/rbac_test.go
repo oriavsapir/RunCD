@@ -228,6 +228,25 @@ roles:
 	}
 }
 
+// TestHasAnyGrant_MalformedAppScopeDoesNotCount guards against an
+// "app:name" scope missing its required "@project" suffix — the prefix is
+// recognized, but scopeMatches's own strings.Cut(app, "@") never matches
+// any real unit without it, so this must not count as "any grant" either.
+func TestHasAnyGrant_MalformedAppScopeDoesNotCount(t *testing.T) {
+	cfg, err := Parse([]byte(`
+roles:
+  - subject: malformed@company.com
+    role: syncer
+    scope: ["app:someapp"]
+`))
+	if err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+	if HasAnyGrant(cfg, "malformed@company.com") {
+		t.Fatal("expected an app scope missing @project to grant nothing")
+	}
+}
+
 func TestCanSyncFolders_FolderScopeMatchesMemberProject(t *testing.T) {
 	cfg, err := Parse([]byte(`
 roles:

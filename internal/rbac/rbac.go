@@ -136,18 +136,26 @@ func HasAnyGrant(cfg *Config, subject string) bool {
 }
 
 // isRecognizedScope reports whether scope is one of the forms scopeMatches
-// actually knows how to evaluate — "*", "env:", "app:", or "folder:". A
-// typo like "evn:prod" has a non-empty Scope but would never match a real
-// CanSync/CanSyncFolders check, so len(Scope) > 0 alone isn't enough for
-// HasAnyGrant either.
+// actually knows how to evaluate — "*", "env:", "app:", or "folder:" — AND
+// well-formed enough to ever actually match a real unit under those same
+// rules. A typo like "evn:prod" has a non-empty Scope but would never match
+// a real CanSync/CanSyncFolders check, so len(Scope) > 0 alone isn't enough
+// for HasAnyGrant; neither is a bare prefix check — "app:someapp" (missing
+// the "@project" scopeMatches requires) has a recognized prefix but,
+// exactly like the typo, can never match any unit either.
 func isRecognizedScope(scope string) bool {
 	if scope == "*" {
 		return true
 	}
-	for _, prefix := range [...]string{"env:", "app:", "folder:"} {
-		if strings.HasPrefix(scope, prefix) {
-			return true
-		}
+	if id, ok := strings.CutPrefix(scope, "folder:"); ok {
+		return id != ""
+	}
+	if env, ok := strings.CutPrefix(scope, "env:"); ok {
+		return env != ""
+	}
+	if app, ok := strings.CutPrefix(scope, "app:"); ok {
+		name, project, found := strings.Cut(app, "@")
+		return found && name != "" && project != ""
 	}
 	return false
 }

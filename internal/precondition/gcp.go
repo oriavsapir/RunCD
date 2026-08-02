@@ -22,6 +22,14 @@ import (
 // stale indefinitely.
 const DefaultExistsCacheTTL = 60 * time.Second
 
+// precondCallTimeout bounds both the singleflight-shared client construction
+// below and the actual Exists call — both run under context.WithoutCancel
+// (detached from whichever caller happened to trigger them), so without an
+// upper bound of their own a hung dial/RPC would block forever and wedge
+// every other concurrent caller sharing that singleflight key, not just the
+// one that started it. Same value and rationale as cloudrun.apiCallTimeout.
+const precondCallTimeout = 30 * time.Second
+
 type existsCacheEntry struct {
 	exists    bool
 	fetchedAt time.Time
@@ -82,7 +90,9 @@ func (c *GCPChecker) client(ctx context.Context, project string) (*pubsub.Client
 		// caller's ctx directly would fail every other waiter's client
 		// lookup too if that one caller's context is cancelled/times out
 		// mid-construction, even though their own contexts are still valid.
-		cl, err := pubsub.NewClient(context.WithoutCancel(ctx), project)
+		constructCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), precondCallTimeout)
+		defer cancel()
+		cl, err := pubsub.NewClient(constructCtx, project)
 		if err != nil {
 			return nil, fmt.Errorf("create pubsub client for %s: %w", project, err)
 		}
@@ -123,8 +133,11 @@ func (c *GCPChecker) checkExists(ctx context.Context, kind, project, name string
 		}
 		// context.WithoutCancel: shared via singleflight across every
 		// concurrent caller for this kind/project/name — see the identical
-		// note on client() above.
-		exists, err := fetch(context.WithoutCancel(ctx), cl)
+		// note on client() above. Rebounded with precondCallTimeout for the
+		// same reason.
+		fetchCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), precondCallTimeout)
+		defer cancel()
+		exists, err := fetch(fetchCtx, cl)
 		if err != nil {
 			return false, err
 		}

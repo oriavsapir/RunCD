@@ -12,28 +12,40 @@ var syncWindowWeekday = map[time.Weekday]string{
 	time.Saturday:  "Sat",
 }
 
-func (w SyncWindow) matches(t time.Time) bool {
-	if len(w.Days) > 0 {
-		day := syncWindowWeekday[t.Weekday()]
-		found := false
-		for _, d := range w.Days {
-			if d == day {
-				found = true
-				break
-			}
-		}
-		if !found {
-			return false
+func (w SyncWindow) dayMatches(day time.Weekday) bool {
+	if len(w.Days) == 0 {
+		return true
+	}
+	name := syncWindowWeekday[day]
+	for _, d := range w.Days {
+		if d == name {
+			return true
 		}
 	}
+	return false
+}
+
+func (w SyncWindow) matches(t time.Time) bool {
 	if w.StartHour == w.EndHour {
-		return true
+		return w.dayMatches(t.Weekday())
 	}
 	hour := t.Hour()
 	if w.StartHour < w.EndHour {
-		return hour >= w.StartHour && hour < w.EndHour
+		return w.dayMatches(t.Weekday()) && hour >= w.StartHour && hour < w.EndHour
 	}
-	return hour >= w.StartHour || hour < w.EndHour // wraps past midnight
+	// Wraps past midnight: {Days: ["Fri"], Start: 22, End: 6} spans
+	// [22:00,24:00) on Friday and continues into [00:00,6:00) on Saturday —
+	// the early-hours portion must check *yesterday's* weekday, not today's,
+	// or the window silently stops matching the instant the clock crosses
+	// midnight into Saturday. An hour in neither half (e.g. noon) is outside
+	// the window regardless of day.
+	if hour >= w.StartHour {
+		return w.dayMatches(t.Weekday())
+	}
+	if hour < w.EndHour {
+		return w.dayMatches(t.AddDate(0, 0, -1).Weekday())
+	}
+	return false
 }
 
 // WindowsAllow reports whether auto-sync is permitted at t (evaluated in
