@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log/slog"
 	"sort"
 	"strings"
 	"sync"
@@ -431,13 +432,17 @@ func (c *GCPAdminClient) fetchJob(ctx context.Context, jc *run.JobsClient, proje
 	return job, nil
 }
 
-// GetJob implements AdminClient.GetJob. Right after a deploy, the job's
-// spec template already reflects the new desired image but
-// LatestCreatedExecution can still be the *previous* execution — comparing
-// against the spec template (or trusting ExecutionReference's own
-// completion status) would report an unrelated execution's outcome for the
-// digest that hasn't actually run yet. Fetching the real Execution and
-// reading its own container image avoids that conflation.
+// GetJob implements AdminClient.GetJob. ImageDigest is read from the job's
+// own spec template (same source GetService uses), not from the latest
+// execution — a deploy that only updates the template (DeployJob never
+// triggers a run, see its own comment) must show up as Synced immediately,
+// the same way updating a service's spec does, rather than staying
+// OutOfSync until whatever external scheduler next happens to run the job.
+// Health is a separate question ("did the most recent execution succeed")
+// answered from the execution below; a job that's never executed, or whose
+// execution can't be fetched/resolved, degrades to Missing/unset health
+// instead of failing this whole call — the digest/Status result above is
+// still valid and shouldn't be held hostage by an execution-side problem.
 func (c *GCPAdminClient) GetJob(ctx context.Context, project, region, name, desiredDigest string) (*LiveJob, error) {
 	ctx, cancel := context.WithTimeout(ctx, apiCallTimeout)
 	defer cancel()
@@ -450,24 +455,33 @@ func (c *GCPAdminClient) GetJob(ctx context.Context, project, region, name, desi
 		return nil, err
 	}
 
-	ref := job.GetLatestCreatedExecution()
-	if ref == nil {
-		return &LiveJob{}, nil
-	}
-
-	exec, err := c.getExecution(ctx, project, region, name, ref)
-	if err != nil {
-		return nil, err
-	}
-	digest, err := c.resolveImageDigest(ctx, containerImage(exec.GetTemplate().GetContainers()))
+	digest, err := c.resolveImageDigest(ctx, containerImage(job.GetTemplate().GetTemplate().GetContainers()))
 	if err != nil {
 		return nil, fmt.Errorf("resolve live image digest for job %s: %w", name, err)
 	}
-	return &LiveJob{
-		ServiceState:                 ServiceState{ImageDigest: digest},
-		HasExecutionForDesiredDigest: desiredDigest == "" || digest == desiredDigest,
-		LatestExecutionStatus:        executionStatus(exec),
-	}, nil
+	live := &LiveJob{ServiceState: ServiceState{ImageDigest: digest}}
+
+	ref := job.GetLatestCreatedExecution()
+	if ref == nil || ref.GetName() == "" {
+		return live, nil
+	}
+	exec, err := c.getExecution(ctx, project, region, name, ref)
+	if err != nil {
+		// Degraded to Missing health rather than failing the whole call (see
+		// above), but a real API/permissions error must not vanish silently —
+		// this package has no other logging, so it's the only place this
+		// gets surfaced short of it showing up as an unexplained Missing.
+		slog.Warn("cloudrun: get job execution", "job", name, "project", project, "region", region, "error", err)
+		return live, nil
+	}
+	execDigest, err := c.resolveImageDigest(ctx, containerImage(exec.GetTemplate().GetContainers()))
+	if err != nil {
+		slog.Warn("cloudrun: resolve job execution digest", "job", name, "project", project, "region", region, "error", err)
+		return live, nil
+	}
+	live.HasExecutionForDesiredDigest = desiredDigest == "" || execDigest == desiredDigest
+	live.LatestExecutionStatus = executionStatus(exec)
+	return live, nil
 }
 
 // getExecution fetches one job execution. ExecutionReference.Name (as

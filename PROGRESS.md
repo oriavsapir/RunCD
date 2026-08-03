@@ -2087,6 +2087,29 @@ Dashboard, same pass:
   entirely along with it — no longer needed, since `UpdateJob` alone is
   already a safe no-op when nothing changed.
 
+## `GetJob` tracks the spec template again, not the latest execution
+
+- [x] **A real fleet stuck permanently `OutOfSync`, found live against
+  `a-heavier-project`**: once `DeployJob` stopped triggering an execution (see
+  above), `GetJob`'s digest — read from `LatestCreatedExecution`'s own
+  container, per the template/execution-conflation fix earlier in this
+  log — only ever advanced when the job's *external* trigger (Cloud
+  Scheduler, another pipeline) next happened to run it. Every job unit sat
+  `OutOfSync` from the moment `imageupdater` committed a new digest until
+  its own next unrelated execution, which for anything less frequent than
+  `imageupdater`'s tick cadence is functionally forever. Fixed: `GetJob`
+  now reads `ImageDigest` from the job's own spec template — same source
+  `GetService` already uses — so a job goes `Synced` the instant its
+  config is deployed, exactly like a service. Health
+  (`HasExecutionForDesiredDigest`/`LatestExecutionStatus`) still comes from
+  the real `Execution`, kept deliberately separate from the digest/Status
+  now that the two questions ("is the config current" vs "did the last
+  run succeed") no longer share one value. A job that's never executed, or
+  whose execution can't be fetched/resolved, degrades that half to
+  `Missing` (logged via `slog.Warn` — this package's first log line) rather
+  than failing the whole `GetJob` call, so a real API/permissions error on
+  the execution side doesn't also block the Status result.
+
 ## How the tests actually run
 
 Every non-trivial test in this repo runs against **real dependencies**, not

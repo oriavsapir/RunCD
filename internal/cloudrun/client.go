@@ -66,9 +66,11 @@ const (
 
 // LiveJob is what GetJob returns for resourceType: job.
 type LiveJob struct {
-	ServiceState // ImageDigest is whatever image the latest execution ran.
-	// HasExecutionForDesiredDigest reports whether any execution has ever
-	// run the digest the caller asked about — "Missing" means this is false.
+	ServiceState // ImageDigest is whatever image the job's own spec template currently points at — Synced as soon as a deploy updates it, independent of whether it's ever executed.
+	// HasExecutionForDesiredDigest reports whether the most recent execution
+	// ran the digest the caller asked about — used for health only, "Missing"
+	// means this is false (including "never executed" or "execution status
+	// couldn't be resolved").
 	HasExecutionForDesiredDigest bool
 	LatestExecutionStatus        ExecutionStatus
 }
