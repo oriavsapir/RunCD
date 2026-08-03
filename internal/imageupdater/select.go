@@ -37,15 +37,29 @@ func resolve(tags []Tag, track, version, imageName string) (string, error) {
 	// A monorepo CI commonly pushes per-service tags ("a-real-etl-job-v1.2.3")
 	// alongside a repo-wide release tag ("v1.2.3", from a separate global bump
 	// step) on the very same image, since the global step tags every image's
-	// current :latest regardless of which service actually changed. If any tag
-	// carries this image's own prefix, only those count — falling through to
-	// bare tags here would let that unrelated, ever-climbing global tag quietly
-	// outrank the real per-service version on every merge.
-	if digest := bestMatch(tags, imageName+"-", depth, constraint); digest != "" {
-		return digest, nil
+	// current :latest regardless of which service actually changed.
+	bare := bestMatch(tags, "", depth, constraint)
+	prefixed := bestMatch(tags, imageName+"-", depth, constraint)
+
+	// A per-service tag is only trusted once it's confirmed to point at the
+	// same digest the bare/global tag does — NOT compared by version number:
+	// per-service versions and the global version are on unrelated numbering
+	// scales (a fresh-per-package counter vs. one counter climbing across
+	// every merge in the whole monorepo), so there's no version-number
+	// comparison that can tell "stale" from "current" here. A service that
+	// only changed via a shared lib (the monorepo's own version-bump gap:
+	// the-tagging-tool only bumps a package on a commit touching its own path)
+	// still gets rebuilt and re-tagged :latest/global, but its own prefixed
+	// tag doesn't move — falling through to it anyway would silently commit
+	// a real regression, which is exactly the incident this guards against
+	// having happened once already. Missing a bare match entirely (no
+	// global tagging step at all) is the one case with nothing to compare
+	// against, so a prefixed match is trusted outright there.
+	if prefixed != "" && (bare == "" || prefixed == bare) {
+		return prefixed, nil
 	}
-	if digest := bestMatch(tags, "", depth, constraint); digest != "" {
-		return digest, nil
+	if bare != "" {
+		return bare, nil
 	}
 	return "", fmt.Errorf("no tag satisfies version %q", version)
 }

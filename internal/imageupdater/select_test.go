@@ -79,20 +79,44 @@ func TestResolve_InvalidVersionConstraint(t *testing.T) {
 	}
 }
 
-func TestResolve_PrefersPerServiceTagOverGlobalTag(t *testing.T) {
-	// A global cog-bump step tags every image's :latest with the repo-wide
-	// release version on every merge, regardless of whether that particular
-	// service changed — it must never outrank a real per-service tag.
+func TestResolve_PrefersPerServiceTagWhenConfirmedCurrent(t *testing.T) {
+	// The per-service tag is trusted once its digest matches what the
+	// bare/global tag resolves to — confirming it actually reflects the
+	// image's current build, not just a higher-looking version number.
 	tags := []Tag{
-		{Name: "v0.333.0", Digest: "sha256:global"},                   // global tag, climbs every merge
-		{Name: "a-real-etl-job-v0.323.1", Digest: "sha256:service"}, // real per-service tag, lower number
+		{Name: "v0.333.0", Digest: "sha256:current"},
+		{Name: "a-real-etl-job-v0.323.1", Digest: "sha256:current"},
 	}
 	got, err := resolve(tags, "", "0", "a-real-etl-job")
 	if err != nil {
 		t.Fatalf("resolve: %v", err)
 	}
-	if got != "sha256:service" {
-		t.Fatalf("got %q, want sha256:service (the prefixed per-service tag)", got)
+	if got != "sha256:current" {
+		t.Fatalf("got %q, want sha256:current", got)
+	}
+}
+
+// TestResolve_FallsBackToBareTagWhenPrefixedTagIsStale regression-tests the
+// actual production incident this guards against: a monorepo's per-service
+// the-tagging-tool bump only fires on a commit touching that service's own path —
+// a service that only changed via a shared lib gets rebuilt and re-tagged
+// :latest/global, but its own prefixed tag doesn't move. Trusting the
+// prefixed tag here would silently commit a real regression (this exact
+// scenario rolled two services backward in production before being caught
+// and reverted). The bare/global tag — which the global bump step re-tags
+// onto every image's :latest on every merge, whether or not that image
+// changed — is the one signal here that's actually still current.
+func TestResolve_FallsBackToBareTagWhenPrefixedTagIsStale(t *testing.T) {
+	tags := []Tag{
+		{Name: "v0.333.0", Digest: "sha256:current"},              // re-tagged onto :latest every merge
+		{Name: "a-real-etl-job-v0.1.0", Digest: "sha256:stale"}, // last real per-service bump, since superseded
+	}
+	got, err := resolve(tags, "", "0", "a-real-etl-job")
+	if err != nil {
+		t.Fatalf("resolve: %v", err)
+	}
+	if got != "sha256:current" {
+		t.Fatalf("got %q, want sha256:current (bare/global tag) — must not regress to the stale prefixed tag", got)
 	}
 }
 
