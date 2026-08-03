@@ -11,6 +11,7 @@ package imageupdater
 import (
 	"context"
 	"fmt"
+	"path"
 
 	"github.com/runcd/runcd/internal/manifest"
 )
@@ -68,7 +69,7 @@ func Update(ctx context.Context, gh GitHub, resolver Resolver, m Manifest) (newD
 	if err != nil {
 		return "", fmt.Errorf("list tags for %s: %w", sd.Image.Repository, err)
 	}
-	resolved, err := resolve(tags, sd.Image.Track, sd.Image.Version)
+	resolved, err := resolve(tags, sd.Image.Track, sd.Image.Version, path.Base(sd.Image.Repository))
 	if err != nil {
 		return "", fmt.Errorf("resolve %s:%s: %w", m.Repo, m.Path, err)
 	}
