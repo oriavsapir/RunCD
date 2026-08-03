@@ -74,6 +74,32 @@ func TestWithDigest_PreservesRepoPrefix(t *testing.T) {
 	}
 }
 
+// TestWithDigest_StripsExistingTagInsteadOfAppending regression-tests a real
+// bug: a resource last deployed by something other than RunCD (e.g. an
+// external CI pipeline via `gcloud run deploy --image foo:v1`) has an
+// existing image that's tag-referenced, not digest-referenced. Splicing the
+// desired digest on without stripping that tag produced a malformed
+// "repo:tag@sha256:..." reference instead of "repo@sha256:...".
+func TestWithDigest_StripsExistingTagInsteadOfAppending(t *testing.T) {
+	existing := "us-docker.pkg.dev/proj/repo/svc:v0.332.0"
+	newDigest := "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+	got := withDigest(existing, newDigest)
+	want := "us-docker.pkg.dev/proj/repo/svc@sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+	if got != want {
+		t.Fatalf("got %q, want %q", got, want)
+	}
+}
+
+func TestWithDigest_NoTagOrDigestUsesImageAsIs(t *testing.T) {
+	existing := "us-docker.pkg.dev/proj/repo/svc"
+	newDigest := "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+	got := withDigest(existing, newDigest)
+	want := "us-docker.pkg.dev/proj/repo/svc@sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+	if got != want {
+		t.Fatalf("got %q, want %q", got, want)
+	}
+}
+
 func TestIsDigest_ValidBareDigest(t *testing.T) {
 	if !isDigest("sha256:" + hex64) {
 		t.Fatal("expected a valid bare sha256 digest to be recognized")

@@ -654,11 +654,18 @@ func resolveTag(ctx context.Context, r tagResolver, image string) (string, error
 // image set (no "@" to anchor on, e.g. a Terraform-provisioned shell with a
 // placeholder image) isn't supported — §5.5 assumes Terraform provisions
 // the shell already pointed at the right repo.
+//
+// existingImage may itself be a tag reference ("repo:v1.2.3"), not just a
+// digest one, when something other than RunCD (an external CI pipeline)
+// last deployed this resource — stripping only "@digest" and leaving an
+// existing ":tag" in place would splice both onto the same reference
+// ("repo:v1.2.3@sha256:..."), so splitImageRef's same tag-vs-repo split is
+// reused here to recover just the bare repo in that case too.
 func withDigest(existingImage, digest string) string {
-	repo := existingImage
 	if i := strings.LastIndex(existingImage, "@"); i >= 0 {
-		repo = existingImage[:i]
+		return existingImage[:i] + "@" + digest
 	}
+	repo, _ := splitImageRef(existingImage)
 	return repo + "@" + digest
 }
 
