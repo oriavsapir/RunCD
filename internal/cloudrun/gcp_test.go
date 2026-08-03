@@ -1,12 +1,18 @@
 package cloudrun
 
 import (
+	"context"
+	"errors"
 	"testing"
 	"time"
 
 	"cloud.google.com/go/run/apiv2/runpb"
 	"google.golang.org/protobuf/types/known/timestamppb"
+
+	"github.com/runcd/runcd/internal/registry"
 )
+
+var errBoom = errors.New("boom")
 
 func TestValidatedPercent_FullCutoverAccepted(t *testing.T) {
 	got, err := validatedPercent(100)
@@ -65,6 +71,87 @@ func TestWithDigest_PreservesRepoPrefix(t *testing.T) {
 	want := "us-docker.pkg.dev/proj/repo/svc@sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
 	if got != want {
 		t.Fatalf("got %q, want %q", got, want)
+	}
+}
+
+func TestIsDigest_ValidBareDigest(t *testing.T) {
+	if !isDigest("sha256:" + hex64) {
+		t.Fatal("expected a valid bare sha256 digest to be recognized")
+	}
+}
+
+func TestIsDigest_RejectsTagLookingString(t *testing.T) {
+	for _, s := range []string{
+		"v1.2.3",
+		"us-docker.pkg.dev/proj/repo/svc:v1.2.3",
+		"sha256:tooshort",
+		"",
+	} {
+		if isDigest(s) {
+			t.Fatalf("isDigest(%q) = true, want false", s)
+		}
+	}
+}
+
+const hex64 = "3f8a1c0000000000000000000000000000000000000000000000000000000000"
+
+func TestSplitImageRef_TagAfterLastSlash(t *testing.T) {
+	repo, tag := splitImageRef("us-docker.pkg.dev/proj/repo/svc:v1.2.3")
+	if repo != "us-docker.pkg.dev/proj/repo/svc" || tag != "v1.2.3" {
+		t.Fatalf("got repo=%q tag=%q", repo, tag)
+	}
+}
+
+func TestSplitImageRef_NoTagDefaultsToLatest(t *testing.T) {
+	repo, tag := splitImageRef("us-docker.pkg.dev/proj/repo/svc")
+	if repo != "us-docker.pkg.dev/proj/repo/svc" || tag != "latest" {
+		t.Fatalf("got repo=%q tag=%q", repo, tag)
+	}
+}
+
+func TestSplitImageRef_ColonBeforeLastSlashIsNotATag(t *testing.T) {
+	// A registry host:port, not a tag separator — the colon precedes the
+	// last "/", so the whole string is the repository and tag is "latest".
+	repo, tag := splitImageRef("localhost:5000/repo/svc")
+	if repo != "localhost:5000/repo/svc" || tag != "latest" {
+		t.Fatalf("got repo=%q tag=%q", repo, tag)
+	}
+}
+
+type fakeTagResolver struct {
+	tags []registry.Tag
+	err  error
+}
+
+func (f *fakeTagResolver) ListTags(ctx context.Context, repository string) ([]registry.Tag, error) {
+	return f.tags, f.err
+}
+
+func TestResolveTag_FindsMatchingTag(t *testing.T) {
+	r := &fakeTagResolver{tags: []registry.Tag{
+		{Name: "v1.2.2", Digest: "sha256:old"},
+		{Name: "v1.2.3", Digest: "sha256:new"},
+	}}
+	got, err := resolveTag(context.Background(), r, "us-docker.pkg.dev/proj/repo/svc:v1.2.3")
+	if err != nil {
+		t.Fatalf("resolveTag: %v", err)
+	}
+	if got != "sha256:new" {
+		t.Fatalf("got %q, want sha256:new", got)
+	}
+}
+
+func TestResolveTag_NoMatchingTagErrors(t *testing.T) {
+	r := &fakeTagResolver{tags: []registry.Tag{{Name: "v1.2.2", Digest: "sha256:old"}}}
+	if _, err := resolveTag(context.Background(), r, "us-docker.pkg.dev/proj/repo/svc:v9.9.9"); err == nil {
+		t.Fatal("expected error when no tag matches")
+	}
+}
+
+func TestResolveTag_ListErrorPropagates(t *testing.T) {
+	r := &fakeTagResolver{err: errBoom}
+	if _, err := resolveTag(context.Background(), r, "us-docker.pkg.dev/proj/repo/svc:v1"); err == nil {
+		t.Fatal("expected the underlying list error to propagate")
 	}
 }
 

@@ -2004,6 +2004,19 @@ Dashboard, same pass:
   (`HealthBadge`) shows a plain "Job" badge for job units instead of trying
   to render an execution outcome as if it were an ongoing health status.
 
+- [x] **Live-state fetch resolves tag-deployed images, not just digest-pinned
+  ones** — `internal/cloudrun`'s `digestSuffix` only ever handled
+  `repo@sha256:...`; a resource deployed by something other than RunCD via a
+  floating tag (`gcloud run deploy --image foo:v1`, or a CI pipeline
+  deploying directly) reports its image field as `repo:tag`, and comparing
+  that raw string against a desired bare digest could never match — such a
+  resource showed permanently `OutOfSync`/`Missing` even when its actual
+  content was identical to desired. `resolveImageDigest` now resolves a
+  tag-only reference against Artifact Registry (new `internal/registry`
+  package, shared with `imageupdater`) before the diff engine sees it; a
+  digest-pinned reference (the common case, and what every RunCD deploy
+  itself writes) still takes the original zero-network-call fast path.
+
 ## Infra / delivery
 
 - [x] **Dockerfile** — multi-stage (`golang:1.26-alpine` build →

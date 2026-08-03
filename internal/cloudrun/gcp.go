@@ -16,6 +16,8 @@ import (
 	"google.golang.org/api/option"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
+
+	"github.com/runcd/runcd/internal/registry"
 )
 
 // GCPAdminClient is the real Cloud Run Admin API v2 implementation of
@@ -32,11 +34,17 @@ type GCPAdminClient struct {
 	workerPools map[string]*run.WorkerPoolsClient
 	jobs        map[string]*run.JobsClient
 	executions  map[string]*run.ExecutionsClient
+	// registryClient resolves a live image that was deployed by tag rather
+	// than digest (see resolveImageDigest) — one client for the whole
+	// process, not per-region, since Artifact Registry has no per-region
+	// endpoint the way Cloud Run does.
+	registryClient *registry.Client
 
 	servicesGroup    singleflight.Group
 	workerPoolsGroup singleflight.Group
 	jobsGroup        singleflight.Group
 	executionsGroup  singleflight.Group
+	registryGroup    singleflight.Group
 }
 
 func NewGCPAdminClient() *GCPAdminClient {
@@ -63,6 +71,9 @@ func (c *GCPAdminClient) Close() error {
 	}
 	for _, ec := range c.executions {
 		_ = ec.Close()
+	}
+	if c.registryClient != nil {
+		_ = c.registryClient.Close()
 	}
 	return nil
 }
@@ -212,6 +223,41 @@ func (c *GCPAdminClient) executionsClient(ctx context.Context, region string) (*
 	return v.(*run.ExecutionsClient), nil
 }
 
+// registryClientOrInit lazily constructs the Artifact Registry client used
+// to resolve a tag-referenced live image — same singleflight-coalesced,
+// context.WithoutCancel construction as the Cloud Run clients above, keyed
+// by a constant since (unlike Cloud Run) there's only ever one of these.
+func (c *GCPAdminClient) registryClientOrInit(ctx context.Context) (*registry.Client, error) {
+	c.mu.Lock()
+	if rc := c.registryClient; rc != nil {
+		c.mu.Unlock()
+		return rc, nil
+	}
+	c.mu.Unlock()
+
+	v, err, _ := c.registryGroup.Do("", func() (any, error) {
+		c.mu.Lock()
+		if rc := c.registryClient; rc != nil {
+			c.mu.Unlock()
+			return rc, nil
+		}
+		c.mu.Unlock()
+
+		rc, err := registry.NewClient(context.WithoutCancel(ctx))
+		if err != nil {
+			return nil, fmt.Errorf("create artifact registry client: %w", err)
+		}
+		c.mu.Lock()
+		c.registryClient = rc
+		c.mu.Unlock()
+		return rc, nil
+	})
+	if err != nil {
+		return nil, err
+	}
+	return v.(*registry.Client), nil
+}
+
 func serviceName(project, region, name string) string {
 	return fmt.Sprintf("projects/%s/locations/%s/services/%s", project, region, name)
 }
@@ -247,7 +293,7 @@ func (c *GCPAdminClient) GetService(ctx context.Context, project, region, name, 
 	}
 	svc, err := sc.GetService(ctx, &runpb.GetServiceRequest{Name: serviceName(project, region, name)})
 	if err == nil {
-		return liveServiceFromService(svc, desiredDigest), nil
+		return c.liveServiceFromService(ctx, svc, desiredDigest)
 	}
 	if status.Code(err) != codes.NotFound {
 		return nil, fmt.Errorf("get service %s: %w", name, err)
@@ -264,7 +310,7 @@ func (c *GCPAdminClient) GetService(ctx context.Context, project, region, name, 
 		}
 		return nil, fmt.Errorf("get workerPool %s: %w", name, err)
 	}
-	return liveServiceFromWorkerPool(wp, desiredDigest), nil
+	return c.liveServiceFromWorkerPool(ctx, wp, desiredDigest)
 }
 
 // ListServiceNames implements AdminClient.ListServiceNames — services only
@@ -413,7 +459,10 @@ func (c *GCPAdminClient) GetJob(ctx context.Context, project, region, name, desi
 	if err != nil {
 		return nil, err
 	}
-	digest := digestSuffix(containerImage(exec.GetTemplate().GetContainers()))
+	digest, err := c.resolveImageDigest(ctx, containerImage(exec.GetTemplate().GetContainers()))
+	if err != nil {
+		return nil, fmt.Errorf("resolve live image digest for job %s: %w", name, err)
+	}
 	return &LiveJob{
 		ServiceState:                 ServiceState{ImageDigest: digest},
 		HasExecutionForDesiredDigest: desiredDigest == "" || digest == desiredDigest,
@@ -470,7 +519,12 @@ func (c *GCPAdminClient) DeployJob(ctx context.Context, project, region, name st
 		if err != nil {
 			return err
 		}
-		digest := digestSuffix(containerImage(exec.GetTemplate().GetContainers()))
+		// A resolve failure here just falls through to redeploying (the
+		// zero-value digest can't equal desired.ImageDigest) rather than
+		// failing the whole deploy attempt — unlike GetJob's live-state
+		// fetch, an idempotency pre-check that can't confirm "already
+		// running this digest" should err toward deploying, not blocking.
+		digest, _ := c.resolveImageDigest(ctx, containerImage(exec.GetTemplate().GetContainers()))
 		execStatus := executionStatus(exec)
 		if digest == desired.ImageDigest && (execStatus == ExecutionRunning || execStatus == ExecutionSucceeded) {
 			return nil
@@ -523,6 +577,75 @@ func digestSuffix(image string) string {
 		return image[i+1:]
 	}
 	return image
+}
+
+// isDigest reports whether s is already a bare "sha256:<64 hex>" digest —
+// guards the case of a live image field with no registry prefix at all
+// (digestSuffix returns it unchanged, having found no "@" to split on) so it
+// isn't mistaken for a tag reference needing resolution.
+func isDigest(s string) bool {
+	const prefix = "sha256:"
+	return strings.HasPrefix(s, prefix) && len(s) == len(prefix)+64
+}
+
+// splitImageRef splits a tag-referenced image ("repo/path:tag", or bare
+// "repo/path" implicitly "latest") into repository and tag — the same rule
+// Docker itself uses, careful not to mistake a registry host's own port
+// (rare here, but "host:5000/repo" is a valid reference) for a tag
+// separator: only a colon after the last "/" counts.
+func splitImageRef(image string) (repository, tag string) {
+	slash := strings.LastIndex(image, "/")
+	colon := strings.LastIndex(image, ":")
+	if colon > slash {
+		return image[:colon], image[colon+1:]
+	}
+	return image, "latest"
+}
+
+// tagResolver is the minimal seam resolveTag needs — narrowed from
+// *registry.Client to just this one method so it's unit-testable with a
+// fake, the same interface+fake pattern as cloudrun.AdminClient itself.
+type tagResolver interface {
+	ListTags(ctx context.Context, repository string) ([]registry.Tag, error)
+}
+
+// resolveImageDigest returns the bare "sha256:..." digest for a live image
+// reference. Something other than RunCD may have deployed this resource by
+// tag (e.g. `gcloud run deploy --image foo:v1`) rather than digest, and
+// Cloud Run reports the image reference exactly as it was deployed — a raw
+// tag string can never equal a desired bare digest, so a tag-only reference
+// is resolved against Artifact Registry first. Once RunCD itself deploys
+// this resource, withDigest always writes an "@sha256:..." reference, so
+// this only ever costs a real API call for resources some other deployer
+// still owns — not on every reconcile pass, forever.
+func (c *GCPAdminClient) resolveImageDigest(ctx context.Context, image string) (string, error) {
+	if image == "" {
+		return "", nil
+	}
+	if suffix := digestSuffix(image); suffix != image || isDigest(suffix) {
+		return suffix, nil
+	}
+	rc, err := c.registryClientOrInit(ctx)
+	if err != nil {
+		return "", fmt.Errorf("resolve tag for %s: %w", image, err)
+	}
+	return resolveTag(ctx, rc, image)
+}
+
+// resolveTag does the actual tag lookup, split out from resolveImageDigest
+// so it's testable against a fake tagResolver without a live client.
+func resolveTag(ctx context.Context, r tagResolver, image string) (string, error) {
+	repo, tag := splitImageRef(image)
+	tags, err := r.ListTags(ctx, repo)
+	if err != nil {
+		return "", fmt.Errorf("list tags for %s: %w", repo, err)
+	}
+	for _, t := range tags {
+		if t.Name == tag {
+			return t.Digest, nil
+		}
+	}
+	return "", fmt.Errorf("no tag %q found for %s", tag, repo)
 }
 
 // withDigest rebuilds a full image reference from an existing live image
@@ -584,8 +707,11 @@ func executionStatus(exec *runpb.Execution) ExecutionStatus {
 	return ExecutionSucceeded
 }
 
-func liveServiceFromService(svc *runpb.Service, desiredDigest string) *LiveService {
-	digest := digestSuffix(containerImage(svc.GetTemplate().GetContainers()))
+func (c *GCPAdminClient) liveServiceFromService(ctx context.Context, svc *runpb.Service, desiredDigest string) (*LiveService, error) {
+	digest, err := c.resolveImageDigest(ctx, containerImage(svc.GetTemplate().GetContainers()))
+	if err != nil {
+		return nil, fmt.Errorf("resolve live image digest for service %s: %w", svc.GetName(), err)
+	}
 	percent := latestRevisionPercent(svc.GetTraffic())
 	ready, creating := conditionState(svc.GetTerminalCondition(), svc.GetReconciling())
 	envVars, secretRefs := envStateFromContainers(svc.GetTemplate().GetContainers())
@@ -599,11 +725,14 @@ func liveServiceFromService(svc *runpb.Service, desiredDigest string) *LiveServi
 		HasRevisionForDesiredDigest: desiredDigest == "" || digest == desiredDigest,
 		LatestRevisionReady:         ready,
 		LatestRevisionCreating:      creating,
-	}
+	}, nil
 }
 
-func liveServiceFromWorkerPool(wp *runpb.WorkerPool, desiredDigest string) *LiveService {
-	digest := digestSuffix(containerImage(wp.GetTemplate().GetContainers()))
+func (c *GCPAdminClient) liveServiceFromWorkerPool(ctx context.Context, wp *runpb.WorkerPool, desiredDigest string) (*LiveService, error) {
+	digest, err := c.resolveImageDigest(ctx, containerImage(wp.GetTemplate().GetContainers()))
+	if err != nil {
+		return nil, fmt.Errorf("resolve live image digest for workerPool %s: %w", wp.GetName(), err)
+	}
 	ready, creating := conditionState(wp.GetTerminalCondition(), wp.GetReconciling())
 	envVars, secretRefs := envStateFromContainers(wp.GetTemplate().GetContainers())
 	return &LiveService{
@@ -615,7 +744,7 @@ func liveServiceFromWorkerPool(wp *runpb.WorkerPool, desiredDigest string) *Live
 		HasRevisionForDesiredDigest: desiredDigest == "" || digest == desiredDigest,
 		LatestRevisionReady:         ready,
 		LatestRevisionCreating:      creating,
-	}
+	}, nil
 }
 
 // envStateFromContainers splits containers[0].Env into plain values and

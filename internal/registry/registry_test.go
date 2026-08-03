@@ -1,4 +1,4 @@
-package imageupdater
+package registry
 
 import "testing"
 
