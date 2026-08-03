@@ -493,15 +493,18 @@ func (c *GCPAdminClient) getExecution(ctx context.Context, project, region, job 
 }
 
 // DeployJob implements AdminClient.DeployJob: point the job spec at the
-// desired image, then trigger a new execution — unless one's already
-// running or has already succeeded for this exact digest. Unlike
-// UpdateService/UpdateWorkerPool (which Cloud Run itself no-ops when
-// nothing actually changed), RunJob always creates a brand new Execution
-// regardless of whether the image changed — so without this check,
-// deploySyncUnit's documented idempotency invariant ("deploying an
-// already-deployed digest is a no-op", §5.3/NFR6) wouldn't hold for jobs:
-// a poll that re-issues a deploy call while still waiting for a prior
-// deploy's convergence would trigger a genuine duplicate job execution.
+// desired image. Deliberately never triggers an execution (RunJob) — a
+// job's executions belong to whatever triggers it externally (Cloud
+// Scheduler, another pipeline), matching internal/health.AssessJob's own
+// "did the last execution succeed" model rather than treating a config
+// sync as a reason to run the job right now (confirmed the hard way: a
+// sync used to immediately re-run the job with whatever digest was just
+// deployed, which is a real, unwanted side effect for a job like an ETL
+// step — a plain image-only update is enough for the job's own next
+// externally-triggered run to pick it up). UpdateJob is a safe no-op when
+// nothing actually changed, unlike RunJob (which always created a brand
+// new Execution regardless of whether the image changed) — no idempotency
+// pre-check needed here anymore.
 func (c *GCPAdminClient) DeployJob(ctx context.Context, project, region, name string, desired ServiceState) error {
 	ctx, cancel := context.WithTimeout(ctx, apiCallTimeout)
 	defer cancel()
@@ -514,23 +517,6 @@ func (c *GCPAdminClient) DeployJob(ctx context.Context, project, region, name st
 		return err
 	}
 
-	if ref := job.GetLatestCreatedExecution(); ref != nil {
-		exec, err := c.getExecution(ctx, project, region, name, ref)
-		if err != nil {
-			return err
-		}
-		// A resolve failure here just falls through to redeploying (the
-		// zero-value digest can't equal desired.ImageDigest) rather than
-		// failing the whole deploy attempt — unlike GetJob's live-state
-		// fetch, an idempotency pre-check that can't confirm "already
-		// running this digest" should err toward deploying, not blocking.
-		digest, _ := c.resolveImageDigest(ctx, containerImage(exec.GetTemplate().GetContainers()))
-		execStatus := executionStatus(exec)
-		if digest == desired.ImageDigest && (execStatus == ExecutionRunning || execStatus == ExecutionSucceeded) {
-			return nil
-		}
-	}
-
 	containers := job.GetTemplate().GetTemplate().GetContainers()
 	if len(containers) == 0 {
 		return fmt.Errorf("job %s has no containers in its task template", name)
@@ -538,9 +524,6 @@ func (c *GCPAdminClient) DeployJob(ctx context.Context, project, region, name st
 	containers[0].Image = withDigest(containers[0].Image, desired.ImageDigest)
 	if _, err := jc.UpdateJob(ctx, &runpb.UpdateJobRequest{Job: job}); err != nil {
 		return fmt.Errorf("update job %s: %w", name, err)
-	}
-	if _, err := jc.RunJob(ctx, &runpb.RunJobRequest{Name: job.GetName()}); err != nil {
-		return fmt.Errorf("run job %s: %w", name, err)
 	}
 	return nil
 }

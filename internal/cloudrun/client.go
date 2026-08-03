@@ -98,9 +98,11 @@ type AdminClient interface {
 	// it).
 	DeployService(ctx context.Context, project, region, name string, desired ServiceState) error
 
-	// DeployJob triggers an execution of the named job with desired's image
-	// digest. Returns ErrNotProvisioned if the resource shell doesn't exist
-	// yet.
+	// DeployJob points the named job's task template at desired's image
+	// digest. Deliberately never triggers an execution — a job's
+	// executions belong to whatever triggers it externally (Cloud
+	// Scheduler, another pipeline), not to a config sync. Returns
+	// ErrNotProvisioned if the resource shell doesn't exist yet.
 	DeployJob(ctx context.Context, project, region, name string, desired ServiceState) error
 
 	// ListServiceNames returns the short name of every Cloud Run service

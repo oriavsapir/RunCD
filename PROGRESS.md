@@ -2068,6 +2068,25 @@ Dashboard, same pass:
   `reconcile.TagResolver` are structurally identical — `cmd/controller`
   wires the one `imageupdater.GCPResolver` instance into both.
 
+## `DeployJob` no longer triggers an execution
+
+- [x] **A real, unwanted side effect found via a live test of the override
+  above**: `cloudrun.GCPAdminClient.DeployJob` updated the job's image
+  *and* immediately called `RunJob`, actually executing the job right
+  then with whatever digest was just deployed. For a job that's a real
+  ETL/pipeline step, this means every sync — including a config-only
+  change like resolving a per-project version override — genuinely
+  re-runs the job against real data, not just updates its definition.
+  Fixed: `DeployJob` now only updates the job's task template image
+  (`UpdateJob`); it never calls `RunJob`. A job's executions are now
+  entirely owned by whatever triggers it externally (Cloud Scheduler,
+  another pipeline) — matching `internal/health.AssessJob`'s own "did the
+  last execution succeed" model, which already assumed executions could
+  come from outside RunCD. The `RunJob`-duplicate-execution idempotency
+  pre-check (fetch-latest-execution, compare digest/status) is removed
+  entirely along with it — no longer needed, since `UpdateJob` alone is
+  already a safe no-op when nothing changed.
+
 ## How the tests actually run
 
 Every non-trivial test in this repo runs against **real dependencies**, not
