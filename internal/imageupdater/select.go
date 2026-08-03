@@ -12,8 +12,10 @@ import (
 // name to follow; version is a semver constraint ("1", "1.2", or "1.2.3")
 // satisfied by the highest matching semver tag — tags that aren't valid
 // semver (e.g. "latest", "main-abc123") are silently skipped rather than
-// erroring, since a real image repo mixes both kinds of tags.
-func resolve(tags []Tag, track, version string) (string, error) {
+// erroring, since a real image repo mixes both kinds of tags. imageName is
+// the image's own last repository path segment (e.g. "a-real-etl-job"),
+// used to prefer per-service monorepo tags (see below).
+func resolve(tags []Tag, track, version, imageName string) (string, error) {
 	if track != "" {
 		for _, t := range tags {
 			if t.Name == track {
@@ -32,32 +34,57 @@ func resolve(tags []Tag, track, version string) (string, error) {
 		constraint = semver.Canonical(constraint) // normalize e.g. missing patch/build the same way tag comparisons are
 	}
 
+	// A monorepo CI commonly pushes per-service tags ("a-real-etl-job-v1.2.3")
+	// alongside a repo-wide release tag ("v1.2.3", from a separate global bump
+	// step) on the very same image, since the global step tags every image's
+	// current :latest regardless of which service actually changed. If any tag
+	// carries this image's own prefix, only those count — falling through to
+	// bare tags here would let that unrelated, ever-climbing global tag quietly
+	// outrank the real per-service version on every merge.
+	if digest := bestMatch(tags, imageName+"-", depth, constraint); digest != "" {
+		return digest, nil
+	}
+	if digest := bestMatch(tags, "", depth, constraint); digest != "" {
+		return digest, nil
+	}
+	return "", fmt.Errorf("no tag satisfies version %q", version)
+}
+
+// bestMatch returns the digest of the highest tag matching constraint at the
+// given depth, after stripping prefix from each tag name — tags that don't
+// carry prefix (when non-empty) are skipped entirely, not merely deprioritized.
+func bestMatch(tags []Tag, prefix string, depth int, constraint string) string {
 	var bestDigest, bestVersion string
 	for _, t := range tags {
-		v := canonicalSemver(t.Name)
+		name := t.Name
+		if prefix != "" {
+			n, ok := strings.CutPrefix(name, prefix)
+			if !ok {
+				continue
+			}
+			name = n
+		}
+		v := canonicalSemver(name)
 		if !semver.IsValid(v) {
 			continue
 		}
-		var prefix string
+		var p string
 		switch depth {
 		case 0:
-			prefix = semver.Major(v)
+			p = semver.Major(v)
 		case 1:
-			prefix = semver.MajorMinor(v)
+			p = semver.MajorMinor(v)
 		default:
-			prefix = semver.Canonical(v)
+			p = semver.Canonical(v)
 		}
-		if prefix != constraint {
+		if p != constraint {
 			continue
 		}
 		if bestVersion == "" || semver.Compare(v, bestVersion) > 0 {
 			bestVersion, bestDigest = v, t.Digest
 		}
 	}
-	if bestDigest == "" {
-		return "", fmt.Errorf("no tag satisfies version %q", version)
-	}
-	return bestDigest, nil
+	return bestDigest
 }
 
 // canonicalSemver adds the "v" prefix golang.org/x/mod/semver requires —
