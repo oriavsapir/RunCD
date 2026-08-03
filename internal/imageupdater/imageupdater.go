@@ -14,13 +14,14 @@ import (
 	"path"
 
 	"github.com/runcd/runcd/internal/manifest"
+	"github.com/runcd/runcd/internal/registry"
 )
 
-// Tag is one tag/digest pair for an Artifact Registry image.
-type Tag struct {
-	Name   string
-	Digest string // "sha256:..."
-}
+// Tag is one tag/digest pair for an Artifact Registry image — an alias, not
+// a distinct type, so a Resolver here is structurally a reconcile.TagResolver
+// too (same tag-resolution algorithm now lives in internal/registry, shared
+// with internal/reconcile's per-project track/version override).
+type Tag = registry.Tag
 
 // Resolver lists an Artifact Registry image's tags — an interface so Update
 // can be tested without live GCP calls, the same interface+fake pattern as
@@ -69,7 +70,7 @@ func Update(ctx context.Context, gh GitHub, resolver Resolver, m Manifest) (newD
 	if err != nil {
 		return "", fmt.Errorf("list tags for %s: %w", sd.Image.Repository, err)
 	}
-	resolved, err := resolve(tags, sd.Image.Track, sd.Image.Version, path.Base(sd.Image.Repository))
+	resolved, err := registry.Resolve(tags, sd.Image.Track, sd.Image.Version, path.Base(sd.Image.Repository))
 	if err != nil {
 		return "", fmt.Errorf("resolve %s:%s: %w", m.Repo, m.Path, err)
 	}

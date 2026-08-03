@@ -1,4 +1,4 @@
-package imageupdater
+package registry
 
 import (
 	"fmt"
@@ -7,15 +7,18 @@ import (
 	"golang.org/x/mod/semver"
 )
 
-// resolve picks the digest track or version (exactly one is non-empty, per
+// Resolve picks the digest track or version (exactly one is non-empty, per
 // manifest.Parse's validation) selects among tags. track is a literal tag
 // name to follow; version is a semver constraint ("1", "1.2", or "1.2.3")
 // satisfied by the highest matching semver tag — tags that aren't valid
 // semver (e.g. "latest", "main-abc123") are silently skipped rather than
 // erroring, since a real image repo mixes both kinds of tags. imageName is
 // the image's own last repository path segment (e.g. "a-real-etl-job"),
-// used to prefer per-service monorepo tags (see below).
-func resolve(tags []Tag, track, version, imageName string) (string, error) {
+// used to prefer per-service monorepo tags (see below). Shared by
+// internal/imageupdater (resolving image.track/image.version to commit) and
+// internal/reconcile (resolving a per-project track/version override live,
+// see config.Override) — one resolution algorithm, not two.
+func Resolve(tags []Tag, track, version, imageName string) (string, error) {
 	if track != "" {
 		for _, t := range tags {
 			if t.Name == track {

@@ -1,10 +1,10 @@
-package imageupdater
+package registry
 
 import "testing"
 
 func TestResolve_Track(t *testing.T) {
 	tags := []Tag{{Name: "latest", Digest: "sha256:aaa"}, {Name: "stable", Digest: "sha256:bbb"}}
-	got, err := resolve(tags, "stable", "", "myapp")
+	got, err := Resolve(tags, "stable", "", "myapp")
 	if err != nil {
 		t.Fatalf("resolve: %v", err)
 	}
@@ -15,7 +15,7 @@ func TestResolve_Track(t *testing.T) {
 
 func TestResolve_TrackNotFound(t *testing.T) {
 	tags := []Tag{{Name: "latest", Digest: "sha256:aaa"}}
-	if _, err := resolve(tags, "stable", "", "myapp"); err == nil {
+	if _, err := Resolve(tags, "stable", "", "myapp"); err == nil {
 		t.Fatal("expected error for a track with no matching tag")
 	}
 }
@@ -27,7 +27,7 @@ func TestResolve_VersionPicksHighestPatch(t *testing.T) {
 		{Name: "1.3.0", Digest: "sha256:three"}, // different minor, excluded by "1.2" constraint
 		{Name: "latest", Digest: "sha256:four"}, // not semver, skipped
 	}
-	got, err := resolve(tags, "", "1.2", "myapp")
+	got, err := Resolve(tags, "", "1.2", "myapp")
 	if err != nil {
 		t.Fatalf("resolve: %v", err)
 	}
@@ -42,7 +42,7 @@ func TestResolve_VersionMajorOnly(t *testing.T) {
 		{Name: "1.9.0", Digest: "sha256:two"},
 		{Name: "2.0.0", Digest: "sha256:three"},
 	}
-	got, err := resolve(tags, "", "1", "myapp")
+	got, err := Resolve(tags, "", "1", "myapp")
 	if err != nil {
 		t.Fatalf("resolve: %v", err)
 	}
@@ -56,7 +56,7 @@ func TestResolve_VersionExact(t *testing.T) {
 		{Name: "1.2.1", Digest: "sha256:one"},
 		{Name: "1.2.9", Digest: "sha256:two"},
 	}
-	got, err := resolve(tags, "", "1.2.1", "myapp")
+	got, err := Resolve(tags, "", "1.2.1", "myapp")
 	if err != nil {
 		t.Fatalf("resolve: %v", err)
 	}
@@ -67,14 +67,14 @@ func TestResolve_VersionExact(t *testing.T) {
 
 func TestResolve_VersionNoMatch(t *testing.T) {
 	tags := []Tag{{Name: "1.2.1", Digest: "sha256:one"}}
-	if _, err := resolve(tags, "", "2.0", "myapp"); err == nil {
+	if _, err := Resolve(tags, "", "2.0", "myapp"); err == nil {
 		t.Fatal("expected error when no tag satisfies the constraint")
 	}
 }
 
 func TestResolve_InvalidVersionConstraint(t *testing.T) {
 	tags := []Tag{{Name: "1.2.1", Digest: "sha256:one"}}
-	if _, err := resolve(tags, "", "not-a-version", "myapp"); err == nil {
+	if _, err := Resolve(tags, "", "not-a-version", "myapp"); err == nil {
 		t.Fatal("expected error for a malformed version constraint")
 	}
 }
@@ -87,7 +87,7 @@ func TestResolve_PrefersPerServiceTagWhenConfirmedCurrent(t *testing.T) {
 		{Name: "v0.333.0", Digest: "sha256:current"},
 		{Name: "a-real-etl-job-v0.323.1", Digest: "sha256:current"},
 	}
-	got, err := resolve(tags, "", "0", "a-real-etl-job")
+	got, err := Resolve(tags, "", "0", "a-real-etl-job")
 	if err != nil {
 		t.Fatalf("resolve: %v", err)
 	}
@@ -111,7 +111,7 @@ func TestResolve_FallsBackToBareTagWhenPrefixedTagIsStale(t *testing.T) {
 		{Name: "v0.333.0", Digest: "sha256:current"},              // re-tagged onto :latest every merge
 		{Name: "a-real-etl-job-v0.1.0", Digest: "sha256:stale"}, // last real per-service bump, since superseded
 	}
-	got, err := resolve(tags, "", "0", "a-real-etl-job")
+	got, err := Resolve(tags, "", "0", "a-real-etl-job")
 	if err != nil {
 		t.Fatalf("resolve: %v", err)
 	}
@@ -126,7 +126,7 @@ func TestResolve_PerServiceTagPicksHighest(t *testing.T) {
 		{Name: "a-real-etl-job-v0.324.0", Digest: "sha256:new"},
 		{Name: "silver-gold-to-shared-v9.9.9", Digest: "sha256:other"}, // different service, must not match
 	}
-	got, err := resolve(tags, "", "0", "a-real-etl-job")
+	got, err := Resolve(tags, "", "0", "a-real-etl-job")
 	if err != nil {
 		t.Fatalf("resolve: %v", err)
 	}
@@ -139,7 +139,7 @@ func TestResolve_FallsBackToBareTagsWhenNoPrefixedTagExists(t *testing.T) {
 	// An app not using the per-service monorepo convention keeps resolving
 	// bare version tags exactly as before.
 	tags := []Tag{{Name: "1.2.1", Digest: "sha256:one"}}
-	got, err := resolve(tags, "", "1.2.1", "myapp")
+	got, err := Resolve(tags, "", "1.2.1", "myapp")
 	if err != nil {
 		t.Fatalf("resolve: %v", err)
 	}

@@ -15,6 +15,7 @@ import (
 	"github.com/runcd/runcd/internal/diff"
 	"github.com/runcd/runcd/internal/expander"
 	"github.com/runcd/runcd/internal/manifest"
+	"github.com/runcd/runcd/internal/registry"
 	"github.com/runcd/runcd/internal/testutil"
 )
 
@@ -2010,5 +2011,121 @@ env:
 	}
 	if live.EnvVars["EXISTING"] != "value" || live.EnvVars["LOG_LEVEL"] != "" {
 		t.Fatalf("expected live env untouched since env isn't managed, got %+v", live.EnvVars)
+	}
+}
+
+type fakeTagResolver struct {
+	tags map[string][]registry.Tag // key: repository
+	err  error
+}
+
+func (f *fakeTagResolver) ListTags(_ context.Context, repository string) ([]registry.Tag, error) {
+	if f.err != nil {
+		return nil, f.err
+	}
+	return f.tags[repository], nil
+}
+
+const overrideRepo = "us-central1-docker.pkg.dev/proj/repo/a-real-etl-job"
+
+func manifestWithRepo() []byte {
+	return []byte(fmt.Sprintf("image:\n  digest: %s\n  repository: %s\n", validDigest, overrideRepo))
+}
+
+// TestRunOnce_TrackVersionOverrideResolvesLiveDigest proves a unit's
+// config.Override track/version (expander.SyncUnit.Track/Version) is
+// resolved live against the manifest's image.repository, superseding the
+// digest actually committed in the manifest — the mechanism behind letting
+// one project in an environment pin a different version than the rest.
+func TestRunOnce_TrackVersionOverrideResolvesLiveDigest(t *testing.T) {
+	db := testutil.NewPostgres(t)
+	overrideDigest := "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+	r := &Reconciler{
+		DB:            db,
+		ManagedFields: []string{"image"},
+		Manifests:     &fakeManifests{byApp: map[string][]byte{"a-real-etl-job": manifestWithRepo()}},
+		TagResolver: &fakeTagResolver{tags: map[string][]registry.Tag{
+			overrideRepo: {{Name: "0.310.0", Digest: overrideDigest}},
+		}},
+		CloudRun: &fakeCloudRun{services: map[string]*cloudrun.LiveService{
+			"proj-b/a-real-etl-job": {
+				ServiceState:                cloudrun.ServiceState{ImageDigest: overrideDigest},
+				HasRevisionForDesiredDigest: true,
+				LatestRevisionReady:         true,
+			},
+		}},
+		Preconditions: &fakePreconditions{},
+	}
+
+	units := []expander.SyncUnit{{App: "a-real-etl-job", Project: "proj-b", Region: "us-central1", Version: "0.310"}}
+	results, err := r.RunOnce(context.Background(), units)
+	if err != nil {
+		t.Fatalf("RunOnce: %v", err)
+	}
+	if len(results) != 1 || results[0].DesiredImage != overrideDigest || results[0].Status != "Synced" {
+		t.Fatalf("expected the override version's resolved digest to be desired and Synced, got %+v", results)
+	}
+}
+
+func TestRunOnce_TrackVersionOverrideWithoutRepositoryIsInvalid(t *testing.T) {
+	db := testutil.NewPostgres(t)
+	r := &Reconciler{
+		DB:            db,
+		ManagedFields: []string{"image"},
+		Manifests:     &fakeManifests{byApp: map[string][]byte{"widget-api": serviceYAML()}}, // no image.repository
+		TagResolver:   &fakeTagResolver{},
+		CloudRun:      &fakeCloudRun{},
+		Preconditions: &fakePreconditions{},
+	}
+
+	units := []expander.SyncUnit{{App: "widget-api", Project: "example-prod-us", Region: "us-central1", Version: "1.2"}}
+	results, err := r.RunOnce(context.Background(), units)
+	if err != nil {
+		t.Fatalf("RunOnce: %v", err)
+	}
+	if len(results) != 1 || results[0].Status != "Invalid" {
+		t.Fatalf("expected Invalid without image.repository to resolve against, got %+v", results)
+	}
+}
+
+func TestRunOnce_TrackVersionOverrideWithoutTagResolverIsInvalid(t *testing.T) {
+	db := testutil.NewPostgres(t)
+	r := &Reconciler{
+		DB:            db,
+		ManagedFields: []string{"image"},
+		Manifests:     &fakeManifests{byApp: map[string][]byte{"a-real-etl-job": manifestWithRepo()}},
+		// TagResolver deliberately nil
+		CloudRun:      &fakeCloudRun{},
+		Preconditions: &fakePreconditions{},
+	}
+
+	units := []expander.SyncUnit{{App: "a-real-etl-job", Project: "proj-b", Region: "us-central1", Version: "0.310"}}
+	results, err := r.RunOnce(context.Background(), units)
+	if err != nil {
+		t.Fatalf("RunOnce: %v", err)
+	}
+	if len(results) != 1 || results[0].Status != "Invalid" {
+		t.Fatalf("expected Invalid with no TagResolver configured, got %+v", results)
+	}
+}
+
+func TestRunOnce_TrackVersionOverrideNoMatchingTagIsInvalid(t *testing.T) {
+	db := testutil.NewPostgres(t)
+	r := &Reconciler{
+		DB:            db,
+		ManagedFields: []string{"image"},
+		Manifests:     &fakeManifests{byApp: map[string][]byte{"a-real-etl-job": manifestWithRepo()}},
+		TagResolver:   &fakeTagResolver{tags: map[string][]registry.Tag{}}, // no tags at all satisfy "9.9"
+		CloudRun:      &fakeCloudRun{},
+		Preconditions: &fakePreconditions{},
+	}
+
+	units := []expander.SyncUnit{{App: "a-real-etl-job", Project: "proj-b", Region: "us-central1", Version: "9.9"}}
+	results, err := r.RunOnce(context.Background(), units)
+	if err != nil {
+		t.Fatalf("RunOnce: %v", err)
+	}
+	if len(results) != 1 || results[0].Status != "Invalid" {
+		t.Fatalf("expected Invalid when no tag satisfies the override version, got %+v", results)
 	}
 }

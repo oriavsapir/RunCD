@@ -83,6 +83,40 @@ func TestExpand_FanOutWithOverridesAndExclude(t *testing.T) {
 	}
 }
 
+func TestExpand_OverrideTrackVersionPropagatesToOneProjectOnly(t *testing.T) {
+	root, err := config.Parse([]byte(`
+environments:
+  prd:
+    projects: [proj-a, proj-b]
+    region: us-central1
+defaults:
+  region: us-central1
+apps:
+  - name: a-real-etl-job
+    env: prd
+    source: { repo: git@github.com:org/deployment.git, path: services/a-real-etl-job/service.yaml }
+    overrides:
+      proj-b: { version: "0.310" }
+`))
+	if err != nil {
+		t.Fatalf("fixture parse: %v", err)
+	}
+	units, err := Expand(root)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	byProject := map[string]SyncUnit{}
+	for _, u := range units {
+		byProject[u.Project] = u
+	}
+	if got := byProject["proj-a"]; got.Track != "" || got.Version != "" {
+		t.Fatalf("proj-a should have no override, got track=%q version=%q", got.Track, got.Version)
+	}
+	if got := byProject["proj-b"].Version; got != "0.310" {
+		t.Fatalf("proj-b.Version = %q, want 0.310", got)
+	}
+}
+
 func TestExpand_InvalidOverrideProjectRejected(t *testing.T) {
 	root, err := config.Parse([]byte(`
 environments:

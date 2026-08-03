@@ -24,6 +24,10 @@ type SyncUnit struct {
 	// config entry — see config.App's doc comments.
 	IgnoreFields        []string
 	IgnorePreconditions []string
+	// Track/Version, when set, override this project's manifest-declared
+	// image.track/image.version — see config.Override.
+	Track   string
+	Version string
 }
 
 // Expand resolves every apps[] entry against its environment's project list,
@@ -94,8 +98,12 @@ func Expand(root *config.Root) ([]SyncUnit, error) {
 			if env.Region != "" {
 				region = env.Region
 			}
-			if o, ok := app.Overrides[project]; ok && o.Region != "" {
-				region = o.Region
+			var track, version string
+			if o, ok := app.Overrides[project]; ok {
+				if o.Region != "" {
+					region = o.Region
+				}
+				track, version = o.Track, o.Version
 			}
 			if region == "" {
 				return nil, fmt.Errorf("app %q project %q: no region resolved — set defaults.region, environments[%q].region, or overrides[%q].region", app.Name, project, app.Env, project)
@@ -117,6 +125,8 @@ func Expand(root *config.Root) ([]SyncUnit, error) {
 				SourcePath:          app.Source.Path,
 				IgnoreFields:        app.IgnoreFields,
 				IgnorePreconditions: app.IgnorePreconditions,
+				Track:               track,
+				Version:             version,
 			})
 		}
 	}

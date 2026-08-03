@@ -12,6 +12,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"path"
 	"time"
 
 	"golang.org/x/sync/errgroup"
@@ -23,7 +24,18 @@ import (
 	"github.com/runcd/runcd/internal/health"
 	"github.com/runcd/runcd/internal/manifest"
 	"github.com/runcd/runcd/internal/precondition"
+	"github.com/runcd/runcd/internal/registry"
 )
+
+// TagResolver lists an Artifact Registry image's tags — used only when a
+// unit carries a config.Override track/version (expander.SyncUnit.Track/
+// Version), to resolve it live against the manifest's image.repository
+// instead of the digest imageupdater already committed. Same interface
+// shape as imageupdater.Resolver — any real implementation (e.g.
+// imageupdater.GCPResolver) satisfies both without adapting.
+type TagResolver interface {
+	ListTags(ctx context.Context, repository string) ([]registry.Tag, error)
+}
 
 // DefaultWorkers is §5.4's default worker pool size.
 const DefaultWorkers = 16
@@ -135,6 +147,10 @@ type Reconciler struct {
 	Manifests     ManifestSource
 	ManagedFields []string
 	Workers       int
+	// TagResolver is optional; nil is only valid so long as no unit carries
+	// a track/version override (a unit that does, with TagResolver nil,
+	// fails loudly rather than silently ignoring the override).
+	TagResolver TagResolver
 	// Notifier is optional; nil means no notifications are evaluated.
 	Notifier Notifier
 	// Now is optional; nil means time.Now. Overridden in tests so sync
@@ -301,9 +317,39 @@ func (r *Reconciler) reconcile(ctx context.Context, unit expander.SyncUnit, opts
 		res.Status, res.Health, res.Err = StatusInvalid, StatusInvalid, fmt.Errorf("invalid service definition: %w", err)
 		return res
 	}
-	res.DesiredImage = sd.Image.Digest
-	res.Track, res.Version, res.Repository = sd.Image.Track, sd.Image.Version, sd.Image.Repository
 	res.ResourceType = string(sd.ResourceType)
+
+	// unit.Track/Version (config.Override, per-project) takes precedence
+	// over the manifest's own image.track/image.version, resolved live
+	// against Artifact Registry rather than the digest imageupdater already
+	// committed to the manifest — see config.Override's doc comment. Most
+	// units carry neither, and just deploy whatever digest is committed
+	// (NFR2's default posture, unchanged).
+	desiredDigest := sd.Image.Digest
+	res.Track, res.Version, res.Repository = sd.Image.Track, sd.Image.Version, sd.Image.Repository
+	if unit.Track != "" || unit.Version != "" {
+		if sd.Image.Repository == "" {
+			res.Status, res.Health, res.Err = StatusInvalid, StatusInvalid, fmt.Errorf("project %q overrides track/version but the manifest has no image.repository to resolve against", unit.Project)
+			return res
+		}
+		if r.TagResolver == nil {
+			res.Status, res.Health, res.Err = StatusInvalid, StatusInvalid, fmt.Errorf("project %q overrides track/version but no TagResolver is configured", unit.Project)
+			return res
+		}
+		tags, err := r.TagResolver.ListTags(ctx, sd.Image.Repository)
+		if err != nil {
+			res.Status, res.Health, res.Err = StatusInvalid, StatusInvalid, fmt.Errorf("list tags for %s: %w", sd.Image.Repository, err)
+			return res
+		}
+		resolved, err := registry.Resolve(tags, unit.Track, unit.Version, path.Base(sd.Image.Repository))
+		if err != nil {
+			res.Status, res.Health, res.Err = StatusInvalid, StatusInvalid, fmt.Errorf("resolve project %q's track/version override: %w", unit.Project, err)
+			return res
+		}
+		desiredDigest = resolved
+		res.Track, res.Version = unit.Track, unit.Version
+	}
+	res.DesiredImage = desiredDigest
 
 	if err := precondition.Check(ctx, r.Preconditions, unit.Project, filterPreconditions(sd.Requires, unit.IgnorePreconditions)); err != nil {
 		res.Status, res.Err = StatusInvalid, err
@@ -315,7 +361,7 @@ func (r *Reconciler) reconcile(ctx context.Context, unit expander.SyncUnit, opts
 	// ignoreFields set could land on a wrong final status after deploy.
 	managedFields := effectiveManagedFields(r.ManagedFields, unit.IgnoreFields)
 
-	desired := cloudrun.ServiceState{ImageDigest: sd.Image.Digest}
+	desired := cloudrun.ServiceState{ImageDigest: desiredDigest}
 	// fetchDigest is what GetService/GetJob check live revisions/executions
 	// against to decide HasRevisionForDesiredDigest/HasExecutionForDesiredDigest
 	// (health.Assess* reports Missing when that's false). When image isn't
@@ -323,7 +369,7 @@ func (r *Reconciler) reconcile(ctx context.Context, unit expander.SyncUnit, opts
 	// that's the whole point of ignoring it — so checking against it here
 	// would report Missing forever. Empty means "any digest counts as
 	// present" (see cloudrun.GCPAdminClient).
-	fetchDigest := sd.Image.Digest
+	fetchDigest := desiredDigest
 	if !fieldManaged(managedFields, "image") {
 		fetchDigest = ""
 	}

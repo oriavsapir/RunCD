@@ -150,6 +150,14 @@ type Defaults struct {
 
 type Override struct {
 	Region string `yaml:"region,omitempty"`
+	// Track/Version override the app's manifest-declared image.track/
+	// image.version for this project only (mutually exclusive, mirroring
+	// manifest.Image's own track/version pair) — resolved live against
+	// Artifact Registry at reconcile time, not committed to the manifest,
+	// so the same service.yaml can serve one project riding the manifest's
+	// own digest and another pinned to a different version.
+	Track   string `yaml:"track,omitempty"`
+	Version string `yaml:"version,omitempty"`
 }
 
 type Source struct {
@@ -284,6 +292,13 @@ func Parse(data []byte) (*Root, error) {
 	for _, f := range root.Defaults.ManagedFields {
 		if !validManagedFields[f] {
 			return nil, fmt.Errorf("defaults.managedFields: %q is not a field runcd knows how to manage (image, traffic, env)", f)
+		}
+	}
+	for _, app := range root.Apps {
+		for project, o := range app.Overrides {
+			if o.Track != "" && o.Version != "" {
+				return nil, fmt.Errorf("app %q: overrides[%q] may set track or version, not both", app.Name, project)
+			}
 		}
 	}
 	for _, app := range root.Apps {

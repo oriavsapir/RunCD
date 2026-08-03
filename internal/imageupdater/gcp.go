@@ -30,13 +30,5 @@ func (r *GCPResolver) Close() error {
 
 // ListTags implements Resolver.
 func (r *GCPResolver) ListTags(ctx context.Context, repository string) ([]Tag, error) {
-	tags, err := r.client.ListTags(ctx, repository)
-	if err != nil {
-		return nil, err
-	}
-	out := make([]Tag, len(tags))
-	for i, t := range tags {
-		out[i] = Tag{Name: t.Name, Digest: t.Digest}
-	}
-	return out, nil
+	return r.client.ListTags(ctx, repository)
 }

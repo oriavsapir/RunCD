@@ -299,6 +299,7 @@ func run() error {
 		ManagedFields: root.Defaults.ManagedFields,
 		Workers:       reconcile.DefaultWorkers,
 		Notifier:      buildNotifier(db, root),
+		TagResolver:   imgResolver,
 	})
 
 	dynUnits := &dynamicUnits{}

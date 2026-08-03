@@ -2046,6 +2046,28 @@ Dashboard, same pass:
   vulnerabilities (`golang.org/x/text` → v0.39.0, `golang.org/x/crypto` →
   v0.52.0) during setup.
 
+## Per-project track/version override (`config.Override`)
+
+- [x] **`runcd.yaml`'s `overrides[project]` can now set `track`/`version`**
+  (mutually exclusive, mirroring `manifest.Image`'s own pair), alongside the
+  existing `region` override — lets one project pin a different version of
+  an app than the rest of its environment without a separate `service.yaml`.
+  `expander.Expand` copies it onto that project's `SyncUnit` only;
+  `reconcile` resolves it live against the manifest's `image.repository`
+  via a new `TagResolver` interface, superseding the manifest's committed
+  `digest` for that unit — every other unit sharing the manifest is
+  unaffected. A unit with the override set but no `TagResolver` configured,
+  or a manifest missing `image.repository`, fails loudly as `Invalid`
+  rather than silently falling back to the manifest's digest.
+- [x] Extracted the tag-resolution algorithm (prefix-preference +
+  digest-agreement safety check) out of `internal/imageupdater/select.go`
+  into `internal/registry.Resolve`, so `reconcile` can call the exact same
+  logic without pulling in `imageupdater`'s `githubapp` write-back
+  dependency. `imageupdater.Tag` is now a type alias for `registry.Tag`
+  (not a distinct type), so `imageupdater.Resolver` and
+  `reconcile.TagResolver` are structurally identical — `cmd/controller`
+  wires the one `imageupdater.GCPResolver` instance into both.
+
 ## How the tests actually run
 
 Every non-trivial test in this repo runs against **real dependencies**, not

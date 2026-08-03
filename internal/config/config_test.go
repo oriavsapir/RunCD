@@ -529,6 +529,52 @@ apps:
 	}
 }
 
+func TestParse_OverrideTrackVersion(t *testing.T) {
+	yaml := []byte(`
+environments:
+  prd:
+    projects: [proj-a, proj-b]
+defaults:
+  region: us-central1
+apps:
+  - name: a-real-etl-job
+    env: prd
+    source: { repo: git@github.com:org/deployment.git, path: services/a-real-etl-job/service.yaml }
+    overrides:
+      proj-b:
+        version: "0.310"
+`)
+	root, err := Parse(yaml)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	o := root.Apps[0].Overrides["proj-b"]
+	if o.Version != "0.310" {
+		t.Fatalf("overrides[proj-b].version not parsed: %+v", o)
+	}
+}
+
+func TestParse_OverrideRejectsBothTrackAndVersion(t *testing.T) {
+	yaml := []byte(`
+environments:
+  prd:
+    projects: [proj-a]
+defaults:
+  region: us-central1
+apps:
+  - name: a-real-etl-job
+    env: prd
+    source: { repo: git@github.com:org/deployment.git, path: services/a-real-etl-job/service.yaml }
+    overrides:
+      proj-a:
+        track: stable
+        version: "1.2"
+`)
+	if _, err := Parse(yaml); err == nil {
+		t.Fatal("expected error when an override sets both track and version")
+	}
+}
+
 func TestParse_AppIgnoreFieldsRejectsUnknownField(t *testing.T) {
 	yaml := []byte(`
 environments:
