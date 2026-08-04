@@ -69,7 +69,13 @@ func stringMapEqual(a, b map[string]string) bool {
 		return false
 	}
 	for k, v := range a {
-		if b[k] != v {
+		// bv, ok := b[k], not b[k] alone — a plain index would return the
+		// zero value ("") for a key missing from b, indistinguishable from
+		// a key that's actually present with value "". A renamed env var
+		// with an empty value (a real, Cloud-Run-permitted case) would then
+		// read as unchanged even though b has no such key at all.
+		bv, ok := b[k]
+		if !ok || bv != v {
 			return false
 		}
 	}
@@ -81,7 +87,8 @@ func secretMapEqual(a, b map[string]cloudrun.SecretRef) bool {
 		return false
 	}
 	for k, v := range a {
-		if b[k] != v {
+		bv, ok := b[k]
+		if !ok || bv != v {
 			return false
 		}
 	}

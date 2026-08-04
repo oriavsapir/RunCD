@@ -739,7 +739,17 @@ func (r *Reconciler) insertSyncEvent(ctx context.Context, unit expander.SyncUnit
 	return id, err
 }
 
+// updateSyncEvent always detaches from ctx's cancellation (same
+// context.WithoutCancel idiom releaseLock's defer uses) — every call site
+// is a terminal write after deploy has already succeeded or failed, so
+// leadership loss mid-deploy cancelling ctx must not also stop this write
+// from happening; otherwise the sync_events row inserted as in_progress
+// never gets updated and sits there forever, corrupting history/metrics.
+// It must still time out on its own rather than risk hanging forever
+// against a wedged connection.
 func (r *Reconciler) updateSyncEvent(ctx context.Context, id int64, result, errMsg string) error {
+	ctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
+	defer cancel()
 	_, err := r.DB.ExecContext(ctx, `
 		UPDATE sync_events SET finished_at = now(), result = $1, error = $2 WHERE id = $3`,
 		result, nullIfEmpty(errMsg), id)

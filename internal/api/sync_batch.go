@@ -86,19 +86,27 @@ func (h *Handler) handleSyncBatch(w http.ResponseWriter, r *http.Request) {
 
 // filterOutOfSync keeps only units whose last-known status isn't Synced —
 // a unit with no persisted row yet (never reconciled) is kept too, since
-// "unknown" isn't "confirmed synced." Best-effort: a unit whose status
-// lookup itself errors is kept rather than silently dropped from the
+// "unknown" isn't "confirmed synced." Best-effort: if the status lookup
+// itself errors, every unit is kept rather than silently dropped from the
 // batch — for a bulk sync a human explicitly asked for, "unknown, so try
-// it" is a safer default than "unknown, so skip it."
+// it" is a safer default than "unknown, so skip it." One ListApplications
+// call, not one GetApplication per unit — same batch-then-map pattern
+// handleListUnits already uses, so a "sync all" over N units doesn't cost
+// N sequential round trips just to decide which ones to include.
 func filterOutOfSync(ctx context.Context, status StatusStore, units []expander.SyncUnit) []expander.SyncUnit {
+	rows, err := status.ListApplications(ctx)
+	if err != nil {
+		slog.Error("sync-batch: list applications", "error", err)
+		return units
+	}
+	byKey := make(map[string]ApplicationRow, len(rows))
+	for _, row := range rows {
+		byKey[row.App+"/"+row.Project] = row
+	}
+
 	var out []expander.SyncUnit
 	for _, u := range units {
-		row, found, err := status.GetApplication(ctx, u.App, u.Project)
-		if err != nil {
-			slog.Error("sync-batch: get application", "app", u.App, "project", u.Project, "error", err)
-			out = append(out, u)
-			continue
-		}
+		row, found := byKey[u.App+"/"+u.Project]
 		// "Synced" mirrors diff.Synced's string value — not imported
 		// directly to avoid a new internal/api -> internal/diff dependency
 		// for a single string comparison.

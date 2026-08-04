@@ -2110,6 +2110,48 @@ Dashboard, same pass:
   than failing the whole `GetJob` call, so a real API/permissions error on
   the execution side doesn't also block the Status result.
 
+## Review pass: five bugs, all confirmed and fixed
+
+- [x] **`reconcile.updateSyncEvent` used the cancellable deploy `ctx`**
+  (`reconcile.go`) — leadership loss mid-deploy cancels `ctx`; the terminal
+  `updateSyncEvent` call right after (`failed`/`succeeded`) then also fails
+  against that same cancelled `ctx`, leaving the `sync_events` row inserted
+  as `in_progress` stuck that way forever — corrupting history/metrics for
+  that unit. Fixed: `updateSyncEvent` now detaches via
+  `context.WithoutCancel` plus its own 5s timeout, the same idiom
+  `releaseLock`'s defer already uses for the identical reason.
+- [x] **`diff.stringMapEqual`/`secretMapEqual` treat a renamed key as
+  unchanged when the value is the zero value** (`diff.go`) — both compared
+  `b[k] != v` directly; a plain map index returns the zero value for a
+  missing key, indistinguishable from a key that's genuinely present with
+  that same zero value. A renamed env var with an empty value (real,
+  Cloud-Run-permitted) or a renamed secret ref pointing at nothing would
+  read as equal even though the old key is gone from `live` entirely — the
+  rename silently never reconciles. Fixed: both now check `bv, ok := b[k]`
+  and require `ok`.
+- [x] **`filterOutOfSync` did one `GetApplication` call per unit**
+  (`sync_batch.go`) — a "Sync All, out-of-sync only" bulk sync over N units
+  cost N sequential round trips just to decide which units to include,
+  instead of the one-`ListApplications`-plus-map pattern `handleListUnits`
+  already uses for the exact same lookup. Fixed to match.
+- [x] **Dashboard stat tiles recomputed ~10 full array passes on every
+  render** (`page.tsx`) — `STAT_TILES.map` and the "other" accounting's
+  `STAT_TILES.flatMap` each ran `units.filter(...)` fresh on every render,
+  including every keystroke in the search box, even though neither depends
+  on `query` at all — inconsistent with `attention`/`filtered` right above
+  them, which were already memoized. Fixed: both now live in one
+  `useMemo([units])`.
+- [x] **`/api/orphans` scanned every project regardless of the caller's own
+  grant scope** (`units.go`) — `HasAnyGrant` only proves the caller can
+  sync *something*, somewhere; the handler filtered the *response* down to
+  the caller's allowed projects but still ran the live GCP scan
+  (`DetectOrphans`) over every unit in the whole fleet first. A caller
+  scoped to one tiny app could repeatedly trigger a full-fleet scan at
+  will — real cost/quota amplification, not a data leak (the response was
+  already correctly scoped). Fixed: `allowedProjects` is computed first
+  and used to narrow the unit list handed to `DetectOrphans`, so the scan
+  itself is bounded to what the caller can actually sync.
+
 ## How the tests actually run
 
 Every non-trivial test in this repo runs against **real dependencies**, not

@@ -185,6 +185,20 @@ function SyncUnitsPage() {
     [units],
   );
 
+  // One pass per tile (plus the "other" accounting below) instead of
+  // recomputing on every render — units.length can be in the hundreds, and
+  // this component re-renders on every keystroke in the search box even
+  // though these counts don't depend on query at all.
+  const stats = useMemo(() => {
+    const list = units ?? [];
+    const tiles = STAT_TILES.map((tile) => ({
+      ...tile,
+      count: list.filter(tile.match).length,
+    }));
+    const accounted = new Set(STAT_TILES.flatMap((t) => list.filter(t.match)));
+    return { tiles, other: list.length - accounted.size };
+  }, [units]);
+
   const filtered = useMemo(() => {
     if (!units) return units;
     if (selectedProject) {
@@ -271,9 +285,8 @@ function SyncUnitsPage() {
               <p className="text-muted-foreground text-xs">Total</p>
             </div>
           </div>
-          {STAT_TILES.map(
-            ({ label, match, icon: Icon, className, spinWhenNonZero }) => {
-              const count = units.filter(match).length;
+          {stats.tiles.map(
+            ({ label, icon: Icon, className, spinWhenNonZero, count }) => {
               const spin = spinWhenNonZero && count > 0;
               return (
                 <div
@@ -293,32 +306,24 @@ function SyncUnitsPage() {
               );
             },
           )}
-          {(() => {
-            // The tiles above aren't a mutually-exclusive partition (a unit
-            // can match none of them, e.g. status=Invalid/health=Invalid —
-            // that combination is never Synced/OutOfSync and isn't
-            // Progressing or Degraded either) — without this, Total could
-            // silently exceed the visible tiles' sum with no explanation.
-            const accounted = new Set(
-              STAT_TILES.flatMap((t) => units.filter(t.match)),
-            );
-            const other = units.length - accounted.size;
-            return (
-              other > 0 && (
-                <div className="bg-card flex items-center gap-3 rounded-lg border p-3">
-                  <HelpCircle className="text-muted-foreground size-5 shrink-0" />
-                  <div>
-                    <p className="text-lg leading-none font-semibold">
-                      {other}
-                    </p>
-                    <p className="text-muted-foreground text-xs">
-                      Other (pending/missing/invalid)
-                    </p>
-                  </div>
-                </div>
-              )
-            );
-          })()}
+          {/* The tiles above aren't a mutually-exclusive partition (a unit
+              can match none of them, e.g. status=Invalid/health=Invalid —
+              that combination is never Synced/OutOfSync and isn't
+              Progressing or Degraded either) — without this, Total could
+              silently exceed the visible tiles' sum with no explanation. */}
+          {stats.other > 0 && (
+            <div className="bg-card flex items-center gap-3 rounded-lg border p-3">
+              <HelpCircle className="text-muted-foreground size-5 shrink-0" />
+              <div>
+                <p className="text-lg leading-none font-semibold">
+                  {stats.other}
+                </p>
+                <p className="text-muted-foreground text-xs">
+                  Other (pending/missing/invalid)
+                </p>
+              </div>
+            </div>
+          )}
         </div>
       )}
 

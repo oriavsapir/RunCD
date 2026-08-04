@@ -275,28 +275,33 @@ func (h *Handler) handleOrphans(w http.ResponseWriter, r *http.Request) {
 	}
 	units := lister.List()
 
+	// HasAnyGrant only proved the caller has *some* sync grant somewhere —
+	// it says nothing about which projects. Narrowing units to only the
+	// caller's allowed projects *before* the scan (not just filtering the
+	// response after) matters: without it, a caller scoped to one tiny app
+	// in one project could repeatedly trigger a live GCP scan across the
+	// entire fleet's projects/regions at will — real cost/quota
+	// amplification, not just a would-be data leak.
+	folderMembership := h.RBAC.FolderMembership()
+	allowedProjects := make(map[string]bool)
+	scannable := units[:0:0]
+	for _, u := range units {
+		if rbac.CanSyncFolders(cfg, folderMembership, email, u) {
+			allowedProjects[u.Project] = true
+			scannable = append(scannable, u)
+		}
+	}
+
 	// DetectOrphans returns partial results alongside a non-nil err when
 	// only some project/region scans failed — serve what it found rather
 	// than discarding a fleet-wide scan over one bad project (same "one bad
 	// unit can't take down the fleet" principle RunOnce follows).
-	orphans, err := h.Reconciler.Load().DetectOrphans(r.Context(), units)
+	orphans, err := h.Reconciler.Load().DetectOrphans(r.Context(), scannable)
 	if err != nil {
 		slog.Error("detect orphans", "error", err)
 		if orphans == nil {
 			http.Error(w, "failed to detect orphans", http.StatusInternalServerError)
 			return
-		}
-	}
-
-	// HasAnyGrant only proved the caller has *some* sync grant somewhere; the
-	// response must not leak every project's orphans to a caller scoped to
-	// just one env. A project is visible here if the caller can sync at
-	// least one currently-configured unit in it.
-	folderMembership := h.RBAC.FolderMembership()
-	allowedProjects := make(map[string]bool)
-	for _, u := range units {
-		if rbac.CanSyncFolders(cfg, folderMembership, email, u) {
-			allowedProjects[u.Project] = true
 		}
 	}
 
