@@ -84,7 +84,7 @@ export function ProjectGrid({
             {s.needsAttention > 0 && (
               <span className="text-destructive flex items-center gap-1 text-xs font-medium">
                 <AlertTriangle className="size-3.5" />
-                {s.needsAttention}
+                {s.needsAttention} needs attention
               </span>
             )}
           </div>

@@ -12,8 +12,14 @@ import (
 // touches the hex value — never re-marshaling the YAML (which would reorder
 // keys, drop comments, and restyle quoting, turning a one-line digest bump
 // into a whole-file diff that defeats the whole point of writing back a
-// resolved digest instead of a floating tag).
-var digestLine = regexp.MustCompile(`(?m)^(\s*digest:\s*"?)sha256:[0-9a-f]{64}("?\s*)$`)
+// resolved digest instead of a floating tag). Allows either quote style
+// manifest.Parse itself accepts (YAML permits single- or double-quoted
+// scalars interchangeably) and an optional trailing "# comment", so a
+// manifest using either doesn't silently stop resolving forever — RE2 (this
+// package's regexp) has no backreferences, so the opening/closing quote
+// groups aren't required to match each other; a genuine mismatch there is
+// still caught below by the re-parse round-trip check.
+var digestLine = regexp.MustCompile(`(?m)^(\s*digest:\s*["']?)sha256:[0-9a-f]{64}(["']?\s*(?:#.*)?)$`)
 
 // rewriteDigest replaces the single digest: value in data with newDigest,
 // then re-parses the result and asserts it round-trips to exactly

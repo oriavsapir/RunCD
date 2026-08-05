@@ -721,7 +721,17 @@ func reconcileLoop(ctx context.Context, interval time.Duration, lc *leadershipCo
 		}
 
 		if configErr != nil {
-			return // no fresh unit list to run this tick's reconcile pass over
+			// Fall back to the last known-good unit list rather than skip
+			// reconciling the entire fleet over one transient config-reload
+			// error — e.g. expander.Expand hard-failing because an
+			// override/exclude references a project that folders.ResolveConfig
+			// only temporarily dropped (Resource Manager outage, or a stale
+			// cache entry expiring mid-outage). ResolveConfig itself already
+			// degrades gracefully per environment (see its doc comment);
+			// without this fallback, that graceful-degradation contract was
+			// undone one layer up by aborting every other environment's
+			// reconcile pass too.
+			expanded = units.List()
 		}
 
 		passCtx := lc.Current() // this leadership term's context, not the raw ctx
