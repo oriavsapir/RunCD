@@ -115,7 +115,13 @@ via `gcloud run deploy`, not Terraform.
   `TestExamplesParse`, and `internal/manifest`'s `TestExamplesParse` parse
   (and, for runcd.yaml, expand) every example against the real
   parser/expander, so a breaking change fails there instead of the docs
-  silently going stale.
+  silently going stale. Also run `go run ./cmd/runcd validate
+  examples/<dir>` against every affected example directory (and confirm no
+  `FAIL` lines) — `runcd validate` is a second, independent consumer of the
+  same parse/expand path (plus a strict-field decode `TestExamplesParse`
+  doesn't do), and CI's own `examples` job (`.github/workflows/ci.yml`) runs
+  it against every `examples/*` directory on every push/PR, so a config
+  change that silently breaks it fails CI, not just quietly rots the docs.
 - In React data-fetching effects, fetch inline in the effect body (with a
   `cancelled` flag in cleanup) rather than calling a separately-defined
   `load()`-style callback from inside `useEffect` — the latter trips

@@ -94,6 +94,31 @@ jobs:
       - run: go build ./...
       - run: go test ./... -race -shuffle=on
 
+  # Runs the real `runcd validate` binary against every examples/*
+  # directory that has a runcd.yaml — a second, independent check on top of
+  # internal/config's TestExamplesParse/TestExamplesExpand (it also runs the
+  # strict-field decode those tests don't), so a config feature change that
+  # silently breaks validate fails CI instead of quietly rotting the docs.
+  # No --check-gcp/--check-slack here: those need real GCP credentials/live
+  # webhooks this runner doesn't have.
+  examples:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+      - run: go build -o /tmp/runcd ./cmd/runcd
+      - name: validate every examples/* directory
+        run: |
+          failed=0
+          for dir in examples/*/; do
+            [ -f "$dir/runcd.yaml" ] || continue
+            echo "--- $dir ---"
+            /tmp/runcd validate "$dir" || failed=1
+          done
+          exit $failed
+
   terraform:
     runs-on: ubuntu-latest
     steps:
