@@ -1,6 +1,9 @@
 package api
 
-import "net/http"
+import (
+	"log/slog"
+	"net/http"
+)
 
 // handleImageEvent is the optional Eventarc add-on's entry point: a trigger
 // on Cloud Audit Logs (serviceName=artifactregistry.googleapis.com,
@@ -30,6 +33,12 @@ func (h *Handler) handleImageEvent(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if _, err := h.ImageEvents.Verify(r); err != nil {
+		// Same posture as verify() for the IAP/OAuth path: the underlying
+		// reason (bad audience — see the RUNCD_IMAGE_EVENTS_AUDIENCE footgun
+		// above — wrong service account, expired token) never reaches the
+		// response body, but without logging it a misconfigured trigger
+		// 403s forever with zero operator-visible signal.
+		slog.Error("image-events auth", "error", err)
 		http.Error(w, "forbidden", http.StatusForbidden)
 		return
 	}

@@ -82,7 +82,7 @@ func bestMatch(tags []Tag, prefix string, depth int, constraint string) string {
 			name = n
 		}
 		v := canonicalSemver(name)
-		if !semver.IsValid(v) {
+		if !semver.IsValid(v) || semver.Prerelease(v) != "" {
 			continue
 		}
 		var p string

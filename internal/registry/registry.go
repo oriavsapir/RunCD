@@ -34,6 +34,12 @@ type Tag struct {
 // re-listing the whole repository.
 const DefaultTagsCacheTTL = 30 * time.Second
 
+// listTagsCallTimeout bounds the singleflight-shared fetch itself, same
+// idea as precondition.precondCallTimeout — context.WithoutCancel strips
+// the caller's deadline along with its cancellation, so without this a
+// hung ListDockerImages call would block every coalesced caller forever.
+const listTagsCallTimeout = 30 * time.Second
+
 type tagsCacheEntry struct {
 	tags      []Tag
 	fetchedAt time.Time
@@ -131,7 +137,15 @@ func (c *Client) ListTags(ctx context.Context, repository string) ([]Tag, error)
 		}
 		c.mu.Unlock()
 
-		tags, err := c.listTagsUncached(ctx, repository)
+		// context.WithoutCancel: shared via singleflight across every
+		// concurrent caller for this repository, same reasoning as
+		// precondition.checkExists's own fetch call — one caller's cancelled
+		// context (timeout, lost leadership) must not spuriously fail every
+		// other in-flight caller sharing this fetch. Rebounded with our own
+		// timeout since WithoutCancel strips the caller's deadline too.
+		fetchCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), listTagsCallTimeout)
+		defer cancel()
+		tags, err := c.listTagsUncached(fetchCtx, repository)
 		if err != nil {
 			return nil, err
 		}

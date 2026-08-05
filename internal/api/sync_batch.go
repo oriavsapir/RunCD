@@ -29,6 +29,11 @@ type batchSyncResult struct {
 	// sync was attempted; Status/Health then reflect its outcome the same
 	// way the single-unit sync response does.
 	Skipped string `json:"skipped,omitempty"`
+	// DeployFailed mirrors the single-unit sync response's 422: a deploy was
+	// actually attempted and failed, as opposed to a blocked-before-deploy
+	// outcome (bad manifest, failed precondition) that still reads as a
+	// (business-level) 200.
+	DeployFailed bool `json:"deployFailed,omitempty"`
 }
 
 // handleSyncBatch fans a manual sync out over every unit the caller's RBAC
@@ -55,6 +60,13 @@ func (h *Handler) handleSyncBatch(w http.ResponseWriter, r *http.Request) {
 	projectFilter := r.URL.Query().Get("project")
 	onlyOutOfSync := r.URL.Query().Get("filter") == "outOfSync"
 
+	// Hoisted once, not read fresh per unit/goroutine — same reasoning as
+	// handleListUnits: a hot-reload landing mid-batch must not let a grant
+	// revoked partway through still authorize a later unit in this same
+	// batch under a stale, pre-revocation snapshot.
+	cfg := h.RBAC.Get()
+	folderMembership := h.RBAC.FolderMembership()
+
 	var candidates []expander.SyncUnit
 	for _, u := range lister.List() {
 		if projectFilter != "" && u.Project != projectFilter {
@@ -62,7 +74,11 @@ func (h *Handler) handleSyncBatch(w http.ResponseWriter, r *http.Request) {
 		}
 		candidates = append(candidates, u)
 	}
-	if onlyOutOfSync {
+	// A caller with zero grants at all can't sync anything in the batch
+	// regardless of out-of-sync status, so skip the (expensive, full-table)
+	// scan below rather than let an unauthorized caller force it — same
+	// HasAnyGrant guard handleOrphans already uses for the same reason.
+	if onlyOutOfSync && rbac.HasAnyGrant(cfg, email) {
 		candidates = filterOutOfSync(r.Context(), h.Status, candidates)
 	}
 
@@ -71,7 +87,7 @@ func (h *Handler) handleSyncBatch(w http.ResponseWriter, r *http.Request) {
 	g.SetLimit(batchSyncWorkers)
 	for i, unit := range candidates {
 		g.Go(func() error {
-			results[i] = h.syncOneForBatch(r.Context(), email, unit)
+			results[i] = h.syncOneForBatch(r.Context(), email, unit, cfg, folderMembership)
 			return nil
 		})
 	}
@@ -80,7 +96,21 @@ func (h *Handler) handleSyncBatch(w http.ResponseWriter, r *http.Request) {
 	// here can't actually fail.
 	_ = g.Wait()
 
+	deployFailed := false
+	for _, res := range results {
+		if res.DeployFailed {
+			deployFailed = true
+			break
+		}
+	}
+
 	w.Header().Set("Content-Type", "application/json")
+	if deployFailed {
+		// Same posture as the single-unit sync response: a caller gating on
+		// exit code/2xx (the CLI, CI) must not see an attempted-and-failed
+		// deploy as success just because other units in the batch succeeded.
+		w.WriteHeader(http.StatusUnprocessableEntity)
+	}
 	_ = json.NewEncoder(w).Encode(results)
 }
 
@@ -117,12 +147,16 @@ func filterOutOfSync(ctx context.Context, status StatusStore, units []expander.S
 	return out
 }
 
-func (h *Handler) syncOneForBatch(ctx context.Context, email string, unit expander.SyncUnit) batchSyncResult {
+// syncOneForBatch takes cfg/folderMembership as the caller's hoisted
+// snapshot from handleSyncBatch rather than re-reading h.RBAC.Get() itself —
+// a hot-reload landing mid-batch must not let different units in the same
+// batch get evaluated against different RBAC snapshots.
+func (h *Handler) syncOneForBatch(ctx context.Context, email string, unit expander.SyncUnit, cfg *rbac.Config, folderMembership map[string][]string) batchSyncResult {
 	result := batchSyncResult{App: unit.App, Project: unit.Project}
 
 	// CanSyncFolders, not plain CanSync, so a rule scoped via "folder:<id>"
 	// is honored too (§5.9) — same as handleSync.
-	if !rbac.CanSyncFolders(h.RBAC.Get(), h.RBAC.FolderMembership(), email, unit) {
+	if !rbac.CanSyncFolders(cfg, folderMembership, email, unit) {
 		result.Skipped = "forbidden"
 		return result
 	}
@@ -148,5 +182,6 @@ func (h *Handler) syncOneForBatch(ctx context.Context, email string, unit expand
 		logSensitive(unit.App, unit.Project, email, res.Err)
 	}
 	result.Status, result.Health = res.Status, res.Health
+	result.DeployFailed = res.DeployFailed
 	return result
 }
