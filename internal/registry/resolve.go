@@ -13,7 +13,7 @@ import (
 // satisfied by the highest matching semver tag — tags that aren't valid
 // semver (e.g. "latest", "main-abc123") are silently skipped rather than
 // erroring, since a real image repo mixes both kinds of tags. imageName is
-// the image's own last repository path segment (e.g. "a-real-etl-job"),
+// the image's own last repository path segment (e.g. "widget-service"),
 // used to prefer per-service monorepo tags (see below). Shared by
 // internal/imageupdater (resolving image.track/image.version to commit) and
 // internal/reconcile (resolving a per-project track/version override live,
@@ -37,7 +37,7 @@ func Resolve(tags []Tag, track, version, imageName string) (string, error) {
 		constraint = semver.Canonical(constraint) // normalize e.g. missing patch/build the same way tag comparisons are
 	}
 
-	// A monorepo CI commonly pushes per-service tags ("a-real-etl-job-v1.2.3")
+	// A monorepo CI commonly pushes per-service tags ("widget-service-v1.2.3")
 	// alongside a repo-wide release tag ("v1.2.3", from a separate global bump
 	// step) on the very same image, since the global step tags every image's
 	// current :latest regardless of which service actually changed.

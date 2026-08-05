@@ -886,16 +886,27 @@ direct Google OAuth token verification as the primary path.
   *dev-tooling* advisories (eslint/postcss/sharp transitive chain, not
   runtime code) — `npm audit fix --force` would downgrade Next.js to v9,
   the wrong direction; left as-is.
-  - `src/lib/api.ts` — typed client. Calls are same-origin
-    (`credentials: "include"`, no bearer-token handling in the frontend at
-    all) on the assumption the dashboard sits behind the same
-    IAP-protected perimeter as the runcd API (one Cloud Run service, or
-    two behind one load balancer with path routing) — the browser's
-    existing IAP session cookie authenticates API calls automatically.
-    `NEXT_PUBLIC_API_BASE_URL` overrides this if the API is genuinely on a
-    different origin. **Known gap:** no local-dev auth bypass — running
-    `next dev` against a real IAP-fronted backend requires either a live
-    IAP session or a temporary dev stub; not built.
+  - `src/lib/api.ts` — typed client, calls same-origin against this
+    Next.js server's own `/api/proxy` route as originally built. **Since
+    superseded** (see `web/src/app/api/proxy/[...path]/route.ts`, added
+    while fixing the IAP auth chain): the dashboard and the API turned out
+    to need to be two separate IAP-protected Cloud Run services with no
+    shared domain, so a browser can't reach the API's origin directly
+    (IAP's session cookie is scoped to its own origin) and the
+    single-origin/one-load-balancer assumption below no longer holds. The
+    proxy route now does have real auth code of its own: it runs on the
+    dashboard's own Cloud Run service account, calls the API
+    server-to-server via `google-auth-library`'s `GoogleAuth.getIdTokenClient`
+    (cached at module scope so concurrent cold-start requests share one
+    in-flight token mint) for Cloud Run IAM invoker, and separately forwards
+    the human's IAP assertion under a renamed header
+    (`x-runcd-iap-assertion` — Google's frontend strips a client-supplied
+    `X-Goog-*` header before it reaches Cloud Run) so the API's own
+    `IAPAuthenticator` can verify it and extract the caller's email for
+    RBAC. `RUNCD_API_URL` (server-side env var, not `NEXT_PUBLIC_...`) names
+    the API's own Cloud Run URL. **Known gap:** no local-dev auth bypass —
+    running `next dev` against a real IAP-fronted backend requires either a
+    live IAP session or a temporary dev stub; not built.
   - `src/components/status-badge.tsx` — maps every `Status`/`Health` enum
     value (plus the dashboard-only `"Pending"` sentinel) to an icon +
     color, with a safe fallback for an unrecognized value.
@@ -1957,6 +1968,47 @@ Dashboard, same pass:
     so an Artifact Registry push shortens the latency for both the updater
     and the reconcile pass through one shared path, no second trigger needed.
 
+## A real production incident: per-service image tags, caught and fixed live
+
+- [x] **`Resolve` now prefers a tag prefixed with the image's own name over
+  the bare/global tag** (`internal/imageupdater/select.go` at the time,
+  since moved into `internal/registry.Resolve` — see below) — a monorepo's
+  global release-tagging step stamps every image's `:latest` with a
+  repo-wide `vX.Y.Z` tag on every merge regardless of which service actually
+  changed, while per-service versioning pushes tags like
+  `widget-service-v0.323.1` onto only the services that did. Without
+  preferring the prefixed tag, the ever-climbing global tag would always win
+  a highest-semver comparison and silently reintroduce global versioning
+  through `image.version`.
+- [x] **That preference caused a real digest regression in production the
+  same session** — a monorepo's per-service the-tagging-tool tag only bumps on
+  a commit touching that service's own path, so a service that only changed
+  via a shared lib gets rebuilt and re-tagged `:latest` without its own
+  prefixed tag moving; blindly trusting a stale prefixed tag committed a
+  real regression. Reverted immediately, then re-applied deliberately once
+  the fix below landed (accepting some known-stale per-service tags in the
+  interim while the upstream tag-freshness gap gets fixed separately).
+- [x] **`Resolve` now refuses to trust a per-service tag unless its digest
+  agrees with what the bare/global tag resolves to** — comparing digests,
+  not version numbers, since per-service and global version counters are on
+  unrelated numbering scales and no numeric comparison can tell "stale" from
+  "current." Falls back to the bare tag when no prefixed tag's digest
+  matches, and trusts a prefixed tag outright when there's no bare tag at
+  all to compare against.
+  - Test: `TestResolve_PrefersPerServiceTagWhenConfirmedCurrent`,
+    `TestResolve_FallsBackToBareTagWhenPrefixedTagIsStale`,
+    `TestResolve_PerServiceTagPicksHighest`,
+    `TestResolve_FallsBackToBareTagsWhenNoPrefixedTagExists`
+    (`internal/registry/resolve_test.go`).
+- [x] **`cloudrun.withDigest` only stripped an existing `@digest`, not an
+  existing `:tag`** — a resource last deployed by something other than
+  RunCD (e.g. `gcloud run deploy --image foo:v1`) has a tag-referenced
+  existing image; splicing the desired digest onto that without stripping
+  the tag first produced a malformed `repo:tag@sha256:...` reference
+  instead of `repo@sha256:...`. Fixed by reusing `splitImageRef`'s
+  tag-vs-repo split (already added for `resolveImageDigest`) to recover the
+  bare repo either way.
+
 ## Bulk sync ("Sync All" / "sync out-of-sync") and dashboard tracking visibility
 
 - [x] **`POST /api/sync`** — the ArgoCD-style bulk sync action this
@@ -2020,19 +2072,23 @@ Dashboard, same pass:
 ## Infra / delivery
 
 - [x] **Dockerfile** — multi-stage (`golang:1.26-alpine` build →
-  `gcr.io/distroless/static-debian12:nonroot`), non-root, 18.9MB.
-  Packages `cmd/controller`, which today only runs the leader-election loop
-  (`DATABASE_URL` → connect → `leader.Run`) — nothing else is wired into
-  `main.go` yet.
+  `gcr.io/distroless/static-debian12:nonroot`), non-root. Packages
+  `cmd/controller`, which by this point in the log runs the full wired
+  controller (config/RBAC/notify hot-reload, leader-gated reconcile loop,
+  the dashboard-read + manual-sync + bulk-sync API, the optional
+  image-updater/image-events add-ons) — not just the leader-election loop
+  it shipped with when this Dockerfile entry was first written.
   - Test: `docker build -t runcd-controller:test .` then
     `docker run --rm -e DATABASE_URL=... runcd-controller:test`
 
-- [x] **CI** (`.github/workflows/ci.yml`) — 7 parallel jobs: `fmt` (gofmt),
-  `vet`, `lint` (golangci-lint v2.12.2 via `golangci-lint-action@v9`, config
-  in `.golangci.yml`), `vulncheck` (`govulncheck`), `nilaway`, `test`
-  (`go test -race -shuffle=on`, runs the real-Postgres suite —
-  GitHub-hosted runners have Docker preinstalled), `terraform`
-  (fmt/init/validate), `docker` (build-only, no push).
+- [x] **CI** (`.github/workflows/ci.yml`) — 9 parallel jobs: `fmt` (gofmt),
+  `vet`, `lint` (golangci-lint via `golangci-lint-action@v9`, `version:
+  latest` — not pinned, config in `.golangci.yml`), `vulncheck`
+  (`govulncheck`), `nilaway`, `test` (`go test -race -shuffle=on`, runs the
+  real-Postgres suite — GitHub-hosted runners have Docker preinstalled),
+  `terraform` (fmt/init/validate against both `controller-sa/` and
+  `image-events/` examples), `docker` (build-only, no push), `web`
+  (`npm ci && npm run lint && npm test && npm run build` in `web/`).
 
 - [x] **`.golangci.yml`** — defaults (errcheck, govet, ineffassign,
   staticcheck, unused) plus bodyclose/sqlclosecheck/rowserrcheck (this repo
@@ -2090,7 +2146,7 @@ Dashboard, same pass:
 ## `GetJob` tracks the spec template again, not the latest execution
 
 - [x] **A real fleet stuck permanently `OutOfSync`, found live against
-  `a-heavier-project`**: once `DeployJob` stopped triggering an execution (see
+  a job-backed app**: once `DeployJob` stopped triggering an execution (see
   above), `GetJob`'s digest — read from `LatestCreatedExecution`'s own
   container, per the template/execution-conflation fix earlier in this
   log — only ever advanced when the job's *external* trigger (Cloud

@@ -537,9 +537,9 @@ environments:
 defaults:
   region: us-central1
 apps:
-  - name: a-real-etl-job
+  - name: widget-service
     env: prd
-    source: { repo: git@github.com:org/deployment.git, path: services/a-real-etl-job/service.yaml }
+    source: { repo: git@github.com:org/deployment.git, path: services/widget-service/service.yaml }
     overrides:
       proj-b:
         version: "0.310"
@@ -562,9 +562,9 @@ environments:
 defaults:
   region: us-central1
 apps:
-  - name: a-real-etl-job
+  - name: widget-service
     env: prd
-    source: { repo: git@github.com:org/deployment.git, path: services/a-real-etl-job/service.yaml }
+    source: { repo: git@github.com:org/deployment.git, path: services/widget-service/service.yaml }
     overrides:
       proj-a:
         track: stable

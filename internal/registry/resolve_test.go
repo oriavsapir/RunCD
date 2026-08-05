@@ -85,9 +85,9 @@ func TestResolve_PrefersPerServiceTagWhenConfirmedCurrent(t *testing.T) {
 	// image's current build, not just a higher-looking version number.
 	tags := []Tag{
 		{Name: "v0.333.0", Digest: "sha256:current"},
-		{Name: "a-real-etl-job-v0.323.1", Digest: "sha256:current"},
+		{Name: "widget-service-v0.323.1", Digest: "sha256:current"},
 	}
-	got, err := Resolve(tags, "", "0", "a-real-etl-job")
+	got, err := Resolve(tags, "", "0", "widget-service")
 	if err != nil {
 		t.Fatalf("resolve: %v", err)
 	}
@@ -108,10 +108,10 @@ func TestResolve_PrefersPerServiceTagWhenConfirmedCurrent(t *testing.T) {
 // changed — is the one signal here that's actually still current.
 func TestResolve_FallsBackToBareTagWhenPrefixedTagIsStale(t *testing.T) {
 	tags := []Tag{
-		{Name: "v0.333.0", Digest: "sha256:current"},              // re-tagged onto :latest every merge
-		{Name: "a-real-etl-job-v0.1.0", Digest: "sha256:stale"}, // last real per-service bump, since superseded
+		{Name: "v0.333.0", Digest: "sha256:current"},            // re-tagged onto :latest every merge
+		{Name: "widget-service-v0.1.0", Digest: "sha256:stale"}, // last real per-service bump, since superseded
 	}
-	got, err := Resolve(tags, "", "0", "a-real-etl-job")
+	got, err := Resolve(tags, "", "0", "widget-service")
 	if err != nil {
 		t.Fatalf("resolve: %v", err)
 	}
@@ -122,11 +122,11 @@ func TestResolve_FallsBackToBareTagWhenPrefixedTagIsStale(t *testing.T) {
 
 func TestResolve_PerServiceTagPicksHighest(t *testing.T) {
 	tags := []Tag{
-		{Name: "a-real-etl-job-v0.323.1", Digest: "sha256:old"},
-		{Name: "a-real-etl-job-v0.324.0", Digest: "sha256:new"},
+		{Name: "widget-service-v0.323.1", Digest: "sha256:old"},
+		{Name: "widget-service-v0.324.0", Digest: "sha256:new"},
 		{Name: "silver-gold-to-shared-v9.9.9", Digest: "sha256:other"}, // different service, must not match
 	}
-	got, err := Resolve(tags, "", "0", "a-real-etl-job")
+	got, err := Resolve(tags, "", "0", "widget-service")
 	if err != nil {
 		t.Fatalf("resolve: %v", err)
 	}

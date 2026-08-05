@@ -2026,7 +2026,7 @@ func (f *fakeTagResolver) ListTags(_ context.Context, repository string) ([]regi
 	return f.tags[repository], nil
 }
 
-const overrideRepo = "us-central1-docker.pkg.dev/proj/repo/a-real-etl-job"
+const overrideRepo = "us-central1-docker.pkg.dev/proj/repo/widget-service"
 
 func manifestWithRepo() []byte {
 	return []byte(fmt.Sprintf("image:\n  digest: %s\n  repository: %s\n", validDigest, overrideRepo))
@@ -2043,12 +2043,12 @@ func TestRunOnce_TrackVersionOverrideResolvesLiveDigest(t *testing.T) {
 	r := &Reconciler{
 		DB:            db,
 		ManagedFields: []string{"image"},
-		Manifests:     &fakeManifests{byApp: map[string][]byte{"a-real-etl-job": manifestWithRepo()}},
+		Manifests:     &fakeManifests{byApp: map[string][]byte{"widget-service": manifestWithRepo()}},
 		TagResolver: &fakeTagResolver{tags: map[string][]registry.Tag{
 			overrideRepo: {{Name: "0.310.0", Digest: overrideDigest}},
 		}},
 		CloudRun: &fakeCloudRun{services: map[string]*cloudrun.LiveService{
-			"proj-b/a-real-etl-job": {
+			"proj-b/widget-service": {
 				ServiceState:                cloudrun.ServiceState{ImageDigest: overrideDigest},
 				HasRevisionForDesiredDigest: true,
 				LatestRevisionReady:         true,
@@ -2057,7 +2057,7 @@ func TestRunOnce_TrackVersionOverrideResolvesLiveDigest(t *testing.T) {
 		Preconditions: &fakePreconditions{},
 	}
 
-	units := []expander.SyncUnit{{App: "a-real-etl-job", Project: "proj-b", Region: "us-central1", Version: "0.310"}}
+	units := []expander.SyncUnit{{App: "widget-service", Project: "proj-b", Region: "us-central1", Version: "0.310"}}
 	results, err := r.RunOnce(context.Background(), units)
 	if err != nil {
 		t.Fatalf("RunOnce: %v", err)
@@ -2093,13 +2093,13 @@ func TestRunOnce_TrackVersionOverrideWithoutTagResolverIsInvalid(t *testing.T) {
 	r := &Reconciler{
 		DB:            db,
 		ManagedFields: []string{"image"},
-		Manifests:     &fakeManifests{byApp: map[string][]byte{"a-real-etl-job": manifestWithRepo()}},
+		Manifests:     &fakeManifests{byApp: map[string][]byte{"widget-service": manifestWithRepo()}},
 		// TagResolver deliberately nil
 		CloudRun:      &fakeCloudRun{},
 		Preconditions: &fakePreconditions{},
 	}
 
-	units := []expander.SyncUnit{{App: "a-real-etl-job", Project: "proj-b", Region: "us-central1", Version: "0.310"}}
+	units := []expander.SyncUnit{{App: "widget-service", Project: "proj-b", Region: "us-central1", Version: "0.310"}}
 	results, err := r.RunOnce(context.Background(), units)
 	if err != nil {
 		t.Fatalf("RunOnce: %v", err)
@@ -2114,13 +2114,13 @@ func TestRunOnce_TrackVersionOverrideNoMatchingTagIsInvalid(t *testing.T) {
 	r := &Reconciler{
 		DB:            db,
 		ManagedFields: []string{"image"},
-		Manifests:     &fakeManifests{byApp: map[string][]byte{"a-real-etl-job": manifestWithRepo()}},
+		Manifests:     &fakeManifests{byApp: map[string][]byte{"widget-service": manifestWithRepo()}},
 		TagResolver:   &fakeTagResolver{tags: map[string][]registry.Tag{}}, // no tags at all satisfy "9.9"
 		CloudRun:      &fakeCloudRun{},
 		Preconditions: &fakePreconditions{},
 	}
 
-	units := []expander.SyncUnit{{App: "a-real-etl-job", Project: "proj-b", Region: "us-central1", Version: "9.9"}}
+	units := []expander.SyncUnit{{App: "widget-service", Project: "proj-b", Region: "us-central1", Version: "9.9"}}
 	results, err := r.RunOnce(context.Background(), units)
 	if err != nil {
 		t.Fatalf("RunOnce: %v", err)

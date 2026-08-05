@@ -26,7 +26,7 @@ gap:
   for a human, depending on policy.
 - **Gated** — Pub/Sub topic/subscription preconditions can block a deploy
   until its dependencies exist; RBAC controls who can trigger a manual sync,
-  scoped per environment, project, or app.
+  scoped per environment, project, app, or GCP folder.
 - **Auditable** — every sync attempt (auto or manual) is a durable
   `sync_events` row: who, when, what image, what happened.
 - **Observable** — a Next.js dashboard shows every unit's sync/health
@@ -96,6 +96,15 @@ export GITHUB_APP_PEM="$(cat your-github-app-private-key.pem)"
 go run ./cmd/controller
 ```
 
+`DATABASE_URL` can be swapped for `CLOUDSQL_INSTANCE_CONNECTION_NAME` +
+`CLOUDSQL_IAM_DB_USER` + `CLOUDSQL_DB_NAME` to connect via the Cloud SQL Go
+Connector with IAM database auth instead of a password. Other env vars,
+all optional: `RBAC_PATH` (default `rbac.yaml`), `HTTP_ADDR` (default
+`:8080`), `RECONCILE_INTERVAL` (default `30s`), `DB_MAX_OPEN_CONNS`
+(default `25`), and `RUNCD_IMAGE_EVENTS_AUDIENCE` +
+`RUNCD_IMAGE_EVENTS_SERVICE_ACCOUNT` (both required together to enable the
+Eventarc image-events add-on — see [`terraform/image-events`](terraform/image-events)).
+
 Schema migrations apply automatically on boot (idempotent — safe on every
 restart, including a fresh database). See [`internal/config`](internal/config)
 for the full `runcd.yaml` shape and [`examples/rbac.yaml`](examples/rbac.yaml)
@@ -146,8 +155,9 @@ for the full command list.
   Postgres.
 - **Dashboard:** Next.js (App Router), TypeScript, Tailwind CSS v4,
   [shadcn/ui](https://ui.shadcn.com) + [lucide-react](https://lucide.dev).
-- **Infra:** Terraform module for the shared controller service account
-  (`terraform/controller-sa`), Docker (distroless, non-root), GitHub
+- **Infra:** Terraform modules for the shared controller service account
+  (`terraform/controller-sa`) and the optional image-events Eventarc add-on
+  (`terraform/image-events`), Docker (distroless, non-root), GitHub
   Actions CI.
 
 ## Project layout
@@ -159,10 +169,13 @@ internal/
   config/           runcd.yaml parsing
   manifest/         per-app manifest format, digest-pin validation
   expander/         config -> sync units
+  folders/          GCP folder -> child project resolution (config + RBAC)
   store/            Postgres schema (embedded migrations) + boot-time apply
   leader/           Postgres-backed leader election
-  githubapp/        GitHub App auth + Contents API fetches
+  githubapp/        GitHub App auth + Contents API fetches/writes
   gitsource/        manifest source on top of githubapp, cached/coalesced
+  imageupdater/     optional add-on: resolves+commits digests back to Git
+  registry/         Artifact Registry tag listing/resolution, cached
   cloudrun/         Cloud Run Admin API v2 client
   precondition/     Pub/Sub-backed precondition checks
   diff/             desired vs. live -> Synced/OutOfSync
@@ -173,7 +186,7 @@ internal/
   notify/           Slack notifications, debounced
   api/              HTTP handlers (dashboard reads + gated sync)
 web/                Next.js dashboard
-terraform/          controller service-account module
+terraform/          controller service-account + image-events modules
 examples/           reference rbac.yaml
 ```
 
