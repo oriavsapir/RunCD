@@ -20,12 +20,11 @@ type RetryPolicy struct {
 	BackoffSeconds int `yaml:"backoffSeconds"`
 }
 
-// SyncPolicy is deliberately mergeable field-by-field: Auto/Interval are set
-// per environment, Retry/SelfHeal are inherited from defaults unless
-// overridden (§5.1).
+// SyncPolicy is deliberately mergeable field-by-field: Auto is set per
+// environment, Retry/SelfHeal are inherited from defaults unless overridden
+// (§5.1).
 type SyncPolicy struct {
 	Auto        *bool        `yaml:"auto,omitempty"`
-	Interval    *int         `yaml:"interval,omitempty"`
 	Retry       *RetryPolicy `yaml:"retry,omitempty"`
 	SelfHeal    *bool        `yaml:"selfHeal,omitempty"`
 	SyncWindows []SyncWindow `yaml:"syncWindows,omitempty"`
@@ -48,9 +47,6 @@ func (base SyncPolicy) Merge(override SyncPolicy) SyncPolicy {
 	merged := base
 	if override.Auto != nil {
 		merged.Auto = override.Auto
-	}
-	if override.Interval != nil {
-		merged.Interval = override.Interval
 	}
 	if override.Retry != nil {
 		merged.Retry = override.Retry
@@ -166,9 +162,20 @@ type Override struct {
 	Version string `yaml:"version,omitempty"`
 }
 
+// Source identifies one app's manifest: which repo, which file, and
+// (optionally) which revision — ArgoCD's spec.source.targetRevision
+// equivalent. Branch is passed straight through as a git ref to
+// githubapp.GetFile/GetFileWithSHA/PutFile, so despite the name it accepts
+// anything the GitHub Contents API's "ref" parameter does (a branch, a tag,
+// or a commit SHA) — "branch" just names the common case. Empty means the
+// repo's default branch, matching those functions' own existing convention;
+// this was previously accepted here and silently dropped (never reaching a
+// struct field, since Source had no place for it), so every prior config
+// setting it had no effect regardless of value.
 type Source struct {
-	Repo string `yaml:"repo"`
-	Path string `yaml:"path"`
+	Repo   string `yaml:"repo"`
+	Path   string `yaml:"path"`
+	Branch string `yaml:"branch,omitempty"`
 }
 
 type App struct {

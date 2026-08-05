@@ -31,6 +31,14 @@ import {
   TableRow,
 } from "@/components/ui/table";
 import { Skeleton } from "@/components/ui/skeleton";
+import {
+  Table,
+  TableBody,
+  TableCell,
+  TableHead,
+  TableHeader,
+  TableRow,
+} from "@/components/ui/table";
 import { ThemeToggle } from "@/components/theme-toggle";
 import { getRuntimeConfig, listRbac, listUnits } from "@/lib/api";
 import type { RbacRule, RuntimeConfig, Unit } from "@/lib/types";
@@ -293,6 +301,59 @@ export default function SettingsPage() {
                     </>
                   )}
                 </dd>
+
+                {config.notifyByEnv &&
+                  Object.keys(config.notifyByEnv).length > 0 && (
+                    <>
+                      <dt className="text-muted-foreground self-start">
+                        Rules by environment
+                      </dt>
+                      <dd>
+                        <Table>
+                          <TableHeader>
+                            <TableRow>
+                              <TableHead>Environment</TableHead>
+                              <TableHead>Sink</TableHead>
+                              <TableHead>Rules</TableHead>
+                            </TableRow>
+                          </TableHeader>
+                          <TableBody>
+                            {Object.entries(config.notifyByEnv).map(
+                              ([env, n]) => (
+                                <TableRow key={env}>
+                                  <TableCell className="font-mono text-xs">
+                                    {env}
+                                  </TableCell>
+                                  <TableCell className="font-mono text-xs">
+                                    {n.sink}
+                                  </TableCell>
+                                  <TableCell>
+                                    {n.rules.length === 0 ? (
+                                      <span className="text-muted-foreground italic">
+                                        none
+                                      </span>
+                                    ) : (
+                                      <div className="flex flex-wrap gap-1">
+                                        {n.rules.map((r) => (
+                                          <Badge
+                                            key={r}
+                                            variant="secondary"
+                                            className="font-mono text-xs font-normal"
+                                          >
+                                            {r}
+                                          </Badge>
+                                        ))}
+                                      </div>
+                                    )}
+                                  </TableCell>
+                                </TableRow>
+                              ),
+                            )}
+                          </TableBody>
+                        </Table>
+                      </dd>
+                    </>
+                  )}
               </dl>
             )
           )}

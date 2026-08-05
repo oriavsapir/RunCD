@@ -81,6 +81,24 @@ type orphan struct {
 	App     string `json:"app"`
 }
 
+// envNotify mirrors internal/api/config.go's envNotifyView JSON shape.
+type envNotify struct {
+	Sink  string   `json:"sink"`
+	Rules []string `json:"rules"`
+}
+
+// runtimeConfig mirrors internal/api/config.go's configView JSON shape.
+type runtimeConfig struct {
+	ConfigRepo               string               `json:"configRepo"`
+	ConfigBranch             string               `json:"configBranch"`
+	ConfigPath               string               `json:"configPath"`
+	RBACPath                 string               `json:"rbacPath"`
+	ReconcileIntervalSeconds int                  `json:"reconcileIntervalSeconds"`
+	ManagedFields            []string             `json:"managedFields"`
+	NotificationsEnabled     bool                 `json:"notificationsEnabled"`
+	NotifyByEnv              map[string]envNotify `json:"notifyByEnv,omitempty"`
+}
+
 // apiError carries the HTTP status alongside the response body, so a
 // caller can distinguish e.g. 409 (sync already in progress) from a
 // genuine failure without string-matching the message.
@@ -199,6 +217,12 @@ func (c *client) listOrphans(ctx context.Context) ([]orphan, error) {
 	var orphans []orphan
 	err := c.do(ctx, http.MethodGet, "/api/orphans", &orphans)
 	return orphans, err
+}
+
+func (c *client) getConfig(ctx context.Context) (runtimeConfig, error) {
+	var cfg runtimeConfig
+	err := c.do(ctx, http.MethodGet, "/api/config", &cfg)
+	return cfg, err
 }
 
 // identityTokenTimeout bounds the gcloud subprocess: a hung or interactive

@@ -652,7 +652,7 @@ func (d *dynamicUnits) List() []expander.SyncUnit {
 func runImageUpdater(ctx context.Context, gh *githubapp.Client, resolver imageupdater.Resolver, units []expander.SyncUnit) {
 	seen := make(map[imageupdater.Manifest]bool)
 	for _, u := range units {
-		m := imageupdater.Manifest{Repo: u.SourceRepo, Path: u.SourcePath}
+		m := imageupdater.Manifest{Repo: u.SourceRepo, Path: u.SourcePath, Branch: u.SourceBranch}
 		if seen[m] {
 			continue
 		}

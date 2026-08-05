@@ -20,9 +20,15 @@ import (
 // client-side still left the deploy running server-side, so a low timeout
 // here just trades a clear in-progress wait for a confusing client error
 // and a subsequent 409 on retry.
+// validateTimeout covers validate's optional --check-gcp/--check-slack live
+// calls: several GetProject/ProjectsInFolder RPCs plus a webhook POST per
+// configured Slack sink, run sequentially, one process invocation — far
+// more generous than readTimeout, but bounded so a hung credential prompt or
+// dead webhook host doesn't hang the command forever.
 const (
-	readTimeout = 30 * time.Second
-	syncTimeout = 10 * time.Minute
+	readTimeout     = 30 * time.Second
+	syncTimeout     = 10 * time.Minute
+	validateTimeout = 2 * time.Minute
 )
 
 func main() {
@@ -42,6 +48,10 @@ Usage:
   runcd sync <project> <app> --dry-run preview a sync without deploying anything
   runcd rbac                           list configured RBAC roles
   runcd orphans                        list live Cloud Run services absent from config
+  runcd config                         show controller config: source, reconcile interval, managed fields, notify rules by environment
+  runcd validate [dir]                 parse+expand runcd.yaml/rbac.yaml and validate every reachable manifest locally, no API/network calls by default (default dir: ".")
+  runcd validate [dir] --check-gcp     also confirm every referenced project/folder exists and is reachable (a live Cloud Resource Manager call, needs Application Default Credentials)
+  runcd validate [dir] --check-slack   also send a real test message through every configured notify.slack webhook
 
 Configuration (env vars):
   RUNCD_API_URL      required — base URL to call. If the dashboard is
@@ -77,6 +87,25 @@ func run(args []string, stdout, stderr io.Writer) error {
 	// error before the switch below even looks at cmd.
 	if cmd == "-h" || cmd == "--help" || cmd == "help" {
 		_, _ = fmt.Fprint(stdout, usage)
+		return nil
+	}
+
+	// validate is local-only (config.Parse/expander.Expand/rbac.Parse/
+	// manifest.Parse are all pure functions over files on disk) — it needs
+	// neither RUNCD_API_URL nor a running controller, so it's handled
+	// before that requirement below.
+	if cmd == "validate" {
+		rest, checkGCP := extractFlag(rest, "--check-gcp")
+		rest, checkSlack := extractFlag(rest, "--check-slack")
+		dir := "."
+		if len(rest) > 0 {
+			dir = rest[0]
+		}
+		ctx, cancel := context.WithTimeout(context.Background(), validateTimeout)
+		defer cancel()
+		if !validateRepo(ctx, dir, checkGCP, checkSlack, stdout) {
+			return errors.New("validation failed")
+		}
 		return nil
 	}
 
@@ -166,6 +195,16 @@ func run(args []string, stdout, stderr io.Writer) error {
 			return err
 		}
 		renderRBAC(stdout, rules)
+		return nil
+
+	case "config":
+		ctx, cancel := context.WithTimeout(background, readTimeout)
+		defer cancel()
+		cfg, err := c.getConfig(ctx)
+		if err != nil {
+			return err
+		}
+		renderConfig(stdout, cfg)
 		return nil
 
 	case "orphans":

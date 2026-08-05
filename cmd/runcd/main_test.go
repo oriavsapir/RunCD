@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"strings"
 	"testing"
 )
@@ -46,6 +47,10 @@ func fakeAPI(t *testing.T) *httptest.Server {
 	mux.HandleFunc("GET /api/orphans", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		_, _ = fmt.Fprint(w, `[{"project":"example-prod-eu","region":"us-central1","app":"leftover-app"}]`)
+	})
+	mux.HandleFunc("GET /api/config", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = fmt.Fprint(w, `{"configRepo":"acme/deployment","configBranch":"main","configPath":"runcd.yaml","rbacPath":"rbac.yaml","reconcileIntervalSeconds":30,"managedFields":["image","traffic"],"notificationsEnabled":true,"notifyByEnv":{"prod":{"sink":"prod-incidents","rules":["syncFailed","healthDegraded"]},"dev":{"sink":"default","rules":["syncFailed"]}}}`)
 	})
 	srv := httptest.NewServer(mux)
 	t.Cleanup(srv.Close)
@@ -153,6 +158,25 @@ func TestRun_Orphans(t *testing.T) {
 	}
 }
 
+func TestRun_Config(t *testing.T) {
+	srv := fakeAPI(t)
+	t.Setenv("RUNCD_API_URL", srv.URL)
+	t.Setenv("RUNCD_IAP_AUDIENCE", "")
+
+	var stdout, stderr bytes.Buffer
+	if err := run([]string{"config"}, &stdout, &stderr); err != nil {
+		t.Fatalf("run: %v", err)
+	}
+	out := stdout.String()
+	if !strings.Contains(out, "Slack notifications: enabled") {
+		t.Fatalf("expected notifications enabled, got: %s", out)
+	}
+	if !strings.Contains(out, "prod") || !strings.Contains(out, "prod-incidents") ||
+		!strings.Contains(out, "dev") || !strings.Contains(out, "default") {
+		t.Fatalf("expected per-environment notify table, got: %s", out)
+	}
+}
+
 // TestRun_SyncConflictSurfacesAPIError checks that a 409 from the API
 // (another attempt already in flight — see reconcile.ErrSyncInProgress)
 // comes back as a distinguishable error, not a silently-swallowed failure.
@@ -193,6 +217,108 @@ func TestRun_WrongArgCount(t *testing.T) {
 	var stdout, stderr bytes.Buffer
 	if err := run([]string{"get", "only-one-arg"}, &stdout, &stderr); err == nil {
 		t.Fatal("expected an error for wrong argument count")
+	}
+}
+
+// TestRun_ValidateNeedsNoAPIURL checks that validate runs without
+// RUNCD_API_URL set at all — it's local-only, unlike every other command.
+func TestRun_ValidateNeedsNoAPIURL(t *testing.T) {
+	t.Setenv("RUNCD_API_URL", "")
+
+	var stdout, stderr bytes.Buffer
+	if err := run([]string{"validate", "../../examples/full"}, &stdout, &stderr); err != nil {
+		t.Fatalf("run: %v, stdout=%s", err, stdout.String())
+	}
+	out := stdout.String()
+	if !strings.Contains(out, "expands to 6 sync unit(s)") {
+		t.Fatalf("expected expand summary, got: %s", out)
+	}
+	if strings.Contains(out, "FAIL") {
+		t.Fatalf("expected no failures, got: %s", out)
+	}
+}
+
+func TestRun_ValidateFailsOnBadExclude(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(dir+"/runcd.yaml", []byte(`
+environments:
+  dev:
+    projects: [acme-dev-01]
+defaults:
+  region: us-central1
+  managedFields: [image, traffic, env]
+apps:
+  - name: checkout-service
+    env: dev
+    exclude: [does-not-exist-project]
+    source: { repo: "git@github.com:acme/deployment.git", branch: main, path: "service.yaml" }
+`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	var stdout, stderr bytes.Buffer
+	if err := run([]string{"validate", dir}, &stdout, &stderr); err == nil {
+		t.Fatalf("expected validation failure, got none; stdout=%s", stdout.String())
+	}
+	if !strings.Contains(stdout.String(), "FAIL") {
+		t.Fatalf("expected a FAIL line, got: %s", stdout.String())
+	}
+}
+
+func TestRun_ValidateCatchesUnrecognizedField(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(dir+"/runcd.yaml", []byte(`
+environments:
+  dev:
+    projects: [acme-dev-01]
+defaults:
+  region: us-central1
+  managedFields: [image, traffic, env]
+  sync: { auto: false, blabla: 300 }
+apps:
+  - name: checkout-service
+    env: dev
+    source: { repo: "git@github.com:acme/deployment.git", path: "service.yaml" }
+`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	var stdout, stderr bytes.Buffer
+	if err := run([]string{"validate", dir}, &stdout, &stderr); err == nil {
+		t.Fatalf("expected validation failure, got none; stdout=%s", stdout.String())
+	}
+	if !strings.Contains(stdout.String(), `field blabla not found`) {
+		t.Fatalf("expected the unrecognized field to be named, got: %s", stdout.String())
+	}
+}
+
+// TestRun_ValidateSkipsLiveChecksByDefault confirms --check-gcp/--check-slack
+// are opt-in — without them, validate must never attempt a network call
+// (there's no ADC/webhook configured in this test environment, so it would
+// fail loudly if it tried).
+func TestRun_ValidateSkipsLiveChecksByDefault(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(dir+"/runcd.yaml", []byte(`
+environments:
+  dev:
+    projects: [acme-dev-01]
+defaults:
+  region: us-central1
+  managedFields: [image, traffic, env]
+apps:
+  - name: checkout-service
+    env: dev
+    source: { repo: "git@github.com:acme/deployment.git", path: "service.yaml" }
+`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	var stdout, stderr bytes.Buffer
+	if err := run([]string{"validate", dir}, &stdout, &stderr); err != nil {
+		t.Fatalf("run: %v, stdout=%s", err, stdout.String())
+	}
+	if strings.Contains(stdout.String(), "project") || strings.Contains(stdout.String(), "slack sink") {
+		t.Fatalf("expected no live-check output without the flags, got: %s", stdout.String())
 	}
 }
 

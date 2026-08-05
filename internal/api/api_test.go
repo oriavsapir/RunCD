@@ -16,6 +16,7 @@ import (
 	"github.com/runcd/runcd/internal/cloudrun"
 	"github.com/runcd/runcd/internal/config"
 	"github.com/runcd/runcd/internal/expander"
+	"github.com/runcd/runcd/internal/notify"
 	"github.com/runcd/runcd/internal/rbac"
 	"github.com/runcd/runcd/internal/reconcile"
 	"github.com/runcd/runcd/internal/testutil"
@@ -556,6 +557,50 @@ func TestHandleConfig_ReturnsRuntimeInfo(t *testing.T) {
 		t.Fatalf("got %+v, want %+v", got, want)
 	}
 }
+
+// TestHandleConfig_NotifyByEnvResolvesPerEnvironmentOverride checks that the
+// per-environment sink/rule resolution mirrors notify.Evaluator's own
+// Evaluate logic (an env with no override falls back to the default sink
+// and every rule; an env override narrows to its own sink/rule subset), and
+// that it's still never leaking a webhook URL.
+func TestHandleConfig_NotifyByEnvResolvesPerEnvironmentOverride(t *testing.T) {
+	h, _ := newTestHandler(t)
+	h.Reconciler.Load().Notifier = &notify.Evaluator{
+		Sink:  fakeSink{},
+		Sinks: map[string]notify.Sink{"prod-incidents": fakeSink{}},
+		Rules: []config.NotifyRule{{On: "syncFailed"}, {On: "healthDegraded", ForMinutes: intPtr(5)}},
+		Environments: map[string]config.Environment{
+			"dev":  {Notify: config.NotifyOverride{Rules: []string{"syncFailed"}}},
+			"prod": {Notify: config.NotifyOverride{Slack: "prod-incidents"}},
+		},
+	}
+
+	srv := httptest.NewServer(NewMux(h))
+	defer srv.Close()
+
+	resp := getWithBearer(t, srv.URL+"/api/config", "dev-only-token")
+	defer func() { _ = resp.Body.Close() }()
+
+	var got configView
+	if err := json.NewDecoder(resp.Body).Decode(&got); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+
+	dev := got.NotifyByEnv["dev"]
+	if dev.Sink != "default" || len(dev.Rules) != 1 || dev.Rules[0] != "syncFailed" {
+		t.Fatalf("dev: got %+v", dev)
+	}
+	prod := got.NotifyByEnv["prod"]
+	if prod.Sink != "prod-incidents" || len(prod.Rules) != 2 {
+		t.Fatalf("prod: got %+v", prod)
+	}
+}
+
+type fakeSink struct{}
+
+func (fakeSink) Send(context.Context, string) error { return nil }
+
+func intPtr(v int) *int { return &v }
 
 // TestHandleListUnits_PendingBeforeAnySync checks that a unit present in
 // config but never reconciled shows up as Pending, not absent — the

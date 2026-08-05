@@ -74,6 +74,40 @@ func containsStr(list []string, s string) bool {
 	return false
 }
 
+// EnvRules describes, for one environment, which sink Evaluate would pick
+// and which rule IDs actually apply — the same resolution Evaluate itself
+// does, exposed read-only for the dashboard so it never has to reimplement
+// the "nil override means every rule" / sink-fallback logic and risk it
+// drifting out of sync with what actually fires.
+type EnvRules struct {
+	Sink  string   // sink name in effect (never a webhook URL)
+	Rules []string // rule IDs that apply, in notify.rules order
+}
+
+// ResolvedRules returns the effective sink+rules per environment, given
+// e.Environments/e.Sinks/e.Rules and each environment's NotifyOverride.
+// defaultSinkName is the config key e.Sink was built from ("default" —
+// config.go requires it once any rule is set), used only for display since
+// Evaluator itself has no name for e.Sink.
+func (e *Evaluator) ResolvedRules(defaultSinkName string) map[string]EnvRules {
+	out := make(map[string]EnvRules, len(e.Environments))
+	for name, env := range e.Environments {
+		sinkName := defaultSinkName
+		if env.Notify.Slack != "" {
+			sinkName = env.Notify.Slack
+		}
+		var ids []string
+		for _, rule := range e.Rules {
+			if env.Notify.Rules != nil && !containsStr(env.Notify.Rules, ruleID(rule)) {
+				continue
+			}
+			ids = append(ids, ruleID(rule))
+		}
+		out[name] = EnvRules{Sink: sinkName, Rules: ids}
+	}
+	return out
+}
+
 // db is the subset of *sql.DB the evaluator needs — an interface so tests
 // can use a real Postgres without pulling in *sql.DB directly.
 type db interface {

@@ -3,6 +3,8 @@ package api
 import (
 	"encoding/json"
 	"net/http"
+
+	"github.com/runcd/runcd/internal/notify"
 )
 
 // RuntimeInfo is the operational configuration that never changes after
@@ -17,14 +19,20 @@ type RuntimeInfo struct {
 	ReconcileIntervalSeconds int
 }
 
+type envNotifyView struct {
+	Sink  string   `json:"sink"`
+	Rules []string `json:"rules"`
+}
+
 type configView struct {
-	ConfigRepo               string   `json:"configRepo"`
-	ConfigBranch             string   `json:"configBranch"`
-	ConfigPath               string   `json:"configPath"`
-	RBACPath                 string   `json:"rbacPath"`
-	ReconcileIntervalSeconds int      `json:"reconcileIntervalSeconds"`
-	ManagedFields            []string `json:"managedFields"`
-	NotificationsEnabled     bool     `json:"notificationsEnabled"`
+	ConfigRepo               string                   `json:"configRepo"`
+	ConfigBranch             string                   `json:"configBranch"`
+	ConfigPath               string                   `json:"configPath"`
+	RBACPath                 string                   `json:"rbacPath"`
+	ReconcileIntervalSeconds int                      `json:"reconcileIntervalSeconds"`
+	ManagedFields            []string                 `json:"managedFields"`
+	NotificationsEnabled     bool                     `json:"notificationsEnabled"`
+	NotifyByEnv              map[string]envNotifyView `json:"notifyByEnv,omitempty"`
 }
 
 // handleConfig serves operational configuration — where runcd.yaml/
@@ -46,6 +54,13 @@ func (h *Handler) handleConfig(w http.ResponseWriter, r *http.Request) {
 		ReconcileIntervalSeconds: h.RuntimeInfo.ReconcileIntervalSeconds,
 		ManagedFields:            reconciler.ManagedFields,
 		NotificationsEnabled:     reconciler.Notifier != nil,
+	}
+
+	if eval, ok := reconciler.Notifier.(*notify.Evaluator); ok {
+		view.NotifyByEnv = make(map[string]envNotifyView, len(eval.Environments))
+		for env, resolved := range eval.ResolvedRules("default") {
+			view.NotifyByEnv[env] = envNotifyView{Sink: resolved.Sink, Rules: resolved.Rules}
+		}
 	}
 
 	w.Header().Set("Content-Type", "application/json")

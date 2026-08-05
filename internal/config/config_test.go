@@ -196,20 +196,16 @@ notify:
 
 func TestSyncPolicy_Merge(t *testing.T) {
 	trueVal, falseVal := true, false
-	three00 := 300
 
 	defaults := SyncPolicy{
 		SelfHeal: &trueVal,
 		Retry:    &RetryPolicy{Limit: 5, BackoffSeconds: 5},
 	}
-	envOverride := SyncPolicy{Auto: &falseVal, Interval: &three00}
+	envOverride := SyncPolicy{Auto: &falseVal}
 
 	merged := defaults.Merge(envOverride)
 	if merged.Auto == nil || *merged.Auto != false {
 		t.Fatalf("expected env override auto=false, got %+v", merged.Auto)
-	}
-	if merged.Interval == nil || *merged.Interval != 300 {
-		t.Fatalf("expected env override interval=300, got %+v", merged.Interval)
 	}
 	if merged.SelfHeal == nil || *merged.SelfHeal != true {
 		t.Fatalf("expected inherited selfHeal=true, got %+v", merged.SelfHeal)

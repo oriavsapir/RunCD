@@ -22,9 +22,12 @@ type fakeGitHub struct {
 	putCalls   int
 	lastPut    []byte
 	lastPutSHA string
+	lastGetRef string
+	lastPutRef string
 }
 
 func (f *fakeGitHub) GetFileWithSHA(ctx context.Context, repo, ref, path string) ([]byte, string, error) {
+	f.lastGetRef = ref
 	return f.content, f.sha, f.getErr
 }
 
@@ -32,6 +35,7 @@ func (f *fakeGitHub) PutFile(ctx context.Context, repo, branch, path, message st
 	f.putCalls++
 	f.lastPut = content
 	f.lastPutSHA = sha
+	f.lastPutRef = branch
 	return f.putErr
 }
 
@@ -93,6 +97,25 @@ func TestUpdate_CommitsResolvedDigestChange(t *testing.T) {
 	}
 	if string(gh.lastPut) == string(manifestYAML()) {
 		t.Fatal("expected committed content to differ from the original")
+	}
+}
+
+// TestUpdate_UsesManifestBranchForBothReadAndWrite checks that a non-default
+// Manifest.Branch reaches both GetFileWithSHA's ref and PutFile's branch —
+// reading from one branch but committing to another would silently diverge
+// the two.
+func TestUpdate_UsesManifestBranchForBothReadAndWrite(t *testing.T) {
+	gh := &fakeGitHub{content: manifestYAML(), sha: "blobsha"}
+	resolver := fakeResolver{tags: []Tag{{Name: "stable", Digest: digestB}}}
+
+	if _, err := Update(context.Background(), gh, resolver, Manifest{Repo: "acme/deploy", Path: "app/service.yaml", Branch: "staging"}); err != nil {
+		t.Fatalf("Update: %v", err)
+	}
+	if gh.lastGetRef != "staging" {
+		t.Fatalf("expected GetFileWithSHA ref=staging, got %q", gh.lastGetRef)
+	}
+	if gh.lastPutRef != "staging" {
+		t.Fatalf("expected PutFile branch=staging, got %q", gh.lastPutRef)
 	}
 }
 

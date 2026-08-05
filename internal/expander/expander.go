@@ -15,11 +15,12 @@ type SyncUnit struct {
 	Project string
 	// Env is the environments[] key this unit was expanded from — used by
 	// RBAC scope matching ("env:prd", §5.9), not by the reconcile/diff path.
-	Env        string
-	Region     string
-	Sync       config.SyncPolicy
-	SourceRepo string
-	SourcePath string
+	Env          string
+	Region       string
+	Sync         config.SyncPolicy
+	SourceRepo   string
+	SourcePath   string
+	SourceBranch string
 	// IgnoreFields/IgnorePreconditions are copied verbatim from the app's
 	// config entry — see config.App's doc comments.
 	IgnoreFields        []string
@@ -123,6 +124,7 @@ func Expand(root *config.Root) ([]SyncUnit, error) {
 				Sync:                sync,
 				SourceRepo:          app.Source.Repo,
 				SourcePath:          app.Source.Path,
+				SourceBranch:        app.Source.Branch,
 				IgnoreFields:        app.IgnoreFields,
 				IgnorePreconditions: app.IgnorePreconditions,
 				Track:               track,

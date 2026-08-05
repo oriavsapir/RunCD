@@ -232,6 +232,33 @@ environments:
 	}
 }
 
+func TestExpand_SourceBranchPropagates(t *testing.T) {
+	root, err := config.Parse([]byte(`
+environments:
+  dev:
+    projects: [example-dev-01]
+
+defaults:
+  region: us-central1
+  managedFields: [image]
+
+apps:
+  - name: widget-api
+    env: dev
+    source: { repo: git@github.com:org/deployment.git, path: services/widget-api/app.yaml, branch: staging }
+`))
+	if err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+	units, err := Expand(root)
+	if err != nil {
+		t.Fatalf("Expand: %v", err)
+	}
+	if len(units) != 1 || units[0].SourceBranch != "staging" {
+		t.Fatalf("expected SourceBranch=staging, got %+v", units)
+	}
+}
+
 func TestExpand_NoResolvedRegionIsRejected(t *testing.T) {
 	root, err := config.Parse([]byte(`
 environments:

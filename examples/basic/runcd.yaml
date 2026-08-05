@@ -9,7 +9,7 @@ environments:
 defaults:
   region: us-central1
   managedFields: [image, traffic, env]
-  sync: { auto: false, interval: 300 }
+  sync: { auto: false }
 
 apps:
   - name: checkout-service

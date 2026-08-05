@@ -38,13 +38,17 @@ type GitHub interface {
 }
 
 // Manifest identifies one app's service definition to check — deliberately
-// just repo+path, not a full expander.SyncUnit: every environment an app
-// targets shares the same manifest file (§5.1), so callers should dedupe to
-// one Manifest per unique (Repo, Path) before calling Update, not once per
-// sync unit.
+// just repo+path+branch, not a full expander.SyncUnit: every environment an
+// app targets shares the same manifest file (§5.1), so callers should dedupe
+// to one Manifest per unique (Repo, Path, Branch) before calling Update, not
+// once per sync unit. Branch (empty means the repo's default branch) must
+// match whatever gitsource.Source fetches this same manifest at — reading
+// from one branch but committing to another (or to the wrong one) would
+// silently diverge the two.
 type Manifest struct {
-	Repo string
-	Path string
+	Repo   string
+	Path   string
+	Branch string
 }
 
 // Update fetches m's manifest, and if it declares image.track or
@@ -54,7 +58,7 @@ type Manifest struct {
 // manifest with neither track nor version set is a silent no-op, the same
 // "unconfigured means inert" shape every other add-on in this repo has.
 func Update(ctx context.Context, gh GitHub, resolver Resolver, m Manifest) (newDigest string, err error) {
-	data, sha, err := gh.GetFileWithSHA(ctx, m.Repo, "", m.Path)
+	data, sha, err := gh.GetFileWithSHA(ctx, m.Repo, m.Branch, m.Path)
 	if err != nil {
 		return "", fmt.Errorf("fetch %s:%s: %w", m.Repo, m.Path, err)
 	}
@@ -84,7 +88,7 @@ func Update(ctx context.Context, gh GitHub, resolver Resolver, m Manifest) (newD
 	}
 
 	msg := fmt.Sprintf("imageupdater: %s -> %s", m.Path, resolved)
-	if err := gh.PutFile(ctx, m.Repo, "", m.Path, msg, rewritten, sha); err != nil {
+	if err := gh.PutFile(ctx, m.Repo, m.Branch, m.Path, msg, rewritten, sha); err != nil {
 		return "", fmt.Errorf("commit %s:%s: %w", m.Repo, m.Path, err)
 	}
 	return resolved, nil

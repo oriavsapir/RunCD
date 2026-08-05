@@ -21,6 +21,62 @@ func (f *countingFetcher) GetFile(_ context.Context, _, _, _ string) ([]byte, er
 	return f.data, nil
 }
 
+type refCapturingFetcher struct {
+	mu   sync.Mutex
+	refs []string
+}
+
+func (f *refCapturingFetcher) GetFile(_ context.Context, _, ref, _ string) ([]byte, error) {
+	f.mu.Lock()
+	f.refs = append(f.refs, ref)
+	f.mu.Unlock()
+	return []byte(ref), nil
+}
+
+// TestGet_PassesUnitBranchAsRef checks that SourceBranch reaches
+// FileFetcher.GetFile's ref parameter — a manifest sourced from a
+// non-default branch must actually be fetched from it, not silently from
+// the repo's default branch.
+func TestGet_PassesUnitBranchAsRef(t *testing.T) {
+	fetcher := &refCapturingFetcher{}
+	src := &Source{Client: fetcher}
+
+	data, err := src.Get(context.Background(), expander.SyncUnit{
+		SourceRepo: "org/deployment", SourcePath: "app.yaml", SourceBranch: "staging",
+	})
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	if string(data) != "staging" {
+		t.Fatalf("expected GetFile called with ref=staging, got %q", data)
+	}
+}
+
+// TestGet_DifferentBranchesDontShareCache checks that two units on the same
+// repo+path but different branches don't collide in the cache — otherwise
+// the second app to fetch would silently receive the first app's branch's
+// content.
+func TestGet_DifferentBranchesDontShareCache(t *testing.T) {
+	fetcher := &refCapturingFetcher{}
+	src := &Source{Client: fetcher}
+	ctx := context.Background()
+
+	main, err := src.Get(ctx, expander.SyncUnit{SourceRepo: "org/deployment", SourcePath: "app.yaml", SourceBranch: ""})
+	if err != nil {
+		t.Fatalf("Get(default): %v", err)
+	}
+	staging, err := src.Get(ctx, expander.SyncUnit{SourceRepo: "org/deployment", SourcePath: "app.yaml", SourceBranch: "staging"})
+	if err != nil {
+		t.Fatalf("Get(staging): %v", err)
+	}
+	if string(main) == string(staging) {
+		t.Fatalf("expected distinct content per branch, got %q for both", main)
+	}
+	if string(main) != "" || string(staging) != "staging" {
+		t.Fatalf("got main=%q staging=%q", main, staging)
+	}
+}
+
 // TestGet_ConcurrentUnitsSharingAManifestCoalesce regression-tests an
 // avoidable-API-call bug: every sync unit fetched its manifest
 // independently, even when many units (one app fanning out across every

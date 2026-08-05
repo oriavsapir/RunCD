@@ -99,6 +99,11 @@ export interface RbacRule {
   scope: string[];
 }
 
+export interface EnvNotify {
+  sink: string;
+  rules: string[];
+}
+
 export interface RuntimeConfig {
   configRepo: string;
   configBranch: string;
@@ -107,4 +112,5 @@ export interface RuntimeConfig {
   reconcileIntervalSeconds: number;
   managedFields: string[];
   notificationsEnabled: boolean;
+  notifyByEnv?: Record<string, EnvNotify>;
 }

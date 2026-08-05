@@ -3,6 +3,7 @@ package main
 import (
 	"fmt"
 	"io"
+	"sort"
 	"strings"
 	"text/tabwriter"
 )
@@ -106,6 +107,35 @@ func renderOrphans(w io.Writer, orphans []orphan) {
 	_, _ = fmt.Fprintln(tw, "PROJECT\tREGION\tSERVICE")
 	for _, o := range orphans {
 		_, _ = fmt.Fprintf(tw, "%s\t%s\t%s\n", o.Project, o.Region, o.App)
+	}
+	_ = tw.Flush()
+}
+
+func renderConfig(w io.Writer, cfg runtimeConfig) {
+	_, _ = fmt.Fprintf(w, "Config source:     %s@%s:%s\n", cfg.ConfigRepo, cfg.ConfigBranch, cfg.ConfigPath)
+	_, _ = fmt.Fprintf(w, "RBAC source:       %s@%s:%s\n", cfg.ConfigRepo, cfg.ConfigBranch, cfg.RBACPath)
+	_, _ = fmt.Fprintf(w, "Reconcile interval: every %ds\n", cfg.ReconcileIntervalSeconds)
+	_, _ = fmt.Fprintf(w, "Managed fields:    %s\n", orDash(strings.Join(cfg.ManagedFields, ", ")))
+	if !cfg.NotificationsEnabled {
+		_, _ = fmt.Fprintln(w, "Slack notifications: not configured")
+		return
+	}
+	_, _ = fmt.Fprintln(w, "Slack notifications: enabled")
+	if len(cfg.NotifyByEnv) == 0 {
+		return
+	}
+	_, _ = fmt.Fprintln(w)
+	envs := make([]string, 0, len(cfg.NotifyByEnv))
+	for env := range cfg.NotifyByEnv {
+		envs = append(envs, env)
+	}
+	sort.Strings(envs)
+
+	tw := newTabwriter(w)
+	_, _ = fmt.Fprintln(tw, "ENVIRONMENT\tSINK\tRULES")
+	for _, env := range envs {
+		n := cfg.NotifyByEnv[env]
+		_, _ = fmt.Fprintf(tw, "%s\t%s\t%s\n", env, n.Sink, orDash(strings.Join(n.Rules, ", ")))
 	}
 	_ = tw.Flush()
 }
