@@ -1,0 +1,23 @@
+# environments[env].folders (§7): GCP folder IDs whose direct child
+# projects are resolved (a live Cloud Resource Manager call, via
+# internal/folders — config.Parse itself never does I/O) and merged into
+# Projects at load time, deduped. Only direct children — a folder's own
+# sub-folders are not recursed into.
+#
+# acme-dev-01 below is explicit; every other project under folder
+# "123456789012" is discovered at load/reconcile time without being listed
+# here by hand.
+
+environments:
+  dev:
+    projects: [acme-dev-01]
+    folders: ["123456789012"]
+
+defaults:
+  region: us-central1
+  managedFields: [image]
+
+apps:
+  - name: checkout-service
+    env: dev
+    source: { repo: "git@github.com:acme/deployment.git", branch: main, path: "services/checkout-service/service.yaml" }

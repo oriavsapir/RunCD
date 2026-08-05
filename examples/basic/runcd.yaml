@@ -1,0 +1,17 @@
+# Minimal runcd.yaml (§5.1): one app, one environment, no extras. See the
+# other folders under examples/ for individual features layered on top of
+# this shape, and internal/config for the full field list.
+
+environments:
+  dev:
+    projects: [acme-dev-01]
+
+defaults:
+  region: us-central1
+  managedFields: [image, traffic, env]
+  sync: { auto: false, interval: 300 }
+
+apps:
+  - name: checkout-service
+    env: dev
+    source: { repo: "git@github.com:acme/deployment.git", branch: main, path: "services/checkout-service/service.yaml" }

@@ -107,8 +107,12 @@ Eventarc image-events add-on — see [`terraform/image-events`](terraform/image-
 
 Schema migrations apply automatically on boot (idempotent — safe on every
 restart, including a fresh database). See [`internal/config`](internal/config)
-for the full `runcd.yaml` shape and [`examples/rbac.yaml`](examples/rbac.yaml)
-for the RBAC file format.
+for the full `runcd.yaml` shape and [`examples/`](examples/) for one folder
+per feature (folders, per-project overrides, sync windows, observe mode,
+notify, ...), each with its own README and a runnable example, plus
+[`examples/full/`](examples/full/) for a complete repo layout (`runcd.yaml`
++ [`rbac.yaml`](examples/rbac/) + service manifests) with everything
+composed together.
 
 ### Running the dashboard
 

@@ -384,3 +384,156 @@ func TestEvaluate_LiveClaimBlocksConcurrentAttempt(t *testing.T) {
 		t.Fatalf("expected no send while another attempt's claim is still live, got %v", sink.messages)
 	}
 }
+
+// TestEvaluate_HealthRecoveredFiresOnlyAfterANotifiedDegradation is the core
+// gap this rule closes: a unit that crossed the healthDegraded threshold
+// (and actually notified) gets a "recovered" message once Health leaves
+// Degraded.
+func TestEvaluate_HealthRecoveredFiresOnlyAfterANotifiedDegradation(t *testing.T) {
+	db := testutil.NewPostgres(t)
+	sink := &fakeSink{}
+	e := &Evaluator{DB: db, Sink: sink, Rules: []config.NotifyRule{
+		{On: "healthDegraded", ForMinutes: intPtr(10)},
+		{On: "healthRecovered"},
+	}}
+
+	degraded := reconcile.Result{
+		Unit:        expander.SyncUnit{App: "widget-api", Project: "example-prod-us"},
+		Health:      "Degraded",
+		HealthSince: time.Now().Add(-15 * time.Minute),
+	}
+	if err := e.Evaluate(context.Background(), degraded); err != nil {
+		t.Fatalf("Evaluate (degraded): %v", err)
+	}
+	if len(sink.messages) != 1 {
+		t.Fatalf("expected the healthDegraded notification, got %d: %v", len(sink.messages), sink.messages)
+	}
+
+	recovered := degraded
+	recovered.Health = "Healthy"
+	if err := e.Evaluate(context.Background(), recovered); err != nil {
+		t.Fatalf("Evaluate (recovered): %v", err)
+	}
+	if len(sink.messages) != 2 {
+		t.Fatalf("expected a recovered notification too, got %d: %v", len(sink.messages), sink.messages)
+	}
+}
+
+// TestEvaluate_HealthRecoveredNeverFiresWithoutAPriorNotification covers a
+// unit that was Degraded but never crossed the threshold (never actually
+// notified) — recovering from that must stay silent.
+func TestEvaluate_HealthRecoveredNeverFiresWithoutAPriorNotification(t *testing.T) {
+	db := testutil.NewPostgres(t)
+	sink := &fakeSink{}
+	e := &Evaluator{DB: db, Sink: sink, Rules: []config.NotifyRule{
+		{On: "healthDegraded", ForMinutes: intPtr(10)},
+		{On: "healthRecovered"},
+	}}
+
+	res := reconcile.Result{
+		Unit:   expander.SyncUnit{App: "widget-api", Project: "example-prod-us"},
+		Health: "Healthy",
+	}
+	if err := e.Evaluate(context.Background(), res); err != nil {
+		t.Fatalf("Evaluate: %v", err)
+	}
+	if len(sink.messages) != 0 {
+		t.Fatalf("expected no recovered message with no prior degraded notification, got %v", sink.messages)
+	}
+}
+
+// TestEvaluate_HealthRecoveredResetsDebounceForTheNextEpisode ensures a
+// second, later Degraded episode notifies again immediately once it
+// crosses the threshold, rather than waiting out the original debounce
+// window — recovery clears the sibling rule's marker.
+func TestEvaluate_HealthRecoveredResetsDebounceForTheNextEpisode(t *testing.T) {
+	db := testutil.NewPostgres(t)
+	sink := &fakeSink{}
+	e := &Evaluator{DB: db, Sink: sink, Rules: []config.NotifyRule{
+		{On: "healthDegraded", ForMinutes: intPtr(10)},
+		{On: "healthRecovered"},
+	}, DebounceInterval: time.Hour}
+
+	unit := expander.SyncUnit{App: "widget-api", Project: "example-prod-us"}
+	degraded := reconcile.Result{Unit: unit, Health: "Degraded", HealthSince: time.Now().Add(-15 * time.Minute)}
+	if err := e.Evaluate(context.Background(), degraded); err != nil {
+		t.Fatalf("Evaluate (degraded #1): %v", err)
+	}
+	recovered := reconcile.Result{Unit: unit, Health: "Healthy"}
+	if err := e.Evaluate(context.Background(), recovered); err != nil {
+		t.Fatalf("Evaluate (recovered): %v", err)
+	}
+	if len(sink.messages) != 2 {
+		t.Fatalf("expected degraded+recovered, got %d: %v", len(sink.messages), sink.messages)
+	}
+
+	// A second episode, well within the original hour-long debounce window.
+	if err := e.Evaluate(context.Background(), degraded); err != nil {
+		t.Fatalf("Evaluate (degraded #2): %v", err)
+	}
+	if len(sink.messages) != 3 {
+		t.Fatalf("expected the second degraded episode to notify despite being within the original debounce window, got %d: %v", len(sink.messages), sink.messages)
+	}
+}
+
+// TestEvaluate_EnvironmentOverrideNarrowsRules covers "prod gets every
+// event, dev only syncFailed" via config.NotifyOverride.Rules.
+func TestEvaluate_EnvironmentOverrideNarrowsRules(t *testing.T) {
+	db := testutil.NewPostgres(t)
+	sink := &fakeSink{}
+	e := &Evaluator{
+		DB:   db,
+		Sink: sink,
+		Rules: []config.NotifyRule{
+			{On: "syncFailed"},
+			{On: "healthDegraded", ForMinutes: intPtr(10)},
+		},
+		Environments: map[string]config.Environment{
+			"dev": {Notify: config.NotifyOverride{Rules: []string{"syncFailed"}}},
+		},
+	}
+
+	res := reconcile.Result{
+		Unit:        expander.SyncUnit{App: "widget-api", Project: "example-dev-01", Env: "dev"},
+		Health:      "Degraded",
+		HealthSince: time.Now().Add(-15 * time.Minute),
+	}
+	if err := e.Evaluate(context.Background(), res); err != nil {
+		t.Fatalf("Evaluate: %v", err)
+	}
+	if len(sink.messages) != 0 {
+		t.Fatalf("expected healthDegraded to be filtered out for dev, got %v", sink.messages)
+	}
+}
+
+// TestEvaluate_EnvironmentOverrideSelectsNamedSink covers routing to a
+// different Slack webhook per environment via config.NotifyOverride.Slack.
+func TestEvaluate_EnvironmentOverrideSelectsNamedSink(t *testing.T) {
+	db := testutil.NewPostgres(t)
+	defaultSink := &fakeSink{}
+	prodSink := &fakeSink{}
+	e := &Evaluator{
+		DB:    db,
+		Sink:  defaultSink,
+		Sinks: map[string]Sink{"default": defaultSink, "prod": prodSink},
+		Rules: []config.NotifyRule{{On: "syncFailed"}},
+		Environments: map[string]config.Environment{
+			"prod": {Notify: config.NotifyOverride{Slack: "prod"}},
+		},
+	}
+
+	res := reconcile.Result{
+		Unit:           expander.SyncUnit{App: "widget-api", Project: "example-prod-us", Env: "prod"},
+		DeployFailed:   true,
+		FailureMessage: "boom",
+	}
+	if err := e.Evaluate(context.Background(), res); err != nil {
+		t.Fatalf("Evaluate: %v", err)
+	}
+	if len(prodSink.messages) != 1 {
+		t.Fatalf("expected the prod-named sink to receive the message, got %d", len(prodSink.messages))
+	}
+	if len(defaultSink.messages) != 0 {
+		t.Fatalf("expected the default sink to receive nothing, got %d", len(defaultSink.messages))
+	}
+}

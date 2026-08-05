@@ -92,7 +92,8 @@ environments:
   dev:
     projects: [example-dev-01]
 notify:
-  slackWebhookUrl: https://hooks.slack.com/services/x
+  slack:
+    default: https://hooks.slack.com/services/x
   rules:
     - on: syncFailed
     - on: healthDegraded
@@ -351,7 +352,7 @@ notify:
     - on: syncFailed
 `)
 	if _, err := Parse(yaml); err == nil {
-		t.Fatal("expected error for notify.rules with no slackWebhookUrl")
+		t.Fatal("expected error for notify.rules with no notify.slack.default")
 	}
 }
 
@@ -363,12 +364,170 @@ environments:
 defaults:
   region: us-central1
 notify:
-  slackWebhookUrl: "not a url"
+  slack:
+    default: "not a url"
   rules:
     - on: syncFailed
 `)
 	if _, err := Parse(yaml); err == nil {
-		t.Fatal("expected error for a malformed slackWebhookUrl")
+		t.Fatal("expected error for a malformed notify.slack.default")
+	}
+}
+
+func TestParse_HealthRecoveredRuleAccepted(t *testing.T) {
+	yaml := []byte(`
+environments:
+  dev:
+    projects: [example-dev-01]
+notify:
+  slack:
+    default: https://hooks.slack.com/services/x
+  rules:
+    - on: healthDegraded
+      forMinutes: 10
+    - on: healthRecovered
+`)
+	root, err := Parse(yaml)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(root.Notify.Rules) != 2 {
+		t.Fatalf("expected 2 notify rules, got %d", len(root.Notify.Rules))
+	}
+}
+
+// TestParse_NamedSlackSinkSelectedPerEnvironment covers the ArgoCD-style
+// per-environment routing: an environment can pick a non-default named
+// slack sink, but only one that's actually declared in notify.slack.
+func TestParse_NamedSlackSinkSelectedPerEnvironment(t *testing.T) {
+	yaml := []byte(`
+environments:
+  prod:
+    projects: [example-prod-us]
+    notify: { slack: prod-channel }
+notify:
+  slack:
+    default: https://hooks.slack.com/services/a
+    prod-channel: https://hooks.slack.com/services/b
+  rules:
+    - on: syncFailed
+`)
+	root, err := Parse(yaml)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if root.Environments["prod"].Notify.Slack != "prod-channel" {
+		t.Fatalf("expected prod's notify.slack override to parse, got %+v", root.Environments["prod"].Notify)
+	}
+}
+
+func TestParse_UnknownNamedSlackSinkRejected(t *testing.T) {
+	yaml := []byte(`
+environments:
+  prod:
+    projects: [example-prod-us]
+    notify: { slack: does-not-exist }
+notify:
+  slack:
+    default: https://hooks.slack.com/services/a
+  rules:
+    - on: syncFailed
+`)
+	if _, err := Parse(yaml); err == nil {
+		t.Fatal("expected error for an environment's notify.slack naming an undeclared sink")
+	}
+}
+
+// TestParse_PerEnvironmentRuleSubset covers "prod gets every event, dev
+// only syncFailed" — an environment's notify.rules narrows which of
+// notify.rules actually applies there.
+func TestParse_PerEnvironmentRuleSubset(t *testing.T) {
+	yaml := []byte(`
+environments:
+  dev:
+    projects: [example-dev-01]
+    notify: { rules: [syncFailed] }
+notify:
+  slack:
+    default: https://hooks.slack.com/services/x
+  rules:
+    - on: syncFailed
+    - on: healthDegraded
+      forMinutes: 10
+`)
+	root, err := Parse(yaml)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(root.Environments["dev"].Notify.Rules) != 1 || root.Environments["dev"].Notify.Rules[0] != "syncFailed" {
+		t.Fatalf("expected dev's notify.rules to parse as [syncFailed], got %+v", root.Environments["dev"].Notify.Rules)
+	}
+}
+
+func TestParse_UnknownRuleIdentifierInEnvironmentRejected(t *testing.T) {
+	yaml := []byte(`
+environments:
+  dev:
+    projects: [example-dev-01]
+    notify: { rules: [notARealRule] }
+notify:
+  slack:
+    default: https://hooks.slack.com/services/x
+  rules:
+    - on: syncFailed
+`)
+	if _, err := Parse(yaml); err == nil {
+		t.Fatal("expected error for an environment's notify.rules referencing an unconfigured rule")
+	}
+}
+
+// TestParse_AmbiguousBareRuleReferenceRejected covers two unnamed
+// healthDegraded rules (a valid, already-supported config on its own) that
+// become ambiguous only once an environment tries to select between them
+// by the bare "on" — config.Parse must reject that reference, not silently
+// pick one.
+func TestParse_AmbiguousBareRuleReferenceRejected(t *testing.T) {
+	yaml := []byte(`
+environments:
+  dev:
+    projects: [example-dev-01]
+    notify: { rules: [healthDegraded] }
+notify:
+  slack:
+    default: https://hooks.slack.com/services/x
+  rules:
+    - on: healthDegraded
+      forMinutes: 5
+    - on: healthDegraded
+      forMinutes: 60
+`)
+	if _, err := Parse(yaml); err == nil {
+		t.Fatal("expected error for an ambiguous bare-'on' rule reference")
+	}
+}
+
+// TestParse_NamedRuleDisambiguatesReference is the same two-threshold setup
+// as above, but each rule has a distinct Name — an environment can then
+// reference one specifically.
+func TestParse_NamedRuleDisambiguatesReference(t *testing.T) {
+	yaml := []byte(`
+environments:
+  dev:
+    projects: [example-dev-01]
+    notify: { rules: [health-early] }
+notify:
+  slack:
+    default: https://hooks.slack.com/services/x
+  rules:
+    - name: health-early
+      on: healthDegraded
+      forMinutes: 5
+    - name: health-escalation
+      on: healthDegraded
+      forMinutes: 60
+`)
+	if _, err := Parse(yaml); err != nil {
+		t.Fatalf("unexpected error: %v", err)
 	}
 }
 

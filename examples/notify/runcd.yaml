@@ -1,0 +1,61 @@
+# notify (§5.8): Slack notifications, routed per environment. See the other
+# folders under examples/ for other individual features and internal/config
+# for the full field list.
+
+environments:
+  prod:
+    projects: [acme-prod-us, acme-prod-eu]
+    notify:
+      slack: prod-incidents
+      # No rules override — every rule configured under notify.rules
+      # below applies in prod.
+  dev:
+    projects: [acme-dev-01]
+    notify:
+      # dev uses the default sink and only wants to hear about outright
+      # failures — no degraded/escalation/recovered noise.
+      rules: [syncFailed]
+
+defaults:
+  region: us-central1
+  managedFields: [image, traffic, env]
+  sync: { auto: false, interval: 300 }
+
+apps:
+  - name: checkout-service
+    env: prod
+    source: { repo: "git@github.com:acme/deployment.git", branch: main, path: "services/checkout-service/service.yaml" }
+
+  - name: checkout-service
+    env: dev
+    source: { repo: "git@github.com:acme/deployment.git", branch: main, path: "services/checkout-service/service.yaml" }
+
+# notify (§5.8) — one rule engine, routed per environment above (ArgoCD's
+# named notification services + per-Application subscription, expressed as
+# static config since there's no CR here to annotate).
+notify:
+  # Named Slack webhook sinks. "default" is required once notify.rules is
+  # non-empty, and is what any environment with no notify.slack override
+  # uses.
+  slack:
+    default: "https://hooks.slack.com/services/T000/B000/aaaaaaaaaaaaaaaaaaaaaaaa"
+    prod-incidents: "https://hooks.slack.com/services/T000/B000/bbbbbbbbbbbbbbbbbbbbbbbb"
+
+  # Every rule configured here; environments[].notify.rules above narrows
+  # to a subset. A rule needs `name` only when it would otherwise be
+  # ambiguous to that kind of reference — two unnamed rules sharing an
+  # `on` still debounce independently either way.
+  rules:
+    - on: syncFailed
+    - name: health-early-warning
+      on: healthDegraded
+      forMinutes: 15
+    - name: health-escalation
+      on: healthDegraded
+      forMinutes: 60
+    - on: outOfSyncGated
+      forHours: 4
+    # Fires once Health leaves Degraded, but only for a healthDegraded rule
+    # that actually notified before — no "recovered" spam for a unit that
+    # never crossed a threshold in the first place.
+    - on: healthRecovered

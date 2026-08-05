@@ -1,0 +1,12 @@
+# resourceType: job (§5.7) — a Cloud Run Job, not a Service. Its "health" is
+# really "did the most recent execution succeed," not a continuous up/down
+# signal, and something outside runcd (an external scheduler, another
+# pipeline) usually owns when it actually runs — deploying this manifest
+# only updates the job's spec, it never triggers a run.
+resourceType: job
+
+image:
+  digest: "sha256:9b7e2d0000000000000000000000000000000000000000000000000000000000"
+
+env:
+  BATCH_WINDOW_HOURS: "24"

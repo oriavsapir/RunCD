@@ -1,0 +1,10 @@
+# Declares a precondition that acme-legacy-01 can't satisfy — runcd.yaml's
+# app entry for this service sets ignorePreconditions: ["pubsubSubscription:orders"]
+# to skip it there specifically, rather than removing the requirement for
+# every other environment this manifest might ever target.
+image:
+  digest: "sha256:1a2b3c0000000000000000000000000000000000000000000000000000000000"
+
+requires:
+  - type: pubsubSubscription
+    name: orders

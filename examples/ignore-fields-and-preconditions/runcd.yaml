@@ -1,0 +1,27 @@
+# apps[].ignoreFields (§7): subtracts from defaults.managedFields for this
+# app only (ArgoCD's resource.exclusions, at field granularity) — e.g. a
+# service whose traffic split is managed by hand outside runcd.
+#
+# apps[].ignorePreconditions (§5.10): skips specific `requires` entries
+# from the app's manifest, each named "type:name" — an escape hatch for a
+# precondition that's legitimately not applicable to one app, not a way to
+# routinely bypass the gate.
+
+environments:
+  prod:
+    projects: [acme-prod-us]
+
+defaults:
+  region: us-central1
+  managedFields: [image, traffic, env]
+
+apps:
+  - name: checkout-service
+    env: prod
+    source: { repo: "git@github.com:acme/deployment.git", branch: main, path: "services/checkout-service/service.yaml" }
+    # Traffic splitting for this app is managed by hand; runcd should never
+    # touch it even though defaults.managedFields includes "traffic".
+    ignoreFields: [traffic]
+    # This app's manifest declares "requires: [pubsubSubscription:orders]",
+    # but acme-prod-us doesn't have that subscription and never will.
+    ignorePreconditions: ["pubsubSubscription:orders"]

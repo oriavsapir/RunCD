@@ -25,7 +25,7 @@ import (
 // h.ImageEvents nil means the feature was never configured (no env vars
 // set in cmd/controller/main.go) — 404s unconditionally, the same "route
 // exists, does nothing unless configured" shape as an unset
-// notify.slackWebhookUrl. This keeps the route safe to leave registered
+// notify.slack. This keeps the route safe to leave registered
 // even for deployments that never wire up an Eventarc trigger.
 func (h *Handler) handleImageEvent(w http.ResponseWriter, r *http.Request) {
 	if h.ImageEvents == nil {

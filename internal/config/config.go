@@ -5,10 +5,15 @@ package config
 import (
 	"fmt"
 	"net/url"
+	"regexp"
 	"strings"
 
 	"gopkg.in/yaml.v3"
 )
+
+// validRuleName matches notification_debounce.rule's CHECK constraint
+// (internal/store/migrations/00008_notify_rule_names.sql).
+var validRuleName = regexp.MustCompile(`^[A-Za-z0-9_-]+$`)
 
 type RetryPolicy struct {
 	Limit          int `yaml:"limit"`
@@ -137,9 +142,10 @@ type Environment struct {
 	// call — Parse itself never does I/O) and merged into Projects at load
 	// time, deduped. Only direct children — a folder's own sub-folders are
 	// not recursed into.
-	Folders []string   `yaml:"folders,omitempty"`
-	Region  string     `yaml:"region,omitempty"`
-	Sync    SyncPolicy `yaml:"sync,omitempty"`
+	Folders []string       `yaml:"folders,omitempty"`
+	Region  string         `yaml:"region,omitempty"`
+	Sync    SyncPolicy     `yaml:"sync,omitempty"`
+	Notify  NotifyOverride `yaml:"notify,omitempty"`
 }
 
 type Defaults struct {
@@ -184,17 +190,40 @@ type App struct {
 }
 
 // NotifyRule is one entry in notify.rules (§5.8): a rule fires when its
-// condition (sync failed, health degraded, or a gated unit stuck
-// OutOfSync) holds, subject to the named duration threshold.
+// condition (sync failed, health degraded, a gated unit stuck OutOfSync, or
+// health recovering from Degraded) holds, subject to the named duration
+// threshold.
 type NotifyRule struct {
-	On         string `yaml:"on"` // syncFailed | healthDegraded | outOfSyncGated
+	On string `yaml:"on"` // syncFailed | healthDegraded | outOfSyncGated | healthRecovered
+	// Name disambiguates two rules sharing the same On (e.g. an early-warning
+	// healthDegraded at 5 minutes and an escalation at 60) so
+	// environments[].notify.rules can reference one without the other. Only
+	// required when such a reference would otherwise be ambiguous — two
+	// unnamed rules of the same type still debounce independently either way.
+	Name       string `yaml:"name,omitempty"`
 	ForMinutes *int   `yaml:"forMinutes,omitempty"`
 	ForHours   *int   `yaml:"forHours,omitempty"`
 }
 
+// NotifyOverride narrows notify.rules and/or picks a non-default named Slack
+// sink for one environment (ArgoCD's per-Application notification
+// subscription, expressed as static config instead of an annotation since
+// there's no CR here) — e.g. prod subscribes to every configured rule, dev
+// only to syncFailed.
+type NotifyOverride struct {
+	Slack string `yaml:"slack,omitempty"`
+	// Rules is a subset of notify.rules identifiers (name, or bare "on" when
+	// unambiguous) this environment should actually notify on. Nil means
+	// every configured rule applies, unchanged from pre-override behavior.
+	Rules []string `yaml:"rules,omitempty"`
+}
+
 type Notify struct {
-	SlackWebhookURL string       `yaml:"slackWebhookUrl"`
-	Rules           []NotifyRule `yaml:"rules,omitempty"`
+	// Slack is named webhook sinks (ArgoCD's named notification services) —
+	// "default" is used by any environment that sets no notify.slack
+	// override, and is required once Rules is non-empty.
+	Slack map[string]string `yaml:"slack,omitempty"`
+	Rules []NotifyRule      `yaml:"rules,omitempty"`
 }
 
 type Root struct {
@@ -334,8 +363,16 @@ func Parse(data []byte) (*Root, error) {
 		}
 	}
 	for _, rule := range root.Notify.Rules {
+		// Name becomes a notification_debounce.rule value verbatim (see
+		// ruleKey in internal/notify) — that column's CHECK constraint
+		// (internal/store/migrations/00008_notify_rule_names.sql) restricts
+		// it to this same charset, so reject anything wider here rather
+		// than at insert time deep in a reconcile pass.
+		if rule.Name != "" && !validRuleName.MatchString(rule.Name) {
+			return nil, fmt.Errorf("notify.rules: name %q must match %s", rule.Name, validRuleName)
+		}
 		switch rule.On {
-		case "syncFailed":
+		case "syncFailed", "healthRecovered":
 		case "healthDegraded":
 			if rule.ForMinutes == nil {
 				return nil, fmt.Errorf("notify.rules: %q requires forMinutes", rule.On)
@@ -357,12 +394,46 @@ func Parse(data []byte) (*Root, error) {
 				return nil, fmt.Errorf("notify.rules: %q forHours must be positive, got %d", rule.On, *rule.ForHours)
 			}
 		default:
-			return nil, fmt.Errorf("notify.rules: %q is not a known rule (syncFailed, healthDegraded, outOfSyncGated)", rule.On)
+			return nil, fmt.Errorf("notify.rules: %q is not a known rule (syncFailed, healthDegraded, outOfSyncGated, healthRecovered)", rule.On)
 		}
 	}
-	if len(root.Notify.Rules) > 0 {
-		if err := validateWebhookURL(root.Notify.SlackWebhookURL); err != nil {
-			return nil, fmt.Errorf("notify.slackWebhookUrl: %w", err)
+	if len(root.Notify.Rules) > 0 && root.Notify.Slack["default"] == "" {
+		return nil, fmt.Errorf("notify.slack: requires a %q entry when notify.rules is non-empty", "default")
+	}
+	for name, raw := range root.Notify.Slack {
+		if err := validateWebhookURL(raw); err != nil {
+			return nil, fmt.Errorf("notify.slack[%q]: %w", name, err)
+		}
+	}
+	// ruleIDs backs environments[].notify.rules lookups below: Name when
+	// set, otherwise the bare On — ambiguous (matches >1 rule) only if some
+	// environment actually references a bare On shared by more than one
+	// rule, which is checked per-reference below rather than rejected here,
+	// since two unnamed rules of the same On (e.g. two healthDegraded
+	// thresholds with no environment override selecting between them) is a
+	// perfectly valid, already-supported config.
+	ruleIDs := make(map[string]int, len(root.Notify.Rules))
+	for _, rule := range root.Notify.Rules {
+		id := rule.Name
+		if id == "" {
+			id = rule.On
+		}
+		ruleIDs[id]++
+	}
+	for envName, env := range root.Environments {
+		if env.Notify.Slack != "" {
+			if _, ok := root.Notify.Slack[env.Notify.Slack]; !ok {
+				return nil, fmt.Errorf("environments[%q].notify.slack: %q is not a name in notify.slack", envName, env.Notify.Slack)
+			}
+		}
+		for _, r := range env.Notify.Rules {
+			switch ruleIDs[r] {
+			case 0:
+				return nil, fmt.Errorf("environments[%q].notify.rules: %q is not a configured notify.rules identifier", envName, r)
+			case 1:
+			default:
+				return nil, fmt.Errorf("environments[%q].notify.rules: %q matches more than one notify.rules entry — give the ones you mean a distinct name", envName, r)
+			}
 		}
 	}
 	return &root, nil
@@ -374,7 +445,7 @@ func Parse(data []byte) (*Root, error) {
 // where the operator can actually see it.
 func validateWebhookURL(raw string) error {
 	if raw == "" {
-		return fmt.Errorf("required when notify.rules is non-empty")
+		return fmt.Errorf("must not be empty")
 	}
 	u, err := url.Parse(raw)
 	if err != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Host == "" {

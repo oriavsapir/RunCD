@@ -1,0 +1,25 @@
+# Environment-agnostic (§5.1) — no env/project/region here, those are
+# bound by runcd.yaml's apps[]/environments. resourceType defaults to
+# "service" when omitted.
+image:
+  digest: "sha256:3f8a1c0000000000000000000000000000000000000000000000000000000000"
+  # track/version are resolver metadata for the optional internal/imageupdater
+  # add-on — repository is required alongside either, since digest alone
+  # (a bare sha256:..., never a full reference) gives it nothing to list
+  # tags on.
+  track: checkout-service-latest
+  repository: us-central1-docker.pkg.dev/acme-artifacts/services/checkout-service
+
+traffic:
+  latestRevisionPercent: 100
+
+env:
+  LOG_LEVEL: info
+
+secrets:
+  - name: STRIPE_API_KEY
+    secret: checkout-service-stripe-key
+
+requires:
+  - type: pubsubTopic
+    name: orders-events

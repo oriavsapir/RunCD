@@ -1,0 +1,20 @@
+# apps[].exclude (§5.1): drops specific projects out of an app's otherwise
+# environment-wide expansion — e.g. a batch job that only runs in one of an
+# environment's three regions. A project can't be both excluded and
+# overridden (config.Parse rejects that combination as a real config
+# mistake, not a meaningful one).
+
+environments:
+  prod:
+    projects: [acme-prod-us, acme-prod-eu, acme-prod-apac]
+
+defaults:
+  region: us-central1
+  managedFields: [image]
+
+apps:
+  - name: nightly-batch-job
+    env: prod
+    source: { repo: "git@github.com:acme/deployment.git", branch: main, path: "services/nightly-batch-job/service.yaml" }
+    # nightly-batch-job only runs out of acme-prod-us.
+    exclude: [acme-prod-eu, acme-prod-apac]

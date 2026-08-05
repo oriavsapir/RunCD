@@ -1,0 +1,107 @@
+# Full example repo (§5.1): everything in examples/*/runcd.yaml composed
+# into one realistic runcd.yaml, the way a real RUNCD_CONFIG_REPO would
+# actually look. Start with the per-feature examples if you want to see one
+# concept in isolation — this one shows how they interact.
+
+environments:
+  dev:
+    # Explicit projects plus a folder — folders.ResolveConfig (a live GCP
+    # call, not config.Parse) merges the folder's direct child projects in
+    # at load time, deduped against what's listed here.
+    projects: [acme-dev-01]
+    folders: ["123456789012"]
+    notify:
+      # dev uses the default sink and only wants outright failures — no
+      # degraded/escalation/recovered noise.
+      rules: [syncFailed]
+
+  staging:
+    projects: [acme-staging-01]
+    sync:
+      auto: true
+      # Only auto-deploy staging on weekday business hours (UTC).
+      syncWindows:
+        - kind: allow
+          days: [Mon, Tue, Wed, Thu, Fri]
+          startHour: 9
+          endHour: 18
+
+  prod:
+    projects: [acme-prod-us, acme-prod-eu]
+    region: us-central1 # default for this environment; acme-prod-eu overrides below
+    sync:
+      auto: true
+      # Never auto-deploy prod on a Friday (UTC), regardless of hour.
+      syncWindows:
+        - kind: deny
+          days: [Fri]
+    notify:
+      slack: prod-incidents
+      # No rules override — prod gets every rule under notify.rules below.
+
+  # Shadow mode: this environment's units are fetched/diffed/health-checked
+  # every tick like any other, but runcd never deploys to them — for
+  # proving desired-vs-live matches before granting deploy authority.
+  legacy-onboarding:
+    projects: [acme-legacy-01]
+    sync:
+      observe: true
+
+defaults:
+  region: us-central1
+  managedFields: [image, traffic, env]
+  sync: { auto: false, interval: 300 }
+
+apps:
+  - name: checkout-service
+    env: prod
+    source: { repo: "git@github.com:acme/deployment.git", branch: main, path: "services/checkout-service/service.yaml" }
+    overrides:
+      acme-prod-eu:
+        region: europe-west1
+      acme-prod-us:
+        track: checkout-service-v0.324
+    # Traffic splitting for prod is managed by hand outside runcd.
+    ignoreFields: [traffic]
+
+  - name: checkout-service
+    env: staging
+    source: { repo: "git@github.com:acme/deployment.git", branch: main, path: "services/checkout-service/service.yaml" }
+
+  - name: checkout-service
+    env: dev
+    source: { repo: "git@github.com:acme/deployment.git", branch: main, path: "services/checkout-service/service.yaml" }
+
+  - name: nightly-batch-job
+    env: prod
+    source: { repo: "git@github.com:acme/deployment.git", branch: main, path: "services/nightly-batch-job/service.yaml" }
+    # This job only runs out of acme-prod-us.
+    exclude: [acme-prod-eu]
+
+  - name: legacy-service
+    env: legacy-onboarding
+    source: { repo: "git@github.com:acme/deployment.git", branch: main, path: "services/legacy-service/service.yaml" }
+    # This manifest declares "requires: [pubsubSubscription:orders]", but
+    # acme-legacy-01 doesn't have that subscription and never will.
+    ignorePreconditions: ["pubsubSubscription:orders"]
+
+# notify (§5.8): routed per environment (see each environment's own
+# `notify` above) — prod subscribes to every rule below via its
+# prod-incidents sink; dev narrows to just syncFailed on the default sink;
+# staging/legacy-onboarding set no override, so they also inherit every
+# rule on the default sink.
+notify:
+  slack:
+    default: "https://hooks.slack.com/services/T000/B000/aaaaaaaaaaaaaaaaaaaaaaaa"
+    prod-incidents: "https://hooks.slack.com/services/T000/B000/bbbbbbbbbbbbbbbbbbbbbbbb"
+  rules:
+    - on: syncFailed
+    - name: health-early-warning
+      on: healthDegraded
+      forMinutes: 15
+    - name: health-escalation
+      on: healthDegraded
+      forMinutes: 60
+    - on: outOfSyncGated
+      forHours: 4
+    - on: healthRecovered

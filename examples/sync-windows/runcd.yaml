@@ -1,0 +1,38 @@
+# sync.syncWindows (§6, ArgoCD's AppProject.syncWindows without a cron
+# dependency): gates auto-sync — never a manual/forced sync — to specific
+# days and UTC hours. Deny always wins over allow; with no allow window
+# declared at all, auto-sync is permitted everywhere a deny window doesn't
+# match.
+
+environments:
+  prod:
+    projects: [acme-prod-us]
+    sync:
+      auto: true
+      # Never auto-deploy prod on a Friday (UTC) — regardless of hour.
+      syncWindows:
+        - kind: deny
+          days: [Fri]
+  staging:
+    projects: [acme-staging-01]
+    sync:
+      auto: true
+      # Only auto-deploy staging on weekday business hours (UTC).
+      syncWindows:
+        - kind: allow
+          days: [Mon, Tue, Wed, Thu, Fri]
+          startHour: 9
+          endHour: 18
+
+defaults:
+  region: us-central1
+  managedFields: [image]
+
+apps:
+  - name: checkout-service
+    env: prod
+    source: { repo: "git@github.com:acme/deployment.git", branch: main, path: "services/checkout-service/service.yaml" }
+
+  - name: checkout-service
+    env: staging
+    source: { repo: "git@github.com:acme/deployment.git", branch: main, path: "services/checkout-service/service.yaml" }

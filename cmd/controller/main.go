@@ -195,7 +195,7 @@ func run() error {
 	// Registry push — see internal/api's handleImageEvent) stays entirely
 	// inert, POST /api/events/image just 404ing, unless a deployment opts
 	// in by setting both. No separate "enabled" flag, same shape
-	// notify.slackWebhookUrl already has.
+	// notify.slack already has.
 	imageEventsAudience := os.Getenv("RUNCD_IMAGE_EVENTS_AUDIENCE")
 	imageEventsServiceAccount := os.Getenv("RUNCD_IMAGE_EVENTS_SERVICE_ACCOUNT")
 
@@ -588,13 +588,19 @@ func loadRBAC(ctx context.Context, gh *githubapp.Client, cs configSource) (*rbac
 // hot-reload call sites go through this one function rather than
 // duplicating the conditional.
 func buildNotifier(db *sql.DB, root *config.Root) reconcile.Notifier {
-	if root.Notify.SlackWebhookURL == "" {
+	if len(root.Notify.Slack) == 0 {
 		return nil
 	}
+	sinks := make(map[string]notify.Sink, len(root.Notify.Slack))
+	for name, webhookURL := range root.Notify.Slack {
+		sinks[name] = &notify.SlackSink{WebhookURL: webhookURL}
+	}
 	return &notify.Evaluator{
-		DB:    db,
-		Sink:  &notify.SlackSink{WebhookURL: root.Notify.SlackWebhookURL},
-		Rules: root.Notify.Rules,
+		DB:           db,
+		Sink:         sinks["default"],
+		Sinks:        sinks,
+		Rules:        root.Notify.Rules,
+		Environments: root.Environments,
 	}
 }
 

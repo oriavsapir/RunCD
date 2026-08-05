@@ -1,0 +1,25 @@
+# Lives in the same GitHub repo/branch as runcd.yaml (RUNCD_CONFIG_REPO),
+# at RBAC_PATH (default "rbac.yaml"). Everyone with a valid IAP identity
+# already gets read-only access to every dashboard view — this file only
+# controls who may trigger a manual sync, and for which apps/environments/
+# projects/folders. See examples/rbac/ for the format on its own.
+
+roles:
+  - subject: platform-team@acme.com
+    role: admin
+    scope: ["*"]
+
+  - subject: dev-team@acme.com
+    role: syncer
+    scope: ["env:dev"]
+
+  - subject: oncall@acme.com
+    role: syncer
+    scope: ["app:checkout-service@acme-prod-us", "app:checkout-service@acme-prod-eu"]
+
+  # Grants sync on every project under this folder, including ones added
+  # to it later without an RBAC change — folderMembership is resolved the
+  # same way environments[env].folders is (internal/folders).
+  - subject: platform-team@acme.com
+    role: admin
+    scope: ["folder:123456789012"]

@@ -286,10 +286,40 @@ all three are fixed now, before Phase 2 built more on top of the same path:
   `TestUpsert_StatusSinceResetsOnlyWhenStatusChanges`), and the
   `notification_debounce` table.
 
-- [x] **`config.Root.Notify`** — `notify.slackWebhookUrl`/`notify.rules`
-  parsed as part of root `runcd.yaml` (§5.1), not a separate file.
-  Rejects an unknown `on` value or a `healthDegraded`/`outOfSyncGated` rule
-  missing its required `forMinutes`/`forHours` at parse time.
+- [x] **`config.Root.Notify`** — `notify.slack`/`notify.rules` parsed as
+  part of root `runcd.yaml` (§5.1), not a separate file. Rejects an unknown
+  `on` value or a `healthDegraded`/`outOfSyncGated` rule missing its
+  required `forMinutes`/`forHours` at parse time.
+
+- [x] **Per-environment notify routing + `healthRecovered`** —
+  `notify.slack` is named webhook sinks rather than one URL;
+  `environments[env].notify` can pick a non-default sink and/or narrow
+  `notify.rules` to a subset (ArgoCD's per-Application subscription,
+  expressed as static config), e.g. prod subscribes to every rule while dev
+  only gets `syncFailed`. `NotifyRule.Name` disambiguates two rules sharing
+  an `on` (e.g. a 5-minute early warning and a 60-minute escalation) so an
+  environment override can reference one specifically — only required when
+  such a reference would otherwise be ambiguous. `healthRecovered` fires
+  once Health leaves Degraded, but only for a sibling `healthDegraded` rule
+  that actually notified last time (tracked via `notification_debounce`
+  state), and clears that rule's debounce marker so the next Degraded
+  episode notifies immediately rather than waiting out the original window.
+  Migration `00008_notify_rule_names.sql` widens
+  `notification_debounce.rule`'s CHECK constraint to allow `healthRecovered`
+  and arbitrary (charset-restricted) rule names, not just the two
+  previously-enumerated `"<on>:<threshold>"` shapes.
+  - Tests: `internal/config`'s `TestParse_HealthRecoveredRuleAccepted`,
+    `TestParse_NamedSlackSinkSelectedPerEnvironment`,
+    `TestParse_UnknownNamedSlackSinkRejected`,
+    `TestParse_PerEnvironmentRuleSubset`,
+    `TestParse_UnknownRuleIdentifierInEnvironmentRejected`,
+    `TestParse_AmbiguousBareRuleReferenceRejected`,
+    `TestParse_NamedRuleDisambiguatesReference`; `internal/notify`'s
+    `TestEvaluate_HealthRecoveredFiresOnlyAfterANotifiedDegradation`,
+    `TestEvaluate_HealthRecoveredNeverFiresWithoutAPriorNotification`,
+    `TestEvaluate_HealthRecoveredResetsDebounceForTheNextEpisode`,
+    `TestEvaluate_EnvironmentOverrideNarrowsRules`,
+    `TestEvaluate_EnvironmentOverrideSelectsNamedSink`.
 
 ## Live wiring — `main.go` now drives the real controller
 

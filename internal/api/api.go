@@ -64,7 +64,7 @@ type Handler struct {
 	// RECONCILE_INTERVAL tick. All three are nil unless the controller was
 	// started with the image-events env vars set — POST /api/events/image
 	// is registered unconditionally either way, but does nothing without
-	// them, the same "configured or it's inert" shape notify.slackWebhookUrl
+	// them, the same "configured or it's inert" shape notify.slack
 	// already has. See handleImageEvent's doc comment for the rest.
 	ImageEvents    auth.Authenticator
 	IsLeader       func() bool

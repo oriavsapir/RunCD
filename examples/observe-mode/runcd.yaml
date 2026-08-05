@@ -1,0 +1,22 @@
+# sync.observe (§6): shadow mode. The reconcile loop still fetches, diffs,
+# and assesses health every tick exactly as normal — Status/Health reflect
+# real drift from the first tick — but never deploys, not on auto-sync and
+# not on a manual sync's force either. Meant for onboarding a
+# project/environment onto runcd gradually: prove the desired state matches
+# reality (or see exactly where it doesn't) before granting runcd any
+# authority to actually change anything.
+
+environments:
+  legacy-onboarding:
+    projects: [acme-legacy-01]
+    sync:
+      observe: true
+
+defaults:
+  region: us-central1
+  managedFields: [image]
+
+apps:
+  - name: legacy-service
+    env: legacy-onboarding
+    source: { repo: "git@github.com:acme/deployment.git", branch: main, path: "services/legacy-service/service.yaml" }

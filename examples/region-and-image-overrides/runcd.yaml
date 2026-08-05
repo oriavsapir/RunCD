@@ -1,0 +1,31 @@
+# Per-project overrides (§5.1): apps[].overrides lets one project deviate
+# from the app's shared defaults without a separate manifest file.
+#
+# Region resolves in this order: overrides[project].region >
+# environments[env].region > defaults.region — expander.Expand fails
+# loudly if none of the three apply to a given project.
+#
+# Track/Version override the app's manifest-declared image.track/
+# image.version for one project only (mutually exclusive, like the
+# manifest's own pair) — resolved live against Artifact Registry at
+# reconcile time (internal/registry), not committed to the manifest, so
+# the same service.yaml can serve one project riding the manifest's own
+# digest and another pinned to a different version/track.
+
+environments:
+  prod:
+    projects: [acme-prod-us, acme-prod-eu]
+    region: us-central1 # environment-level default; acme-prod-eu overrides it below
+
+defaults:
+  managedFields: [image]
+
+apps:
+  - name: checkout-service
+    env: prod
+    source: { repo: "git@github.com:acme/deployment.git", branch: main, path: "services/checkout-service/service.yaml" }
+    overrides:
+      acme-prod-eu:
+        region: europe-west1
+      acme-prod-us:
+        track: checkout-service-v0.324
