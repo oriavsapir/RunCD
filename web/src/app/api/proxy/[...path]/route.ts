@@ -54,6 +54,10 @@ async function forward(req: NextRequest, path: string[]) {
   const url = `${API_BASE_URL}/${path.join("/")}${req.nextUrl.search}`;
 
   const res = await fetch(url, {
+    // The runcd API never redirects; rejecting outright (rather than
+    // following) stops the ID-token/IAP-assertion headers from leaking to
+    // a redirect target if the backend is ever misconfigured or compromised.
+    redirect: "error",
     method: req.method,
     headers: {
       ...Object.fromEntries(authHeaders),
