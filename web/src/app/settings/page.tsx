@@ -31,14 +31,6 @@ import {
   TableRow,
 } from "@/components/ui/table";
 import { Skeleton } from "@/components/ui/skeleton";
-import {
-  Table,
-  TableBody,
-  TableCell,
-  TableHead,
-  TableHeader,
-  TableRow,
-} from "@/components/ui/table";
 import { ThemeToggle } from "@/components/theme-toggle";
 import { getRuntimeConfig, listRbac, listUnits } from "@/lib/api";
 import type { RbacRule, RuntimeConfig, Unit } from "@/lib/types";
