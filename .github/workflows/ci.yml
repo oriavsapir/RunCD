@@ -9,8 +9,43 @@ concurrency:
   group: ci-${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
 
+permissions:
+  contents: read
+
 jobs:
+  changes:
+    timeout-minutes: 5
+    runs-on: ubuntu-latest
+    outputs:
+      go: ${{ steps.filter.outputs.go }}
+      terraform: ${{ steps.filter.outputs.terraform }}
+      docker: ${{ steps.filter.outputs.docker }}
+      web: ${{ steps.filter.outputs.web }}
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dorny/paths-filter@v3
+        id: filter
+        with:
+          filters: |
+            go:
+              - '**/*.go'
+              - 'go.mod'
+              - 'go.sum'
+              - 'examples/**'
+            terraform:
+              - 'terraform/**'
+            docker:
+              - 'Dockerfile'
+              - '**/*.go'
+              - 'go.mod'
+              - 'go.sum'
+            web:
+              - 'web/**'
+
   fmt:
+    needs: changes
+    if: needs.changes.outputs.go == 'true'
+    timeout-minutes: 5
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
@@ -27,6 +62,9 @@ jobs:
           fi
 
   vet:
+    needs: changes
+    if: needs.changes.outputs.go == 'true'
+    timeout-minutes: 5
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
@@ -36,6 +74,9 @@ jobs:
       - run: go vet ./...
 
   lint:
+    needs: changes
+    if: needs.changes.outputs.go == 'true'
+    timeout-minutes: 10
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
@@ -47,6 +88,9 @@ jobs:
           version: latest
 
   vulncheck:
+    needs: changes
+    if: needs.changes.outputs.go == 'true'
+    timeout-minutes: 10
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
@@ -57,6 +101,9 @@ jobs:
       - run: govulncheck ./...
 
   nilaway:
+    needs: changes
+    if: needs.changes.outputs.go == 'true'
+    timeout-minutes: 10
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
@@ -85,6 +132,9 @@ jobs:
       - run: nilaway -exclude-errors-in-files internal/notify/slack.go,internal/api/api_test.go,internal/api/sync_batch_test.go,internal/cloudrun/gcp.go,internal/githubapp/githubapp.go,internal/leader/lease.go,cmd/runcd/client.go,web/node_modules ./...
 
   test:
+    needs: changes
+    if: needs.changes.outputs.go == 'true'
+    timeout-minutes: 15
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
@@ -102,6 +152,9 @@ jobs:
   # No --check-gcp/--check-slack here: those need real GCP credentials/live
   # webhooks this runner doesn't have.
   examples:
+    needs: changes
+    if: needs.changes.outputs.go == 'true'
+    timeout-minutes: 5
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
@@ -120,6 +173,9 @@ jobs:
           exit $failed
 
   terraform:
+    needs: changes
+    if: needs.changes.outputs.terraform == 'true'
+    timeout-minutes: 10
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
@@ -140,6 +196,9 @@ jobs:
           terraform validate
 
   docker:
+    needs: changes
+    if: needs.changes.outputs.docker == 'true'
+    timeout-minutes: 15
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
@@ -150,6 +209,9 @@ jobs:
           push: false
 
   web:
+    needs: changes
+    if: needs.changes.outputs.web == 'true'
+    timeout-minutes: 15
     runs-on: ubuntu-latest
     defaults:
       run:
