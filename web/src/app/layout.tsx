@@ -1,7 +1,7 @@
 import type { Metadata } from "next";
 import { Geist, Geist_Mono } from "next/font/google";
 import Link from "next/link";
-import { GitBranch, Settings } from "lucide-react";
+import { GitBranch, Settings, Trash2 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { TooltipProvider } from "@/components/ui/tooltip";
 import { ThemeToggle } from "@/components/theme-toggle";
@@ -50,6 +50,14 @@ export default function RootLayout({
                 <span className="font-semibold tracking-tight">RunCD</span>
               </Link>
               <ThemeToggle />
+              <Button
+                variant="outline"
+                size="icon"
+                nativeButton={false}
+                render={<Link href="/orphans" aria-label="Orphans" />}
+              >
+                <Trash2 className="size-4" />
+              </Button>
               <Button
                 variant="outline"
                 size="icon"

@@ -91,6 +91,15 @@ export interface BatchSyncResult {
   skipped?: BatchSyncSkipReason;
 }
 
+// One live Cloud Run service/job/worker-pool found in GCP that no current
+// sync unit declares for that project/region (GET /api/orphans, read-only
+// — prune detection never deletes anything itself).
+export interface Orphan {
+  project: string;
+  region: string;
+  app: string;
+}
+
 export type RbacRole = "admin" | "syncer";
 
 export interface RbacRule {
