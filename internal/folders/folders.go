@@ -47,6 +47,14 @@ type folderCacheEntry struct {
 	fetchedAt time.Time
 }
 
+// folderLister is the minimal seam ProjectsInFolder needs for the actual
+// live lookup — narrowed so the cache/TTL/singleflight/stale-fallback logic
+// around it is unit-testable against a fake, the same interface+fake
+// pattern as cloudrun.tagResolver.
+type folderLister interface {
+	listProjectsInFolder(ctx context.Context, folderID string) ([]string, error)
+}
+
 // GCPResolver is the real Cloud Resource Manager v3 implementation. A
 // single client suffices — unlike internal/cloudrun's regional clients,
 // Resource Manager has one global endpoint. Concurrent calls for the same
@@ -62,6 +70,11 @@ type GCPResolver struct {
 	mu    sync.Mutex
 	cache map[string]folderCacheEntry
 	group singleflight.Group
+
+	// lister defaults to the resolver itself (calling the real client via
+	// listProjectsInFolder below); tests substitute a fake to exercise the
+	// cache/TTL/fallback behavior without a live Resource Manager call.
+	lister folderLister
 }
 
 func NewGCPResolver(ctx context.Context) (*GCPResolver, error) {
@@ -95,9 +108,13 @@ func (r *GCPResolver) ProjectsInFolder(ctx context.Context, folderID string) ([]
 		}
 		r.mu.Unlock()
 
+		lister := r.lister
+		if lister == nil {
+			lister = r
+		}
 		fetchCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), resolveTimeout)
 		defer cancel()
-		ids, err := r.listProjectsInFolder(fetchCtx, folderID)
+		ids, err := lister.listProjectsInFolder(fetchCtx, folderID)
 		if err != nil {
 			// Serve stale cached membership rather than propagating a
 			// transient failure as "this folder has zero projects" — a

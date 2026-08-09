@@ -983,6 +983,61 @@ func TestRunOnce_CrashMidSync_DeployNeverTookEffect(t *testing.T) {
 	}
 }
 
+// TestRunOnce_LockHeldByConcurrentManualSyncSkipsAutoDeployWithoutUpserting
+// is RunOnce's own copy of the ErrSyncInProgress skip-the-upsert guard
+// (mirrored from ManualSync's TestManualSync_LockContention_
+// DoesNotUpsertStaleResult) — the actual race PROGRESS.md flags is a manual
+// sync (any replica) racing the *auto-reconcile loop* for the same unit, not
+// just two manual syncs, and RunOnce has its own separate guard in its
+// g.Go closure that was never exercised on its own.
+func TestRunOnce_LockHeldByConcurrentManualSyncSkipsAutoDeployWithoutUpserting(t *testing.T) {
+	db := testutil.NewPostgres(t)
+	oldDigest := "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+
+	// Simulate a concurrent manual sync already holding this unit's lock.
+	if _, err := db.ExecContext(context.Background(), `
+		INSERT INTO sync_locks (application, target_gcp_project, holder, expires_at)
+		VALUES ('widget-api', 'example-dev-01', 'concurrent-manual-sync', now() + interval '1 minute')`); err != nil {
+		t.Fatalf("seed sync_locks: %v", err)
+	}
+
+	cr := &fakeCloudRun{services: map[string]*cloudrun.LiveService{
+		"example-dev-01/widget-api": {ServiceState: cloudrun.ServiceState{ImageDigest: oldDigest}, LatestRevisionReady: true},
+	}}
+	r := &Reconciler{
+		DB:            db,
+		ManagedFields: []string{"image"},
+		Manifests:     &fakeManifests{byApp: map[string][]byte{"widget-api": serviceYAML()}},
+		CloudRun:      cr,
+		Preconditions: &fakePreconditions{},
+	}
+
+	units := []expander.SyncUnit{{App: "widget-api", Project: "example-dev-01", Sync: autoSync()}}
+	results, err := r.RunOnce(context.Background(), units)
+	if err != nil {
+		t.Fatalf("RunOnce: %v", err)
+	}
+	if !errors.Is(results[0].Err, ErrSyncInProgress) {
+		t.Fatalf("expected the auto pass to see ErrSyncInProgress against a lock the concurrent manual sync holds, got %+v", results[0])
+	}
+	if got := liveServiceDigest(t, cr, "example-dev-01/widget-api"); got != oldDigest {
+		t.Fatal("expected no deploy attempt while the lock is held by the concurrent manual sync")
+	}
+
+	// The losing auto pass must skip the upsert entirely (same reasoning as
+	// ManualSync's own guard): its pre-lock snapshot must never race the
+	// eventual winner's write.
+	var count int
+	if err := db.QueryRowContext(context.Background(),
+		`SELECT count(*) FROM applications WHERE name = 'widget-api' AND target_gcp_project = 'example-dev-01'`,
+	).Scan(&count); err != nil {
+		t.Fatalf("query applications: %v", err)
+	}
+	if count != 0 {
+		t.Fatalf("expected no applications row written by the losing auto pass, found %d", count)
+	}
+}
+
 func TestManualSync_ForcesDeployRegardlessOfAutoFlag(t *testing.T) {
 	db := testutil.NewPostgres(t)
 	oldDigest := "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
@@ -1153,6 +1208,97 @@ requires:
 	}
 	if got := liveServiceDigest(t, cr, "example-prod-us/widget-api"); got != oldDigest {
 		t.Fatal("expected no deploy attempt for a failed precondition, even on a forced manual sync")
+	}
+}
+
+// failPostDeployFetchCloudRun wraps fakeCloudRun so GetService succeeds for
+// every call except the second — the pre-deploy fetch (call 1) must
+// succeed for the unit to even be diffed OutOfSync and attempt a deploy;
+// only the post-deploy re-check (call 2) fails, modeling a real transient
+// GCP read error (or eventually-consistent propagation lag) right after a
+// deploy that itself succeeded.
+type failPostDeployFetchCloudRun struct {
+	*fakeCloudRun
+	calls atomic.Int64
+	err   error
+}
+
+func (f *failPostDeployFetchCloudRun) GetService(ctx context.Context, project, region, name, digest string) (*cloudrun.LiveService, error) {
+	if f.calls.Add(1) == 2 {
+		return nil, f.err
+	}
+	return f.fakeCloudRun.GetService(ctx, project, region, name, digest)
+}
+
+// TestRunOnce_PostDeployFetchFailure_SyncEventSucceedsButStatusStaysPreDeploy
+// exercises deploySyncUnit's documented "deploy succeeded, confirmation
+// didn't" branch (reconcile.go's postLive fetch-error path): the deploy
+// call itself is not in doubt, so sync_events must still read "succeeded"
+// (with no error — writing a real deploy as "failed" here would be a false
+// alarm), but res.Status/Health must stay exactly what applyLiveState
+// computed before the deploy, not be guessed as Synced, since nothing
+// actually confirmed the new state landed. The lock must still be
+// released, and the next poll's fresh fetch is the thing that actually
+// confirms convergence.
+func TestRunOnce_PostDeployFetchFailure_SyncEventSucceedsButStatusStaysPreDeploy(t *testing.T) {
+	db := testutil.NewPostgres(t)
+	oldDigest := "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+	boom := errors.New("transient GCP read error")
+	cr := &failPostDeployFetchCloudRun{
+		fakeCloudRun: &fakeCloudRun{services: map[string]*cloudrun.LiveService{
+			"example-dev-01/widget-api": {
+				ServiceState:                cloudrun.ServiceState{ImageDigest: oldDigest},
+				HasRevisionForDesiredDigest: false,
+				LatestRevisionReady:         true,
+			},
+		}},
+		err: boom,
+	}
+	r := &Reconciler{
+		DB:            db,
+		ManagedFields: []string{"image"},
+		Manifests:     &fakeManifests{byApp: map[string][]byte{"widget-api": serviceYAML()}},
+		CloudRun:      cr,
+		Preconditions: &fakePreconditions{},
+	}
+
+	units := []expander.SyncUnit{{App: "widget-api", Project: "example-dev-01", Sync: autoSync()}}
+	results, err := r.RunOnce(context.Background(), units)
+	if err != nil {
+		t.Fatalf("RunOnce: %v", err)
+	}
+	if results[0].Status != string(diff.OutOfSync) {
+		t.Fatalf("expected Status to stay at its pre-deploy value (OutOfSync) when the post-deploy confirmation fails, got %+v", results[0])
+	}
+	if results[0].Err == nil || !errors.Is(results[0].Err, boom) {
+		t.Fatalf("expected the post-deploy fetch failure to be surfaced on Err, got %+v", results[0].Err)
+	}
+	// The deploy itself really did happen — Cloud Run's own state reflects
+	// the new digest even though this pass couldn't confirm it.
+	if got := liveServiceDigest(t, cr.fakeCloudRun, "example-dev-01/widget-api"); got != validDigest {
+		t.Fatalf("expected the deploy to have actually taken effect, got digest %q", got)
+	}
+
+	var result string
+	var errMsg sql.NullString
+	if err := db.QueryRowContext(context.Background(),
+		`SELECT result, error FROM sync_events WHERE application = 'widget-api' AND target_gcp_project = 'example-dev-01'`,
+	).Scan(&result, &errMsg); err != nil {
+		t.Fatalf("query sync_events: %v", err)
+	}
+	if result != "succeeded" {
+		t.Fatalf("expected sync_events to read succeeded (the deploy call itself succeeded), got %q", result)
+	}
+	if errMsg.Valid && errMsg.String != "" {
+		t.Fatalf("expected no error recorded on a sync_events row for a deploy that actually succeeded, got %q", errMsg.String)
+	}
+
+	var lockCount int
+	if err := db.QueryRowContext(context.Background(), `SELECT count(*) FROM sync_locks WHERE application = 'widget-api'`).Scan(&lockCount); err != nil {
+		t.Fatalf("count sync_locks: %v", err)
+	}
+	if lockCount != 0 {
+		t.Fatalf("expected the lock to be released despite the post-deploy fetch failure, got %d rows", lockCount)
 	}
 }
 
@@ -1664,6 +1810,255 @@ func TestManualSync_LockContention_DoesNotUpsertStaleResult(t *testing.T) {
 	}
 	if count != 0 {
 		t.Fatalf("expected no applications row written by the losing attempt, found %d", count)
+	}
+}
+
+// TestManualSync_ExpiredLockIsReclaimed proves acquireLock's
+// "WHERE sync_locks.expires_at < now()" clause actually lets a later
+// attempt take over an expired lock row left behind by a holder that
+// crashed mid-deploy, rather than treating any existing row as permanently
+// held — that TTL is the whole point of using a TTL-based lock instead of a
+// session-held one (see migrations/00003_sync_lock.sql).
+func TestManualSync_ExpiredLockIsReclaimed(t *testing.T) {
+	db := testutil.NewPostgres(t)
+	unit := expander.SyncUnit{App: "widget-api", Project: "example-prod-us", Sync: manualSync()}
+
+	// Simulate a crashed holder's lock row whose TTL has already elapsed.
+	if _, err := db.ExecContext(context.Background(), `
+		INSERT INTO sync_locks (application, target_gcp_project, holder, expires_at)
+		VALUES ('widget-api', 'example-prod-us', 'crashed-holder', now() - interval '1 minute')`); err != nil {
+		t.Fatalf("seed expired sync_locks row: %v", err)
+	}
+
+	cr := &fakeCloudRun{services: map[string]*cloudrun.LiveService{
+		"example-prod-us/widget-api": {ServiceState: cloudrun.ServiceState{ImageDigest: "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}, LatestRevisionReady: true},
+	}}
+	r := &Reconciler{
+		DB:            db,
+		ManagedFields: []string{"image"},
+		Manifests:     &fakeManifests{byApp: map[string][]byte{"widget-api": serviceYAML()}},
+		CloudRun:      cr,
+		Preconditions: &fakePreconditions{},
+	}
+
+	res, err := r.ManualSync(context.Background(), unit, "alice@company.com")
+	if err != nil {
+		t.Fatalf("ManualSync: %v", err)
+	}
+	if errors.Is(res.Err, ErrSyncInProgress) {
+		t.Fatalf("expected the expired lock to be reclaimed, not treated as still held, got %+v", res)
+	}
+	if res.Status != "Synced" {
+		t.Fatalf("expected the reclaiming attempt to have deployed, got %+v", res)
+	}
+	if got := liveServiceDigest(t, cr, "example-prod-us/widget-api"); got != validDigest {
+		t.Fatalf("expected the deploy to have actually happened after reclaiming the lock, got digest %q", got)
+	}
+}
+
+// acquireLockFailDB forces ExecContext against sync_locks to fail outright
+// (a real DB error, not just "the row is already held") — acquireLock must
+// surface this distinctly from ErrSyncInProgress rather than silently
+// treating a connection error as lock contention.
+type acquireLockFailDB struct {
+	*sql.DB
+	err error
+}
+
+func (f *acquireLockFailDB) ExecContext(ctx context.Context, query string, args ...any) (sql.Result, error) {
+	if strings.Contains(query, "sync_locks") {
+		return nil, f.err
+	}
+	return f.DB.ExecContext(ctx, query, args...)
+}
+
+// TestManualSync_AcquireLockDBErrorSurfacedDistinctlyFromContention proves a
+// genuine DB error acquiring the sync_locks row (network blip, pool
+// exhaustion) is reported as its own wrapped error, not misread as
+// ErrSyncInProgress — a caller distinguishing the two (e.g. to decide
+// whether retrying immediately is safe) needs that distinction to be real.
+func TestManualSync_AcquireLockDBErrorSurfacedDistinctlyFromContention(t *testing.T) {
+	realDB := testutil.NewPostgres(t)
+	boom := errors.New("simulated connection failure")
+	db := &acquireLockFailDB{DB: realDB, err: boom}
+
+	cr := &fakeCloudRun{services: map[string]*cloudrun.LiveService{
+		"example-prod-us/widget-api": {ServiceState: cloudrun.ServiceState{ImageDigest: "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}, LatestRevisionReady: true},
+	}}
+	r := &Reconciler{
+		DB:            db,
+		ManagedFields: []string{"image"},
+		Manifests:     &fakeManifests{byApp: map[string][]byte{"widget-api": serviceYAML()}},
+		CloudRun:      cr,
+		Preconditions: &fakePreconditions{},
+	}
+
+	unit := expander.SyncUnit{App: "widget-api", Project: "example-prod-us", Sync: manualSync()}
+	res, err := r.ManualSync(context.Background(), unit, "alice@company.com")
+	if err != nil {
+		t.Fatalf("ManualSync: %v", err)
+	}
+	if errors.Is(res.Err, ErrSyncInProgress) {
+		t.Fatalf("a real DB error acquiring the lock must not be reported as ErrSyncInProgress, got %+v", res)
+	}
+	if res.Err == nil || !errors.Is(res.Err, boom) {
+		t.Fatalf("expected the underlying DB error wrapped on Result.Err, got %+v", res.Err)
+	}
+	if got := liveServiceDigest(t, cr, "example-prod-us/widget-api"); got != "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" {
+		t.Fatal("expected no deploy attempt when the lock couldn't even be acquired")
+	}
+}
+
+// TestManualSync_PreDeployUpsertFailurePreventsDeployAndSyncEvent exercises
+// deploySyncUnit's own "upsert applications row before deploy" write (the
+// one guaranteeing a brand-new unit's sync_events FK target exists) failing
+// — must abort before ever calling deploy() or writing sync_events, and
+// must still release the lock it already acquired rather than leaving it
+// held for the rest of lockTTL.
+func TestManualSync_PreDeployUpsertFailurePreventsDeployAndSyncEvent(t *testing.T) {
+	realDB := testutil.NewPostgres(t)
+	db := &flakyDB{DB: realDB, failApp: "widget-api"}
+	oldDigest := "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+	cr := &fakeCloudRun{services: map[string]*cloudrun.LiveService{
+		"example-prod-us/widget-api": {ServiceState: cloudrun.ServiceState{ImageDigest: oldDigest}, LatestRevisionReady: true},
+	}}
+	r := &Reconciler{
+		DB:            db,
+		ManagedFields: []string{"image"},
+		Manifests:     &fakeManifests{byApp: map[string][]byte{"widget-api": serviceYAML()}},
+		CloudRun:      cr,
+		Preconditions: &fakePreconditions{},
+	}
+
+	// ManualSync's own top-level upsert (after reconcile returns) also hits
+	// the same flaky DB for this app, so ManualSync itself is expected to
+	// return an error too — the assertion below on res.Err is what actually
+	// proves deploySyncUnit's *earlier*, pre-deploy upsert is what aborted
+	// the deploy, not just the later one.
+	unit := expander.SyncUnit{App: "widget-api", Project: "example-prod-us", Sync: manualSync()}
+	res, err := r.ManualSync(context.Background(), unit, "alice@company.com")
+	if err == nil {
+		t.Fatal("expected ManualSync to report the simulated write failure")
+	}
+	if res.Err == nil || !strings.Contains(res.Err.Error(), "upsert applications row before deploy") {
+		t.Fatalf("expected the pre-deploy upsert failure to be surfaced distinctly, got %+v", res.Err)
+	}
+	if got := liveServiceDigest(t, cr, "example-prod-us/widget-api"); got != oldDigest {
+		t.Fatal("expected no deploy attempt when the pre-deploy upsert itself failed")
+	}
+
+	var eventCount int
+	if err := realDB.QueryRowContext(context.Background(), `SELECT count(*) FROM sync_events WHERE application = 'widget-api'`).Scan(&eventCount); err != nil {
+		t.Fatalf("count sync_events: %v", err)
+	}
+	if eventCount != 0 {
+		t.Fatalf("expected no sync_events row written when the pre-deploy upsert failed, got %d", eventCount)
+	}
+
+	// The lock this attempt acquired must still be released (its defer runs
+	// regardless of the early return) — otherwise a later attempt would be
+	// stuck waiting out the rest of lockTTL for no reason.
+	var lockCount int
+	if err := realDB.QueryRowContext(context.Background(), `SELECT count(*) FROM sync_locks WHERE application = 'widget-api'`).Scan(&lockCount); err != nil {
+		t.Fatalf("count sync_locks: %v", err)
+	}
+	if lockCount != 0 {
+		t.Fatalf("expected the lock to be released despite the pre-deploy upsert failing, got %d rows", lockCount)
+	}
+}
+
+// cancelOnDeployCloudRun wraps fakeCloudRun so a test can simulate
+// leadership loss happening precisely during the deploy call: Cloud Run
+// itself accepts the deploy (a real deploy call, once submitted, isn't
+// something losing leadership can retroactively undo), but the calling
+// process's own context is cancelled before the call returns — modeling the
+// exact race deploySyncUnit's crash-safety contract is built around.
+type cancelOnDeployCloudRun struct {
+	*fakeCloudRun
+	cancel context.CancelFunc
+}
+
+func (c *cancelOnDeployCloudRun) DeployService(ctx context.Context, project, region, name string, desired cloudrun.ServiceState) error {
+	c.cancel()
+	return c.fakeCloudRun.DeployService(ctx, project, region, name, desired)
+}
+
+// TestRunOnce_LeadershipLostMidDeploy_SyncEventStillFinalized is the direct
+// test of the crash-safety contract deploySyncUnit/updateSyncEvent/
+// releaseLock document via context.WithoutCancel: losing leadership (the
+// caller's ctx cancelled) in the exact window between Cloud Run accepting a
+// deploy and this pass finishing its own bookkeeping must not leave the
+// sync_events row stuck at "in_progress" forever, and must not leave the
+// per-unit lock held for the rest of lockTTL — both writes are deliberately
+// detached from ctx's cancellation for exactly this reason. The final
+// applications-table upsert back in RunOnce is NOT detached, so it's
+// expected (and asserted) to fail here — next tick's fresh reconcile pass
+// re-derives the correct status from live state regardless.
+func TestRunOnce_LeadershipLostMidDeploy_SyncEventStillFinalized(t *testing.T) {
+	db := testutil.NewPostgres(t)
+	oldDigest := "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	cr := &cancelOnDeployCloudRun{
+		fakeCloudRun: &fakeCloudRun{services: map[string]*cloudrun.LiveService{
+			"example-dev-01/widget-api": {
+				ServiceState:                cloudrun.ServiceState{ImageDigest: oldDigest},
+				HasRevisionForDesiredDigest: false,
+				LatestRevisionReady:         true,
+			},
+		}},
+		cancel: cancel,
+	}
+	r := &Reconciler{
+		DB:            db,
+		ManagedFields: []string{"image"},
+		Manifests:     &fakeManifests{byApp: map[string][]byte{"widget-api": serviceYAML()}},
+		CloudRun:      cr,
+		Preconditions: &fakePreconditions{},
+	}
+
+	units := []expander.SyncUnit{{App: "widget-api", Project: "example-dev-01", Sync: autoSync()}}
+	results, err := r.RunOnce(ctx, units)
+	// The final applications upsert in RunOnce uses the same (now-cancelled)
+	// ctx, so it's expected to fail — this is what proves the assertion
+	// below isn't vacuous (deploySyncUnit's own writes really did have to
+	// detach to survive).
+	if err == nil {
+		t.Fatal("expected RunOnce's own final upsert to fail against the cancelled context")
+	}
+	if results[0].Err == nil {
+		t.Fatalf("expected the cancelled-context final upsert failure to be surfaced, got %+v", results[0])
+	}
+
+	// The deploy itself went through (Cloud Run "accepted" it before ctx was
+	// cancelled) — the fake's post-deploy state must reflect that.
+	if got := liveServiceDigest(t, cr.fakeCloudRun, "example-dev-01/widget-api"); got != validDigest {
+		t.Fatalf("expected the deploy to have taken effect despite the mid-deploy cancellation, got digest %q", got)
+	}
+
+	// The core assertion: sync_events must be finalized (not stuck at
+	// in_progress) even though the ctx that deploySyncUnit ran under was
+	// cancelled mid-flight — updateSyncEvent's context.WithoutCancel must
+	// have actually protected this write.
+	var result string
+	if err := db.QueryRowContext(context.Background(), `
+		SELECT result FROM sync_events WHERE application = 'widget-api' AND target_gcp_project = 'example-dev-01'`,
+	).Scan(&result); err != nil {
+		t.Fatalf("query sync_events: %v", err)
+	}
+	if result == "in_progress" {
+		t.Fatal("expected sync_events to be finalized despite the mid-deploy context cancellation, found it stuck in_progress")
+	}
+
+	// releaseLock must likewise have survived the cancellation — otherwise
+	// this lock sits held for the rest of lockTTL for no reason.
+	var lockCount int
+	if err := db.QueryRowContext(context.Background(), `SELECT count(*) FROM sync_locks WHERE application = 'widget-api'`).Scan(&lockCount); err != nil {
+		t.Fatalf("count sync_locks: %v", err)
+	}
+	if lockCount != 0 {
+		t.Fatalf("expected the lock to be released despite the mid-deploy context cancellation, got %d rows", lockCount)
 	}
 }
 

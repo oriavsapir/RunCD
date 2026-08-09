@@ -11,6 +11,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"strings"
 	"testing"
 )
 
@@ -132,5 +133,112 @@ func TestPutFile_ErrorResponseSurfaced(t *testing.T) {
 	err := c.PutFile(context.Background(), "acme/deploy", "", "app/service.yaml", "bump digest", []byte("x"), "stale-sha")
 	if err == nil {
 		t.Fatal("expected error on non-2xx response")
+	}
+}
+
+func TestGetFile_ReturnsRawBytes(t *testing.T) {
+	want := []byte("image:\n  digest: sha256:abc\n")
+	server := fakeGitHub(t, func(w http.ResponseWriter, r *http.Request) {
+		if got := r.Header.Get("Accept"); got != "application/vnd.github.raw" {
+			t.Errorf("Accept header = %q, want application/vnd.github.raw", got)
+		}
+		if r.URL.Query().Get("ref") != "" {
+			t.Errorf("expected no ref query param for an empty ref, got %q", r.URL.Query().Get("ref"))
+		}
+		_, _ = w.Write(want)
+	})
+	defer server.Close()
+
+	c := newTestClient(t, server)
+	got, err := c.GetFile(context.Background(), "acme/deploy", "", "app/service.yaml")
+	if err != nil {
+		t.Fatalf("GetFile: %v", err)
+	}
+	if string(got) != string(want) {
+		t.Fatalf("content = %q, want %q", got, want)
+	}
+}
+
+func TestGetFile_PassesNonEmptyRefAsQueryParam(t *testing.T) {
+	server := fakeGitHub(t, func(w http.ResponseWriter, r *http.Request) {
+		if got := r.URL.Query().Get("ref"); got != "staging" {
+			t.Errorf("ref query param = %q, want staging", got)
+		}
+		_, _ = w.Write([]byte("content"))
+	})
+	defer server.Close()
+
+	c := newTestClient(t, server)
+	if _, err := c.GetFile(context.Background(), "acme/deploy", "staging", "app/service.yaml"); err != nil {
+		t.Fatalf("GetFile: %v", err)
+	}
+}
+
+func TestGetFile_ErrorResponseSurfacesBody(t *testing.T) {
+	server := fakeGitHub(t, func(w http.ResponseWriter, r *http.Request) {
+		http.Error(w, "not found", http.StatusNotFound)
+	})
+	defer server.Close()
+
+	c := newTestClient(t, server)
+	_, err := c.GetFile(context.Background(), "acme/deploy", "", "app/service.yaml")
+	if err == nil {
+		t.Fatal("expected error on non-200 response")
+	}
+	if !strings.Contains(err.Error(), "not found") {
+		t.Fatalf("expected the error body to be surfaced, got: %v", err)
+	}
+}
+
+func TestGetFileWithSHA_RejectsNonBase64Encoding(t *testing.T) {
+	server := fakeGitHub(t, func(w http.ResponseWriter, r *http.Request) {
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"sha":      "blobsha123",
+			"encoding": "none",
+			"content":  "raw content, not base64",
+		})
+	})
+	defer server.Close()
+
+	c := newTestClient(t, server)
+	_, _, err := c.GetFileWithSHA(context.Background(), "acme/deploy", "", "app/service.yaml")
+	if err == nil {
+		t.Fatal("expected error for an unexpected content encoding")
+	}
+}
+
+func TestGetFileWithSHA_ErrorResponseSurfaced(t *testing.T) {
+	server := fakeGitHub(t, func(w http.ResponseWriter, r *http.Request) {
+		http.Error(w, "rate limited", http.StatusForbidden)
+	})
+	defer server.Close()
+
+	c := newTestClient(t, server)
+	_, _, err := c.GetFileWithSHA(context.Background(), "acme/deploy", "", "app/service.yaml")
+	if err == nil {
+		t.Fatal("expected error on non-200 response")
+	}
+}
+
+// TestNewClient_AcceptsPKCS8Key covers NewClient's fallback parse path —
+// contents_test.go's newTestClient (and every other test in this package)
+// only ever exercises the PKCS#1 branch via x509.MarshalPKCS1PrivateKey.
+func TestNewClient_AcceptsPKCS8Key(t *testing.T) {
+	key, err := rsa.GenerateKey(rand.Reader, 2048)
+	if err != nil {
+		t.Fatalf("generate test key: %v", err)
+	}
+	pkcs8, err := x509.MarshalPKCS8PrivateKey(key)
+	if err != nil {
+		t.Fatalf("marshal PKCS8 key: %v", err)
+	}
+	pemBytes := pem.EncodeToMemory(&pem.Block{Type: "PRIVATE KEY", Bytes: pkcs8})
+
+	c, err := NewClient("123456", pemBytes)
+	if err != nil {
+		t.Fatalf("NewClient with PKCS8 key: %v", err)
+	}
+	if c.PrivateKey.N.Cmp(key.N) != 0 {
+		t.Fatal("expected the parsed key to match the original PKCS8 key")
 	}
 }

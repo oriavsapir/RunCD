@@ -171,7 +171,8 @@ func (e *Evaluator) evalSyncFailed(ctx context.Context, res reconcile.Result, si
 		return nil
 	}
 	msg := fmt.Sprintf("runcd: sync failed for %s in %s: %s", res.Unit.App, res.Unit.Project, res.FailureMessage)
-	return e.maybeNotify(ctx, res, sink, ruleKey(rule), msg)
+	_, err := e.maybeNotify(ctx, res, sink, ruleKey(rule), msg)
+	return err
 }
 
 func (e *Evaluator) evalHealthDegraded(ctx context.Context, res reconcile.Result, sink Sink, rule config.NotifyRule) error {
@@ -182,7 +183,8 @@ func (e *Evaluator) evalHealthDegraded(ctx context.Context, res reconcile.Result
 		return nil
 	}
 	msg := fmt.Sprintf("runcd: %s in %s has been Degraded since %s", res.Unit.App, res.Unit.Project, res.HealthSince.Format(time.RFC3339))
-	return e.maybeNotify(ctx, res, sink, ruleKey(rule), msg)
+	_, err := e.maybeNotify(ctx, res, sink, ruleKey(rule), msg)
+	return err
 }
 
 func (e *Evaluator) evalOutOfSyncGated(ctx context.Context, res reconcile.Result, sink Sink, rule config.NotifyRule) error {
@@ -193,7 +195,8 @@ func (e *Evaluator) evalOutOfSyncGated(ctx context.Context, res reconcile.Result
 		return nil
 	}
 	msg := fmt.Sprintf("runcd: gated sync unit %s in %s has been OutOfSync since %s", res.Unit.App, res.Unit.Project, res.StatusSince.Format(time.RFC3339))
-	return e.maybeNotify(ctx, res, sink, ruleKey(rule), msg)
+	_, err := e.maybeNotify(ctx, res, sink, ruleKey(rule), msg)
+	return err
 }
 
 // evalHealthRecovered fires once a unit's Health is no longer Degraded, but
@@ -214,48 +217,118 @@ func (e *Evaluator) evalHealthRecovered(ctx context.Context, res reconcile.Resul
 		if sibling.On != "healthDegraded" {
 			continue
 		}
+		// config.Parse always requires forMinutes on a healthDegraded rule,
+		// but Evaluator.Rules is also built directly by hand in tests (and
+		// conceivably by any future non-config.Parse caller) — ruleKey
+		// dereferences *ForMinutes unconditionally for an unnamed rule, so
+		// guard here the same way evalHealthDegraded's own early return
+		// already does, rather than relying entirely on config validation
+		// upstream.
+		if sibling.Name == "" && sibling.ForMinutes == nil {
+			continue
+		}
 		if allowed != nil && !containsStr(allowed, ruleID(sibling)) {
 			continue
 		}
-		cleared, err := e.clearIfNotified(ctx, res, ruleKey(sibling))
+		claimed, err := e.claimRecoveryClear(ctx, res, ruleKey(sibling))
 		if err != nil {
 			errs = append(errs, err)
 			continue
 		}
-		if !cleared {
+		if !claimed {
 			continue
 		}
 		msg := fmt.Sprintf("runcd: %s in %s has recovered — Health is no longer Degraded", res.Unit.App, res.Unit.Project)
-		if err := e.maybeNotify(ctx, res, sink, ruleKey(rule), msg); err != nil {
+		sent, err := e.maybeNotify(ctx, res, sink, ruleKey(rule), msg)
+		if err != nil {
+			// Send failed (or errored trying) — release the claim without
+			// clearing last_notified_at, so the sibling still reads as
+			// "notified" and the next tick retries the recovery message,
+			// instead of permanently losing it the way committing the clear
+			// unconditionally up front used to.
+			e.releaseRecoveryClaim(ctx, res, ruleKey(sibling))
+			errs = append(errs, err)
+			continue
+		}
+		if !sent {
+			// The recovery message itself was debounced (this unit already
+			// recovered once inside the debounce window) or another attempt
+			// currently holds its claim — no "recovered" message actually
+			// went out, so the sibling's debounce marker must not be cleared
+			// either, or the next Degraded fires immediately with no
+			// matching recovery notification ever having been sent. Release
+			// rather than confirm, same as a failed send: retry next tick.
+			e.releaseRecoveryClaim(ctx, res, ruleKey(sibling))
+			continue
+		}
+		if err := e.confirmRecoveryClear(ctx, res, ruleKey(sibling)); err != nil {
 			errs = append(errs, err)
 		}
 	}
 	return errors.Join(errs...)
 }
 
-// clearIfNotified resets a healthDegraded rule's debounce marker back to
-// never-notified, but only if it actually has one — a unit that was
-// Degraded but never crossed the threshold (never notified) leaves other
-// units'/rules' rows untouched. Clearing it here (rather than waiting for
-// DebounceInterval to lapse naturally) means the next Degraded episode
-// notifies as soon as it crosses the threshold again, not whenever the old
-// debounce window happens to expire.
-func (e *Evaluator) clearIfNotified(ctx context.Context, res reconcile.Result, rule string) (bool, error) {
-	var cleared bool
+// claimRecoveryClear is maybeNotify's claim/send/confirm two-phase pattern
+// applied to clearing a healthDegraded sibling's debounce marker: claiming
+// (via claim_expires_at, the same short-TTL column maybeNotify itself uses)
+// happens before the recovery message is sent, but the marker itself
+// (last_notified_at) is only actually reset to 'epoch' once send succeeds
+// (see confirmRecoveryClear) — resetting it up front, as an earlier version
+// did, meant a failed send permanently dropped the recovery notification: a
+// unit that was Degraded but never crossed the threshold (never notified)
+// still leaves other units'/rules' rows untouched, since the WHERE clause
+// only matches rows that were actually notified.
+func (e *Evaluator) claimRecoveryClear(ctx context.Context, res reconcile.Result, rule string) (bool, error) {
+	ttl := e.ClaimTTL
+	if ttl <= 0 {
+		ttl = claimTTL
+	}
+	var claimed bool
 	err := e.DB.QueryRowContext(ctx, `
-		UPDATE notification_debounce SET last_notified_at = 'epoch'
+		UPDATE notification_debounce SET claim_expires_at = now() + ($4 * interval '1 second')
 		WHERE application = $1 AND target_gcp_project = $2 AND rule = $3
 		  AND last_notified_at > 'epoch'
+		  AND (claim_expires_at IS NULL OR claim_expires_at < now())
 		RETURNING true`,
-		res.Unit.App, res.Unit.Project, rule,
-	).Scan(&cleared)
+		res.Unit.App, res.Unit.Project, rule, ttl.Seconds(),
+	).Scan(&claimed)
 	if errors.Is(err, sql.ErrNoRows) {
 		return false, nil
 	}
 	if err != nil {
-		return false, fmt.Errorf("clear debounce for %s/%s/%s: %w", res.Unit.App, res.Unit.Project, rule, err)
+		return false, fmt.Errorf("claim recovery clear for %s/%s/%s: %w", res.Unit.App, res.Unit.Project, rule, err)
 	}
-	return cleared, nil
+	return claimed, nil
+}
+
+// confirmRecoveryClear finalizes a claimRecoveryClear claim once the
+// recovery message actually sent — resetting last_notified_at back to
+// 'epoch' so the next Degraded episode notifies as soon as it crosses the
+// threshold again, not whenever the old debounce window happens to expire.
+func (e *Evaluator) confirmRecoveryClear(ctx context.Context, res reconcile.Result, rule string) error {
+	confirmCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
+	defer cancel()
+	if _, err := e.DB.ExecContext(confirmCtx, `
+		UPDATE notification_debounce SET last_notified_at = 'epoch', claim_expires_at = NULL
+		WHERE application = $1 AND target_gcp_project = $2 AND rule = $3`,
+		res.Unit.App, res.Unit.Project, rule,
+	); err != nil {
+		return fmt.Errorf("confirm recovery clear for %s/%s/%s: %w", res.Unit.App, res.Unit.Project, rule, err)
+	}
+	return nil
+}
+
+// releaseRecoveryClaim reverts a claimRecoveryClear claim after a failed
+// send — best-effort, immediate release so a retry doesn't have to wait out
+// claimTTL, same as maybeNotify's own revert path; the claim also expires on
+// its own if this Exec itself fails.
+func (e *Evaluator) releaseRecoveryClaim(ctx context.Context, res reconcile.Result, rule string) {
+	revertCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
+	defer cancel()
+	_, _ = e.DB.ExecContext(revertCtx, `
+		UPDATE notification_debounce SET claim_expires_at = NULL
+		WHERE application = $1 AND target_gcp_project = $2 AND rule = $3`,
+		res.Unit.App, res.Unit.Project, rule)
 }
 
 func autoSyncEnabled(sync config.SyncPolicy) bool {
@@ -281,7 +354,12 @@ func autoSyncEnabled(sync config.SyncPolicy) bool {
 // expiry from the debounce window means any interruption — a crash, a
 // failed revert, anything — self-heals within claimTTL instead of
 // depending on any single follow-up write succeeding.
-func (e *Evaluator) maybeNotify(ctx context.Context, res reconcile.Result, sink Sink, rule, message string) error {
+// maybeNotify's second return value distinguishes "actually sent" from
+// "debounced/claimed elsewhere/errored" — both of the latter also return a
+// nil error, so a caller that only checks err (like evalSyncFailed) can't
+// tell them apart, but evalHealthRecovered must: it uses this to decide
+// whether a sibling healthDegraded rule's debounce marker is safe to clear.
+func (e *Evaluator) maybeNotify(ctx context.Context, res reconcile.Result, sink Sink, rule, message string) (bool, error) {
 	interval := e.DebounceInterval
 	if interval <= 0 {
 		interval = DefaultDebounceInterval
@@ -312,10 +390,10 @@ func (e *Evaluator) maybeNotify(ctx context.Context, res reconcile.Result, sink 
 		res.Unit.App, res.Unit.Project, rule, interval.Seconds(), ttl.Seconds(),
 	).Scan(&claimed)
 	if errors.Is(err, sql.ErrNoRows) {
-		return nil // debounced, or another attempt currently holds the claim
+		return false, nil // debounced, or another attempt currently holds the claim
 	}
 	if err != nil {
-		return fmt.Errorf("debounce claim for %s/%s/%s: %w", res.Unit.App, res.Unit.Project, rule, err)
+		return false, fmt.Errorf("debounce claim for %s/%s/%s: %w", res.Unit.App, res.Unit.Project, rule, err)
 	}
 
 	if err := sink.Send(ctx, message); err != nil {
@@ -328,7 +406,7 @@ func (e *Evaluator) maybeNotify(ctx context.Context, res reconcile.Result, sink 
 			UPDATE notification_debounce SET claim_expires_at = NULL
 			WHERE application = $1 AND target_gcp_project = $2 AND rule = $3`,
 			res.Unit.App, res.Unit.Project, rule)
-		return fmt.Errorf("send notification for %s/%s/%s: %w", res.Unit.App, res.Unit.Project, rule, err)
+		return false, fmt.Errorf("send notification for %s/%s/%s: %w", res.Unit.App, res.Unit.Project, rule, err)
 	}
 
 	// context.WithoutCancel, same as the revert path above: the send just
@@ -344,7 +422,7 @@ func (e *Evaluator) maybeNotify(ctx context.Context, res reconcile.Result, sink 
 		WHERE application = $1 AND target_gcp_project = $2 AND rule = $3`,
 		res.Unit.App, res.Unit.Project, rule,
 	); err != nil {
-		return fmt.Errorf("confirm sent notification for %s/%s/%s: %w", res.Unit.App, res.Unit.Project, rule, err)
+		return false, fmt.Errorf("confirm sent notification for %s/%s/%s: %w", res.Unit.App, res.Unit.Project, rule, err)
 	}
-	return nil
+	return true, nil
 }

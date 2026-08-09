@@ -709,6 +709,36 @@ apps:
 	}
 }
 
+// TestParse_OverrideTrackOnly is TestParse_OverrideTrackVersion's sibling
+// for the other half of the mutually-exclusive pair — a track-only override
+// takes a materially different path through diff/reconcile (a fixed tag
+// name vs. a semver constraint resolved to the highest matching tag), so it
+// isn't provably covered just because version-only is.
+func TestParse_OverrideTrackOnly(t *testing.T) {
+	yaml := []byte(`
+environments:
+  prd:
+    projects: [proj-a, proj-b]
+defaults:
+  region: us-central1
+apps:
+  - name: widget-service
+    env: prd
+    source: { repo: git@github.com:org/deployment.git, path: services/widget-service/service.yaml }
+    overrides:
+      proj-b:
+        track: stable
+`)
+	root, err := Parse(yaml)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	o := root.Apps[0].Overrides["proj-b"]
+	if o.Track != "stable" {
+		t.Fatalf("overrides[proj-b].track not parsed: %+v", o)
+	}
+}
+
 func TestParse_OverrideRejectsBothTrackAndVersion(t *testing.T) {
 	yaml := []byte(`
 environments:

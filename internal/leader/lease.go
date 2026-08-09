@@ -105,6 +105,17 @@ func (l *Lease) runWithInterval(ctx context.Context, interval time.Duration, lea
 	for {
 		select {
 		case <-ctx.Done():
+			// Callers (cmd/controller's runLeaderElection) document and rely
+			// on Run always reporting leading(false) before returning an
+			// error — without this, a replica that was leader when its
+			// context was cancelled (e.g. graceful shutdown racing a
+			// still-in-flight reconcile pass) returns silently, leaving that
+			// invariant broken for this one return path even though the
+			// Claim-error path above already upholds it.
+			if wasLeader {
+				wasLeader = false
+				leading(false)
+			}
 			return ctx.Err()
 		case <-ticker.C:
 			if err := attempt(); err != nil {

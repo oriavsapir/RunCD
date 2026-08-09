@@ -1,6 +1,7 @@
 package rbac
 
 import (
+	"sync"
 	"testing"
 
 	"github.com/runcd/runcd/internal/expander"
@@ -167,6 +168,99 @@ roles:
 	if !CanSync(store.Get(), "bob@company.com", unit) {
 		t.Fatal("expected bob to be granted access from the reloaded config")
 	}
+}
+
+// TestCanSync_NilConfigFailsClosed checks CanSync/CanSyncFolders never panic
+// and always deny when no config has ever loaded (e.g. a controller that
+// hasn't finished booting) — fail closed, not open.
+func TestCanSync_NilConfigFailsClosed(t *testing.T) {
+	unit := expander.SyncUnit{App: "widget-api", Project: "example-prod-eu", Env: "prd"}
+	if CanSync(nil, "alice@company.com", unit) {
+		t.Fatal("expected a nil config to deny CanSync")
+	}
+	if CanSyncFolders(nil, map[string][]string{"123": {"example-prod-eu"}}, "alice@company.com", unit) {
+		t.Fatal("expected a nil config to deny CanSyncFolders even with a resolved membership map")
+	}
+}
+
+// TestHasAnyGrant_WildcardScope checks the "*" scope — the most permissive
+// form — is itself recognized as a real grant, not just the narrower
+// env/app/folder forms the other HasAnyGrant tests exercise.
+func TestHasAnyGrant_WildcardScope(t *testing.T) {
+	cfg, err := Parse([]byte(`
+roles:
+  - subject: alice@company.com
+    role: admin
+    scope: ["*"]
+`))
+	if err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+	if !HasAnyGrant(cfg, "alice@company.com") {
+		t.Fatal("expected a wildcard scope to count as a grant")
+	}
+}
+
+// TestHasAnyGrant_OneRecognizedScopeAmongMalformedOnesCounts checks a rule
+// with multiple scope entries only needs one well-formed entry to count —
+// an earlier malformed entry in the same list must not short-circuit the
+// loop into denying a later valid one.
+func TestHasAnyGrant_OneRecognizedScopeAmongMalformedOnesCounts(t *testing.T) {
+	cfg, err := Parse([]byte(`
+roles:
+  - subject: mixed@company.com
+    role: syncer
+    scope: ["evn:prod", "app:someapp", "env:prd"]
+`))
+	if err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+	if !HasAnyGrant(cfg, "mixed@company.com") {
+		t.Fatal("expected the one well-formed env:prd scope to count despite the other malformed entries")
+	}
+}
+
+// TestStore_ConcurrentAccess exercises Set/Get and
+// SetFolderMembership/FolderMembership from many goroutines while
+// CanSyncFolders reads concurrently — the whole point of atomic.Pointer here
+// is hot-reload safety under exactly this kind of concurrent access, and the
+// suite's -race flag needs something that actually contends on it.
+func TestStore_ConcurrentAccess(t *testing.T) {
+	cfg, err := Parse([]byte(`
+roles:
+  - subject: alice@company.com
+    role: admin
+    scope: ["*"]
+`))
+	if err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+	store := NewStore(cfg)
+	unit := expander.SyncUnit{App: "widget-api", Project: "example-prod-eu", Env: "prd"}
+
+	const iterations = 500
+	var wg sync.WaitGroup
+	for i := 0; i < 4; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for j := 0; j < iterations; j++ {
+				store.Set(cfg)
+				store.SetFolderMembership(map[string][]string{"123": {"example-prod-eu"}})
+			}
+		}()
+	}
+	for i := 0; i < 4; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for j := 0; j < iterations; j++ {
+				_ = CanSyncFolders(store.Get(), store.FolderMembership(), "alice@company.com", unit)
+				_ = HasAnyGrant(store.Get(), "alice@company.com")
+			}
+		}()
+	}
+	wg.Wait()
 }
 
 func TestHasAnyGrant(t *testing.T) {

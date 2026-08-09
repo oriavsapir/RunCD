@@ -133,6 +133,31 @@ func TestCompute_EnvIgnoredForJobEvenIfManaged(t *testing.T) {
 	}
 }
 
+// TestCompute_EnvVarRemovedFromLiveIsOutOfSync guards stringMapEqual's own
+// documented reasoning: a plain b[k] index would return "" for a key
+// missing from live entirely, indistinguishable from a key genuinely
+// present with an empty value — this is the "key removed" case, distinct
+// from the "value changed" case TestCompute_EnvManagedMismatchIsOutOfSync
+// already covers.
+func TestCompute_EnvVarRemovedFromLiveIsOutOfSync(t *testing.T) {
+	desired := cloudrun.ServiceState{ImageDigest: "sha256:abc", EnvVars: map[string]string{"FOO": "bar"}}
+	live := cloudrun.ServiceState{ImageDigest: "sha256:abc", EnvVars: map[string]string{}}
+	if got := Compute(desired, live, []string{"image", "env"}, "service"); got != OutOfSync {
+		t.Fatalf("expected OutOfSync (env var missing from live entirely), got %s", got)
+	}
+}
+
+func TestCompute_SecretRemovedFromLiveIsOutOfSync(t *testing.T) {
+	desired := cloudrun.ServiceState{
+		ImageDigest: "sha256:abc",
+		SecretRefs:  map[string]cloudrun.SecretRef{"DB_PASSWORD": {Secret: "db-password", Version: "3"}},
+	}
+	live := cloudrun.ServiceState{ImageDigest: "sha256:abc", SecretRefs: map[string]cloudrun.SecretRef{}}
+	if got := Compute(desired, live, []string{"image", "env"}, "service"); got != OutOfSync {
+		t.Fatalf("expected OutOfSync (secret ref missing from live entirely), got %s", got)
+	}
+}
+
 func TestCompute_EnvManagedAndEmptyIsSyncedAgainstEmptyLive(t *testing.T) {
 	desired := cloudrun.ServiceState{ImageDigest: "sha256:abc", EnvVars: map[string]string{}, SecretRefs: map[string]cloudrun.SecretRef{}}
 	live := cloudrun.ServiceState{ImageDigest: "sha256:abc"}

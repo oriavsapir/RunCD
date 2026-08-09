@@ -53,6 +53,18 @@ type Client struct {
 
 	cacheTTL time.Duration
 
+	// listFn does the real, uncached Artifact Registry call — a field
+	// (set to c.listTagsUncached in NewClient, and falling back to it at
+	// the call site if nil — same convention as folders.GCPResolver's
+	// lister field — for any Client built by a zero-value literal instead
+	// of NewClient) rather than always calling that method directly, so an
+	// in-package test can inject a counting fake and exercise ListTags's
+	// cache/singleflight/TTL behavior without a live Artifact Registry
+	// client to fake (unlike cloudrun.AdminClient/precondition.Checker,
+	// there's no interface exported for this — ListTags itself is the only
+	// public seam callers outside this package need).
+	listFn func(ctx context.Context, repository string) ([]Tag, error)
+
 	mu    sync.Mutex
 	cache map[string]tagsCacheEntry
 	group singleflight.Group
@@ -66,7 +78,9 @@ func NewClient(ctx context.Context) (*Client, error) {
 	if err != nil {
 		return nil, fmt.Errorf("build artifact registry client: %w", err)
 	}
-	return &Client{client: c, cache: make(map[string]tagsCacheEntry)}, nil
+	cl := &Client{client: c, cache: make(map[string]tagsCacheEntry)}
+	cl.listFn = cl.listTagsUncached
+	return cl, nil
 }
 
 func (c *Client) Close() error {
@@ -145,7 +159,11 @@ func (c *Client) ListTags(ctx context.Context, repository string) ([]Tag, error)
 		// timeout since WithoutCancel strips the caller's deadline too.
 		fetchCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), listTagsCallTimeout)
 		defer cancel()
-		tags, err := c.listTagsUncached(fetchCtx, repository)
+		listFn := c.listFn
+		if listFn == nil {
+			listFn = c.listTagsUncached
+		}
+		tags, err := listFn(fetchCtx, repository)
 		if err != nil {
 			return nil, err
 		}

@@ -90,6 +90,23 @@ func TestAssessService_HealthyWhenTrafficManagedButManifestOmitsIt(t *testing.T)
 	}
 }
 
+// TestAssessService_TrafficManagedButLiveNilIsProgressing exercises
+// trafficEqual's a!=nil/b==nil branch inside AssessService directly — a
+// case that shouldn't happen against a real Cloud Run client (its live
+// percent is never nil) but that trafficEqual still must not treat as a
+// match if it ever did.
+func TestAssessService_TrafficManagedButLiveNilIsProgressing(t *testing.T) {
+	desired := cloudrun.ServiceState{TrafficLatestRevisionPercent: intPtr(100)}
+	live := cloudrun.LiveService{
+		ServiceState:                cloudrun.ServiceState{},
+		HasRevisionForDesiredDigest: true,
+		LatestRevisionReady:         true,
+	}
+	if got := AssessService(desired, live, true); got != Progressing {
+		t.Fatalf("expected Progressing (desired traffic set, live nil), got %s", got)
+	}
+}
+
 func TestAssessWorkerPool_HealthyIgnoresTrafficEntirely(t *testing.T) {
 	live := cloudrun.LiveService{
 		// Traffic populated but must never be consulted for workerPool.

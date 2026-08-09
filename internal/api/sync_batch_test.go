@@ -4,12 +4,14 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"testing"
 
 	"github.com/runcd/runcd/internal/cloudrun"
 	"github.com/runcd/runcd/internal/config"
+	"github.com/runcd/runcd/internal/expander"
 	"github.com/runcd/runcd/internal/rbac"
 	"github.com/runcd/runcd/internal/reconcile"
 	"github.com/runcd/runcd/internal/testutil"
@@ -234,5 +236,94 @@ func TestHandleSyncBatch_OutOfSyncFilterExcludesAlreadySynced(t *testing.T) {
 	}
 	if _, ok := byApp["worker-svc"]; !ok {
 		t.Fatalf("expected never-reconciled worker-svc included, got %+v", byApp)
+	}
+}
+
+// TestHandleSyncBatch_OneUnitDeployFailureDoesNotBlockOthers checks the
+// batch's "one bad unit can't take down the rest" invariant against a real
+// deploy failure (not just a blocked-before-deploy precondition outcome):
+// widget-api's deploy fails against Cloud Run, worker-svc — a distinct
+// unit, sharing the same fakeCloudRun — still syncs, and the overall
+// response is 422 because at least one unit's DeployFailed is true.
+func TestHandleSyncBatch_OneUnitDeployFailureDoesNotBlockOthers(t *testing.T) {
+	h, _ := newBatchTestHandler(t)
+	cr := h.Reconciler.Load().CloudRun.(*fakeCloudRun)
+
+	// widget-api's deploy attempt fails (a real "deploy attempted and
+	// failed" outcome, not a fetch/precondition failure) while worker-svc's
+	// own state is untouched.
+	cr.deployErrFor = map[string]error{
+		"example-prod-eu/widget-api": errors.New("simulated cloud run deploy failure"),
+	}
+
+	srv := httptest.NewServer(NewMux(h))
+	defer srv.Close()
+
+	resp := postSyncBatch(t, srv.URL+"/api/sync", "admin-token")
+	defer func() { _ = resp.Body.Close() }()
+	if resp.StatusCode != http.StatusUnprocessableEntity {
+		t.Fatalf("expected 422 (one unit's deploy failed), got %d", resp.StatusCode)
+	}
+	byApp := decodeBatchResults(t, resp)
+
+	widget := byApp["widget-api"]
+	if !widget.DeployFailed || widget.Skipped != "" {
+		t.Fatalf("expected widget-api to have DeployFailed=true and not be skipped, got %+v", widget)
+	}
+	worker := byApp["worker-svc"]
+	if worker.DeployFailed || worker.Skipped != "" || worker.Status == "" {
+		t.Fatalf("expected worker-svc to still sync successfully despite widget-api's failure, got %+v", worker)
+	}
+}
+
+// TestHandleSyncBatch_ZeroGrantCallerWithOutOfSyncFilterAllForbidden pins the
+// cost-optimization path in handleSyncBatch: a caller with no grant at all
+// skips the (expensive) filterOutOfSync DB scan entirely, but every
+// candidate must still be evaluated per-unit and reported forbidden — the
+// optimization must never become an authorization bypass.
+func TestHandleSyncBatch_ZeroGrantCallerWithOutOfSyncFilterAllForbidden(t *testing.T) {
+	h, _ := newBatchTestHandler(t)
+	h.Auth = &fakeAuth{tokenToEmail: map[string]string{
+		"no-grant-token": "no-grant@company.com",
+	}}
+	srv := httptest.NewServer(NewMux(h))
+	defer srv.Close()
+
+	resp := postSyncBatch(t, srv.URL+"/api/sync?filter=outOfSync", "no-grant-token")
+	defer func() { _ = resp.Body.Close() }()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("expected 200, got %d", resp.StatusCode)
+	}
+	byApp := decodeBatchResults(t, resp)
+
+	if len(byApp) != 2 {
+		t.Fatalf("expected both units still reported (not silently dropped), got %d: %+v", len(byApp), byApp)
+	}
+	for app, r := range byApp {
+		if r.Skipped != "forbidden" {
+			t.Fatalf("app %q: expected skipped=forbidden for a zero-grant caller, got %+v", app, r)
+		}
+	}
+}
+
+// unitListerLookupOnly is unitLookupOnly's counterpart in this file — the
+// sync-batch handler specifically requires UnitLister (List), not just
+// UnitLookup (Find), to fan a bulk sync out over every candidate.
+type unitListerLookupOnly struct{}
+
+func (unitListerLookupOnly) Find(string, string) (expander.SyncUnit, bool) {
+	return expander.SyncUnit{}, false
+}
+
+func TestHandleSyncBatch_UnsupportedListingReturns501(t *testing.T) {
+	h, _ := newBatchTestHandler(t)
+	h.Units = unitListerLookupOnly{}
+	srv := httptest.NewServer(NewMux(h))
+	defer srv.Close()
+
+	resp := postSyncBatch(t, srv.URL+"/api/sync", "admin-token")
+	defer func() { _ = resp.Body.Close() }()
+	if resp.StatusCode != http.StatusNotImplemented {
+		t.Fatalf("expected 501, got %d", resp.StatusCode)
 	}
 }

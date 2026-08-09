@@ -3,6 +3,7 @@ package notify
 import (
 	"context"
 	"errors"
+	"strings"
 	"testing"
 	"time"
 
@@ -31,6 +32,26 @@ type failNTimesSink struct {
 func (f *failNTimesSink) Send(_ context.Context, message string) error {
 	if f.failures > 0 {
 		f.failures--
+		return errors.New("simulated webhook failure")
+	}
+	f.messages = append(f.messages, message)
+	return nil
+}
+
+// failOnceForSubstringSink fails exactly once, the first time Send is
+// called with a message containing substr — used to isolate a failure to
+// one specific notification (e.g. the "recovered" message) without also
+// failing the unrelated "degraded" message that necessarily precedes it in
+// a recovery test.
+type failOnceForSubstringSink struct {
+	substr   string
+	failed   bool
+	messages []string
+}
+
+func (f *failOnceForSubstringSink) Send(_ context.Context, message string) error {
+	if !f.failed && strings.Contains(message, f.substr) {
+		f.failed = true
 		return errors.New("simulated webhook failure")
 	}
 	f.messages = append(f.messages, message)
@@ -442,6 +463,112 @@ func TestEvaluate_HealthRecoveredNeverFiresWithoutAPriorNotification(t *testing.
 	}
 }
 
+// TestEvaluate_HealthRecoveredSurvivesAFailedSend regression-tests a bug
+// where the sibling healthDegraded rule's debounce marker was cleared to
+// 'epoch' before the recovered message's Send was attempted: if Send failed,
+// the marker was already cleared, so the next Evaluate call found nothing
+// to clear and the recovery notification was permanently dropped. The fix
+// only clears the marker once Send actually confirms.
+func TestEvaluate_HealthRecoveredSurvivesAFailedSend(t *testing.T) {
+	db := testutil.NewPostgres(t)
+	sink := &failOnceForSubstringSink{substr: "recovered"}
+	e := &Evaluator{DB: db, Sink: sink, Rules: []config.NotifyRule{
+		{On: "healthDegraded", ForMinutes: intPtr(10)},
+		{On: "healthRecovered"},
+	}}
+
+	unit := expander.SyncUnit{App: "widget-api", Project: "example-prod-us"}
+	degraded := reconcile.Result{Unit: unit, Health: "Degraded", HealthSince: time.Now().Add(-15 * time.Minute)}
+	if err := e.Evaluate(context.Background(), degraded); err != nil {
+		t.Fatalf("Evaluate (degraded): %v", err)
+	}
+	if len(sink.messages) != 1 {
+		t.Fatalf("expected the healthDegraded notification, got %d: %v", len(sink.messages), sink.messages)
+	}
+
+	recovered := reconcile.Result{Unit: unit, Health: "Healthy"}
+	if err := e.Evaluate(context.Background(), recovered); err == nil {
+		t.Fatal("expected Evaluate to report the simulated send failure")
+	}
+	if len(sink.messages) != 1 {
+		t.Fatalf("expected no recovered message delivered on the failed attempt, got %d: %v", len(sink.messages), sink.messages)
+	}
+
+	// Retry immediately — must actually deliver the recovered message,
+	// proving the failed attempt above never cleared the sibling's marker.
+	if err := e.Evaluate(context.Background(), recovered); err != nil {
+		t.Fatalf("retry Evaluate: %v", err)
+	}
+	if len(sink.messages) != 2 {
+		t.Fatalf("expected the recovered message to be retried and delivered, got %d: %v", len(sink.messages), sink.messages)
+	}
+}
+
+// TestEvaluate_HealthRecoveredDebouncedSendDoesNotClearSiblingMarker
+// regression-tests a bug where maybeNotify's nil error was treated as "sent"
+// even when the recovered notification was itself debounced (a unit
+// flapping Degraded->Healthy twice inside one debounce window shares one
+// "healthRecovered" debounce row across both recoveries) — the sibling
+// healthDegraded rule's marker was cleared anyway, so a subsequent Degraded
+// episode notified immediately despite no second "recovered" message having
+// actually gone out for the flap that triggered the clear.
+func TestEvaluate_HealthRecoveredDebouncedSendDoesNotClearSiblingMarker(t *testing.T) {
+	db := testutil.NewPostgres(t)
+	sink := &fakeSink{}
+	e := &Evaluator{DB: db, Sink: sink, Rules: []config.NotifyRule{
+		{On: "healthDegraded", ForMinutes: intPtr(10)},
+		{On: "healthRecovered"},
+	}, DebounceInterval: time.Hour}
+
+	unit := expander.SyncUnit{App: "widget-api", Project: "example-prod-us"}
+	degraded := reconcile.Result{Unit: unit, Health: "Degraded", HealthSince: time.Now().Add(-15 * time.Minute)}
+	recovered := reconcile.Result{Unit: unit, Health: "Healthy"}
+
+	// Episode 1: degrade, then recover. Both notify; the recovery clears the
+	// sibling's marker to epoch, which is expected and already covered by
+	// TestEvaluate_HealthRecoveredResetsDebounceForTheNextEpisode.
+	if err := e.Evaluate(context.Background(), degraded); err != nil {
+		t.Fatalf("Evaluate (degraded #1): %v", err)
+	}
+	if err := e.Evaluate(context.Background(), recovered); err != nil {
+		t.Fatalf("Evaluate (recovered #1): %v", err)
+	}
+	if len(sink.messages) != 2 {
+		t.Fatalf("expected degraded+recovered, got %d: %v", len(sink.messages), sink.messages)
+	}
+
+	// Episode 2: the sibling's epoch marker makes this degrade immediately
+	// eligible again, setting last_notified_at to "now."
+	if err := e.Evaluate(context.Background(), degraded); err != nil {
+		t.Fatalf("Evaluate (degraded #2): %v", err)
+	}
+	if len(sink.messages) != 3 {
+		t.Fatalf("expected the second degraded episode to notify, got %d: %v", len(sink.messages), sink.messages)
+	}
+
+	// The second "recovered" call shares the first's debounce row (same
+	// unit/project/rule) and is well within DebounceInterval — it must be
+	// silently debounced, not sent, and must NOT clear episode 2's
+	// just-set sibling marker.
+	if err := e.Evaluate(context.Background(), recovered); err != nil {
+		t.Fatalf("Evaluate (recovered #2, debounced): %v", err)
+	}
+	if len(sink.messages) != 3 {
+		t.Fatalf("expected the second recovered message to be debounced (no send), got %d: %v", len(sink.messages), sink.messages)
+	}
+
+	// The bug: episode 3's degrade would fire immediately here because the
+	// debounced "recovered" call above incorrectly cleared the sibling's
+	// marker anyway. Fixed behavior: still within DebounceInterval of
+	// episode 2's degraded notification, so this must stay debounced.
+	if err := e.Evaluate(context.Background(), degraded); err != nil {
+		t.Fatalf("Evaluate (degraded #3): %v", err)
+	}
+	if len(sink.messages) != 3 {
+		t.Fatalf("expected the third degraded episode to stay debounced (no matching recovered message was ever sent for episode 2's flap), got %d: %v", len(sink.messages), sink.messages)
+	}
+}
+
 // TestEvaluate_HealthRecoveredResetsDebounceForTheNextEpisode ensures a
 // second, later Degraded episode notifies again immediately once it
 // crosses the threshold, rather than waiting out the original debounce
@@ -503,6 +630,77 @@ func TestEvaluate_EnvironmentOverrideNarrowsRules(t *testing.T) {
 	}
 	if len(sink.messages) != 0 {
 		t.Fatalf("expected healthDegraded to be filtered out for dev, got %v", sink.messages)
+	}
+}
+
+// TestResolvedRules_NilOverrideMeansEveryRule covers the default case: an
+// environment with no NotifyOverride.Rules set gets every configured rule,
+// using the default sink name.
+func TestResolvedRules_NilOverrideMeansEveryRule(t *testing.T) {
+	e := &Evaluator{
+		Rules: []config.NotifyRule{
+			{On: "syncFailed"},
+			{On: "healthDegraded", ForMinutes: intPtr(10)},
+		},
+		Environments: map[string]config.Environment{
+			"prod": {},
+		},
+	}
+	got := e.ResolvedRules("default")
+	rules, ok := got["prod"]
+	if !ok {
+		t.Fatal("expected an entry for prod")
+	}
+	if rules.Sink != "default" {
+		t.Fatalf("Sink = %q, want default", rules.Sink)
+	}
+	if len(rules.Rules) != 2 || rules.Rules[0] != "syncFailed" || rules.Rules[1] != "healthDegraded" {
+		t.Fatalf("Rules = %v, want both configured rules in order", rules.Rules)
+	}
+}
+
+// TestResolvedRules_OverrideNarrowsRulesAndSelectsNamedSink covers an
+// environment override narrowing the rule subset and picking a non-default
+// sink by name — the same resolution Evaluate itself does.
+func TestResolvedRules_OverrideNarrowsRulesAndSelectsNamedSink(t *testing.T) {
+	e := &Evaluator{
+		Rules: []config.NotifyRule{
+			{On: "syncFailed"},
+			{On: "healthDegraded", ForMinutes: intPtr(10)},
+		},
+		Environments: map[string]config.Environment{
+			"dev": {Notify: config.NotifyOverride{Slack: "dev-sink", Rules: []string{"syncFailed"}}},
+		},
+	}
+	got := e.ResolvedRules("default")
+	rules, ok := got["dev"]
+	if !ok {
+		t.Fatal("expected an entry for dev")
+	}
+	if rules.Sink != "dev-sink" {
+		t.Fatalf("Sink = %q, want dev-sink", rules.Sink)
+	}
+	if len(rules.Rules) != 1 || rules.Rules[0] != "syncFailed" {
+		t.Fatalf("Rules = %v, want only syncFailed", rules.Rules)
+	}
+}
+
+// TestResolvedRules_NamedRuleUsesNameNotOn covers a named rule identified by
+// its Name rather than its bare On (ruleID's own precedence).
+func TestResolvedRules_NamedRuleUsesNameNotOn(t *testing.T) {
+	e := &Evaluator{
+		Rules: []config.NotifyRule{
+			{On: "healthDegraded", Name: "early-warning", ForMinutes: intPtr(5)},
+			{On: "healthDegraded", Name: "escalation", ForMinutes: intPtr(60)},
+		},
+		Environments: map[string]config.Environment{
+			"prod": {Notify: config.NotifyOverride{Rules: []string{"escalation"}}},
+		},
+	}
+	got := e.ResolvedRules("default")
+	rules := got["prod"]
+	if len(rules.Rules) != 1 || rules.Rules[0] != "escalation" {
+		t.Fatalf("Rules = %v, want only escalation", rules.Rules)
 	}
 }
 

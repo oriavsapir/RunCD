@@ -1,5 +1,6 @@
 import type {
   BatchSyncResult,
+  Orphan,
   RbacRule,
   RuntimeConfig,
   SyncEvent,
@@ -40,7 +41,15 @@ function errorMessage(status: number, contentType: string | null, body: string):
   return trimmed;
 }
 
-async function request<T>(path: string, init?: RequestInit): Promise<T> {
+// requestWithStatus is request<T>'s actual implementation, plus the raw
+// response status alongside the parsed body. Almost every caller only
+// needs the body (see request<T> below) — listOrphans is the one exception,
+// since handleOrphans uses 206 vs. 200 to mean "this scan may be
+// incomplete," a distinction the body alone can't carry.
+async function requestWithStatus<T>(
+  path: string,
+  init?: RequestInit,
+): Promise<{ body: T; status: number }> {
   const res = await fetch(`${API_BASE_URL}${path}`, {
     ...init,
     credentials: "include",
@@ -57,9 +66,26 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
     );
   }
   if (res.status === 204) {
-    return undefined as T;
+    return { body: undefined as T, status: res.status };
   }
-  return (await res.json()) as T;
+  try {
+    return { body: (await res.json()) as T, status: res.status };
+  } catch {
+    // A 200 with a malformed/empty body (e.g. a proxy misconfiguration, or
+    // a truncated response) would otherwise surface JSON.parse's raw
+    // "Unexpected end of JSON input" to the user — the same class of
+    // problem errorMessage() already handles for non-OK responses, so a
+    // successful-status response deserves the same friendly treatment.
+    throw new ApiError(
+      `Unexpected server response (HTTP ${res.status}) — try refreshing the page.`,
+      res.status,
+    );
+  }
+}
+
+async function request<T>(path: string, init?: RequestInit): Promise<T> {
+  const { body } = await requestWithStatus<T>(path, init);
+  return body;
 }
 
 export function listUnits(): Promise<Unit[]> {
@@ -97,6 +123,21 @@ export function syncUnit(
     `/api/sync/${encodeURIComponent(project)}/${encodeURIComponent(app)}`,
     { method: "POST" },
   );
+}
+
+// listOrphans, unlike every other call here, needs the raw response status
+// rather than just the parsed body: handleOrphans returns 206 (not 200)
+// when some but not all project/region scans failed, so the result is
+// only a partial view of the fleet — worth telling the user, not silently
+// indistinguishable from a complete scan that found nothing. Built on
+// requestWithStatus rather than a second hand-rolled fetch, so it still
+// gets request<T>'s malformed-body/204 handling for free.
+export async function listOrphans(): Promise<{
+  orphans: Orphan[];
+  partial: boolean;
+}> {
+  const { body, status } = await requestWithStatus<Orphan[]>("/api/orphans");
+  return { orphans: body ?? [], partial: status === 206 };
 }
 
 export function syncBatch(opts: {

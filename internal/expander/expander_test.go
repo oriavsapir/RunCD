@@ -117,6 +117,44 @@ apps:
 	}
 }
 
+// TestExpand_OverrideTrackPropagatesToOneProjectOnly is
+// TestExpand_OverrideTrackVersionPropagatesToOneProjectOnly's sibling for
+// track (rather than version) — Expand copies whichever of the two is set
+// verbatim onto the one project's SyncUnit, and only that one.
+func TestExpand_OverrideTrackPropagatesToOneProjectOnly(t *testing.T) {
+	root, err := config.Parse([]byte(`
+environments:
+  prd:
+    projects: [proj-a, proj-b]
+    region: us-central1
+defaults:
+  region: us-central1
+apps:
+  - name: widget-service
+    env: prd
+    source: { repo: git@github.com:org/deployment.git, path: services/widget-service/service.yaml }
+    overrides:
+      proj-b: { track: stable }
+`))
+	if err != nil {
+		t.Fatalf("fixture parse: %v", err)
+	}
+	units, err := Expand(root)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	byProject := map[string]SyncUnit{}
+	for _, u := range units {
+		byProject[u.Project] = u
+	}
+	if got := byProject["proj-a"]; got.Track != "" || got.Version != "" {
+		t.Fatalf("proj-a should have no override, got track=%q version=%q", got.Track, got.Version)
+	}
+	if got := byProject["proj-b"]; got.Track != "stable" || got.Version != "" {
+		t.Fatalf("proj-b: expected track=stable version=\"\", got track=%q version=%q", got.Track, got.Version)
+	}
+}
+
 func TestExpand_InvalidOverrideProjectRejected(t *testing.T) {
 	root, err := config.Parse([]byte(`
 environments:

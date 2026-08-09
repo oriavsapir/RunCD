@@ -39,6 +39,43 @@ describe("UnitTable", () => {
     expect(screen.getByText("widget-api")).toBeInTheDocument();
     expect(screen.getByText("notification-service")).toBeInTheDocument();
   });
+
+  it("places each app's row under its own environment's table, not a shared one", () => {
+    render(
+      <UnitTable
+        units={[
+          unit({ app: "widget-api", project: "example-prod-eu", env: "prd" }),
+          unit({ app: "notification-service", project: "example-dev-01", env: "dev" }),
+        ]}
+      />,
+    );
+    const prdSection = screen.getByText("prd").closest("section")!;
+    const devSection = screen.getByText("dev").closest("section")!;
+    expect(
+      prdSection.querySelector("tbody")?.textContent,
+    ).toContain("widget-api");
+    expect(
+      prdSection.querySelector("tbody")?.textContent,
+    ).not.toContain("notification-service");
+    expect(
+      devSection.querySelector("tbody")?.textContent,
+    ).toContain("notification-service");
+  });
+
+  it("sorts rows within an environment by project\\x00app, not project alone", () => {
+    render(
+      <UnitTable
+        units={[
+          unit({ app: "z-app", project: "a-project", env: "prd" }),
+          unit({ app: "a-app", project: "a-project", env: "prd" }),
+        ]}
+      />,
+    );
+    const rows = screen.getAllByRole("row").slice(1); // drop header row
+    const appOrder = rows.map((r) => r.textContent);
+    expect(appOrder[0]).toContain("a-app");
+    expect(appOrder[1]).toContain("z-app");
+  });
 });
 
 describe("UnitTree", () => {

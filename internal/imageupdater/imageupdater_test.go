@@ -2,6 +2,7 @@ package imageupdater
 
 import (
 	"context"
+	"errors"
 	"testing"
 )
 
@@ -128,5 +129,53 @@ func TestUpdate_ResolveErrorSurfaced(t *testing.T) {
 	}
 	if gh.putCalls != 0 {
 		t.Fatalf("expected no commit on resolve failure, got %d", gh.putCalls)
+	}
+}
+
+// TestUpdate_FetchErrorSurfaced covers GetFileWithSHA itself failing (e.g. a
+// transient GitHub API error, or the manifest having been deleted).
+func TestUpdate_FetchErrorSurfaced(t *testing.T) {
+	gh := &fakeGitHub{getErr: errors.New("boom")}
+	resolver := fakeResolver{tags: []Tag{{Name: "stable", Digest: digestB}}}
+
+	if _, err := Update(context.Background(), gh, resolver, Manifest{Repo: "acme/deploy", Path: "app/service.yaml"}); err == nil {
+		t.Fatal("expected error when the manifest fetch fails")
+	}
+	if gh.putCalls != 0 {
+		t.Fatalf("expected no commit on fetch failure, got %d", gh.putCalls)
+	}
+}
+
+// TestUpdate_UnparsableManifestSurfacesError covers a manifest that fails
+// manifest.Parse (malformed YAML, or one that fails §5.1's validation) —
+// Update must not attempt to resolve or commit against it.
+func TestUpdate_UnparsableManifestSurfacesError(t *testing.T) {
+	gh := &fakeGitHub{content: []byte("not: [valid"), sha: "blobsha"}
+	resolver := fakeResolver{tags: []Tag{{Name: "stable", Digest: digestB}}}
+
+	if _, err := Update(context.Background(), gh, resolver, Manifest{Repo: "acme/deploy", Path: "app/service.yaml"}); err == nil {
+		t.Fatal("expected error for a manifest that fails to parse")
+	}
+	if gh.putCalls != 0 {
+		t.Fatalf("expected no commit for an unparsable manifest, got %d", gh.putCalls)
+	}
+}
+
+// TestUpdate_CommitErrorSurfaced covers PutFile failing — the in-scope half
+// of "Contents:write permission missing should fail per-manifest, not
+// crash": Update must return the wrapped error rather than panicking or
+// silently swallowing it. The "logged, not crash" half (the caller not
+// aborting the whole reconcile pass) lives in cmd/controller, out of scope
+// for this package.
+func TestUpdate_CommitErrorSurfaced(t *testing.T) {
+	gh := &fakeGitHub{content: manifestYAML(), sha: "blobsha", putErr: errors.New("403: Resource not accessible by integration")}
+	resolver := fakeResolver{tags: []Tag{{Name: "stable", Digest: digestB}}}
+
+	_, err := Update(context.Background(), gh, resolver, Manifest{Repo: "acme/deploy", Path: "app/service.yaml"})
+	if err == nil {
+		t.Fatal("expected error when PutFile fails")
+	}
+	if gh.putCalls != 1 {
+		t.Fatalf("expected exactly one attempted commit, got %d", gh.putCalls)
 	}
 }

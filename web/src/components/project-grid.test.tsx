@@ -71,4 +71,40 @@ describe("ProjectGrid", () => {
     await userEvent.click(screen.getByText("example-prod-eu"));
     expect(onSelectProject).toHaveBeenCalledWith("example-prod-eu");
   });
+
+  it("renders the synced/out-of-sync/observing badges and the needs-attention flag", () => {
+    render(
+      <ProjectGrid
+        units={[
+          unit({ app: "a", project: "proj", status: "Synced" }),
+          unit({ app: "b", project: "proj", status: "OutOfSync" }),
+          unit({
+            app: "c",
+            project: "proj",
+            status: "Degraded",
+            health: "Degraded",
+          }),
+          unit({ app: "d", project: "proj", status: "OutOfSync", observing: true }),
+        ]}
+        onSelectProject={vi.fn()}
+      />,
+    );
+    expect(screen.getByText(/4 apps/)).toBeInTheDocument();
+    expect(screen.getByText(/1 synced/)).toBeInTheDocument();
+    expect(screen.getByText(/2 out of sync/)).toBeInTheDocument();
+    expect(screen.getByText(/1 observing/)).toBeInTheDocument();
+    expect(screen.getByText(/1 needs attention/i)).toBeInTheDocument();
+  });
+
+  it("omits the needs-attention flag and count badges for a fully healthy project", () => {
+    render(
+      <ProjectGrid
+        units={[unit({ app: "a", project: "proj", status: "Synced" })]}
+        onSelectProject={vi.fn()}
+      />,
+    );
+    expect(screen.queryByText(/needs attention/i)).not.toBeInTheDocument();
+    expect(screen.queryByText(/out of sync/i)).not.toBeInTheDocument();
+    expect(screen.queryByText(/observing/i)).not.toBeInTheDocument();
+  });
 });

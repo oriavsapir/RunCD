@@ -16,9 +16,27 @@ describe("StatusBadge", () => {
     },
   );
 
-  it("falls back gracefully for an unrecognized value instead of crashing", () => {
-    render(<StatusBadge value="SomethingNew" />);
+  it("spins the icon for Progressing but not for a settled status like Synced", () => {
+    const { container: progressingContainer } = render(
+      <StatusBadge value="Progressing" />,
+    );
+    expect(
+      progressingContainer.querySelector("svg.animate-spin"),
+    ).not.toBeNull();
+
+    const { container: syncedContainer } = render(<StatusBadge value="Synced" />);
+    expect(syncedContainer.querySelector("svg.animate-spin")).toBeNull();
+  });
+
+  it("falls back gracefully for an unrecognized value instead of crashing, using the same styling as Missing", () => {
+    const { container: unknownContainer } = render(
+      <StatusBadge value="SomethingNew" />,
+    );
     expect(screen.getByText("SomethingNew")).toBeInTheDocument();
+    const { container: missingContainer } = render(<StatusBadge value="Missing" />);
+    const unknownBadge = unknownContainer.querySelector("span");
+    const missingBadge = missingContainer.querySelector("span");
+    expect(unknownBadge?.className).toBe(missingBadge?.className);
   });
 });
 

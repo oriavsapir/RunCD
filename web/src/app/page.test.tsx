@@ -176,4 +176,64 @@ describe("Home", () => {
 
     expect(replaceMock).not.toHaveBeenCalled();
   });
+
+  it("shows an error banner when the units fetch fails", async () => {
+    vi.spyOn(api, "listUnits").mockRejectedValue(new Error("backend unreachable"));
+
+    render(<Home />);
+
+    await waitFor(() =>
+      expect(screen.getByText(/failed to load sync units/i)).toBeInTheDocument(),
+    );
+    expect(screen.getByText("backend unreachable")).toBeInTheDocument();
+  });
+
+  it("shows stat tile counts, including the 'other' bucket for units matching no tile", async () => {
+    vi.spyOn(api, "listUnits").mockResolvedValue([
+      unit({ app: "a", status: "Synced", health: "Healthy" }),
+      unit({ app: "b", status: "OutOfSync", health: "Missing" }),
+      unit({ app: "c", status: "Invalid", health: "Invalid" }),
+    ]);
+
+    render(<Home />);
+
+    await waitFor(() => expect(screen.getByText("Total")).toBeInTheDocument());
+    expect(screen.getByText("3")).toBeInTheDocument(); // Total
+    expect(screen.getByText("Synced")).toBeInTheDocument();
+    expect(screen.getByText("Out of sync")).toBeInTheDocument();
+    // "c" (Invalid/Invalid) matches none of the STAT_TILES, so it's
+    // accounted for separately rather than silently missing from Total.
+    expect(
+      screen.getByText(/other \(pending\/missing\/invalid\)/i),
+    ).toBeInTheDocument();
+  });
+
+  it("displays the most recently fetched units when a stale request resolves after a newer refresh", async () => {
+    let resolveFirst!: (units: Unit[]) => void;
+    const first = new Promise<Unit[]>((res) => {
+      resolveFirst = res;
+    });
+    vi.spyOn(api, "listUnits")
+      .mockImplementationOnce(() => first)
+      .mockImplementationOnce(() =>
+        Promise.resolve([unit({ app: "fresh-app", project: "fresh-project" })]),
+      );
+
+    render(<Home />);
+
+    await userEvent.click(screen.getByRole("button", { name: /refresh/i }));
+
+    await waitFor(() =>
+      expect(screen.getByText("fresh-project")).toBeInTheDocument(),
+    );
+
+    // The stale first response arrives late — it must not clobber the
+    // newer data already on screen.
+    resolveFirst([unit({ app: "stale-app", project: "stale-project" })]);
+    await Promise.resolve();
+    await Promise.resolve();
+
+    expect(screen.getByText("fresh-project")).toBeInTheDocument();
+    expect(screen.queryByText("stale-project")).not.toBeInTheDocument();
+  });
 });

@@ -135,6 +135,24 @@ func TestResolve_PerServiceTagPicksHighest(t *testing.T) {
 	}
 }
 
+// TestResolve_TrustsPrefixedTagOutrightWhenNoBareTagExists covers the one
+// case with nothing to compare a prefixed tag's digest against: an image
+// that only ever gets its own per-service tag, with no repo-wide/global
+// bump step touching it at all. There, a prefixed match is trusted outright
+// rather than falling through to "no tag satisfies version" — a bare tag's
+// absence isn't evidence the prefixed one is stale, just that this image
+// isn't part of a monorepo's global tagging convention.
+func TestResolve_TrustsPrefixedTagOutrightWhenNoBareTagExists(t *testing.T) {
+	tags := []Tag{{Name: "widget-service-v0.323.1", Digest: "sha256:only"}}
+	got, err := Resolve(tags, "", "0", "widget-service")
+	if err != nil {
+		t.Fatalf("resolve: %v", err)
+	}
+	if got != "sha256:only" {
+		t.Fatalf("got %q, want sha256:only (trusted outright, no bare tag to compare against)", got)
+	}
+}
+
 func TestResolve_FallsBackToBareTagsWhenNoPrefixedTagExists(t *testing.T) {
 	// An app not using the per-service monorepo convention keeps resolving
 	// bare version tags exactly as before.

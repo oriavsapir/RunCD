@@ -285,6 +285,9 @@ func TestEnvStateFromContainers_SplitsPlainAndSecretSourced(t *testing.T) {
 		},
 	}}
 	vars, secrets := envStateFromContainers(containers)
+	if len(vars) != 1 || len(secrets) != 1 {
+		t.Fatalf("expected exactly one plain var and one secret ref, got vars=%+v secrets=%+v", vars, secrets)
+	}
 	if vars["LOG_LEVEL"] != "debug" {
 		t.Fatalf("expected plain var parsed, got %+v", vars)
 	}
@@ -314,5 +317,137 @@ func TestBuildEnvVars_DeterministicOrder(t *testing.T) {
 	built := buildEnvVars(vars, nil)
 	if len(built) != 2 || built[0].GetName() != "ALPHA" || built[1].GetName() != "ZEBRA" {
 		t.Fatalf("expected alphabetical order for deterministic output, got %+v", built)
+	}
+}
+
+func TestContainerImage_ReturnsFirstContainerImage(t *testing.T) {
+	containers := []*runpb.Container{{Image: "us-docker.pkg.dev/proj/repo/svc@sha256:" + hex64}}
+	if got := containerImage(containers); got != containers[0].Image {
+		t.Fatalf("got %q, want %q", got, containers[0].Image)
+	}
+}
+
+func TestConditionState_ReconcilingCondition(t *testing.T) {
+	cond := &runpb.Condition{State: runpb.Condition_CONDITION_RECONCILING}
+	ready, creating := conditionState(cond, false)
+	if ready || !creating {
+		t.Fatalf("expected ready=false, creating=true for a reconciling condition, got ready=%v creating=%v", ready, creating)
+	}
+}
+
+func TestConditionState_PendingCondition(t *testing.T) {
+	cond := &runpb.Condition{State: runpb.Condition_CONDITION_PENDING}
+	ready, creating := conditionState(cond, false)
+	if ready || !creating {
+		t.Fatalf("expected ready=false, creating=true for a pending condition, got ready=%v creating=%v", ready, creating)
+	}
+}
+
+// TestLastPathSegment_NoSlashReturnsWholeString guards the fallback branch —
+// a malformed/unexpected resource name with no "/" must still return
+// something usable rather than panicking on the slice index.
+func TestLastPathSegment_NoSlashReturnsWholeString(t *testing.T) {
+	if got := lastPathSegment("my-service"); got != "my-service" {
+		t.Fatalf("got %q, want %q", got, "my-service")
+	}
+}
+
+func TestResolveImageDigest_EmptyImageReturnsEmpty(t *testing.T) {
+	c := &GCPAdminClient{}
+	got, err := c.resolveImageDigest(context.Background(), "")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if got != "" {
+		t.Fatalf("got %q, want empty string", got)
+	}
+}
+
+func TestResolveImageDigest_FullDigestReferenceSkipsRegistryLookup(t *testing.T) {
+	c := &GCPAdminClient{}
+	image := "us-docker.pkg.dev/proj/repo/svc@sha256:" + hex64
+	got, err := c.resolveImageDigest(context.Background(), image)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if got != "sha256:"+hex64 {
+		t.Fatalf("got %q, want %q", got, "sha256:"+hex64)
+	}
+}
+
+func TestResolveImageDigest_BareDigestWithNoAtSignSkipsRegistryLookup(t *testing.T) {
+	c := &GCPAdminClient{}
+	got, err := c.resolveImageDigest(context.Background(), "sha256:"+hex64)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if got != "sha256:"+hex64 {
+		t.Fatalf("got %q, want %q", got, "sha256:"+hex64)
+	}
+}
+
+// TestLiveServiceFromService_DigestPinnedImageNeedsNoRegistryClient exercises
+// liveServiceFromService end to end on a zero-value client — safe only
+// because a digest-pinned image never reaches the Artifact Registry lookup
+// path (see resolveImageDigest), so no live network/credentials are needed.
+func TestLiveServiceFromService_DigestPinnedImageNeedsNoRegistryClient(t *testing.T) {
+	c := &GCPAdminClient{}
+	svc := &runpb.Service{
+		Template: &runpb.RevisionTemplate{
+			Containers: []*runpb.Container{{Image: "us-docker.pkg.dev/proj/repo/svc@sha256:" + hex64}},
+		},
+		Traffic: []*runpb.TrafficTarget{
+			{Type: runpb.TrafficTargetAllocationType_TRAFFIC_TARGET_ALLOCATION_TYPE_LATEST, Percent: 100},
+		},
+		TerminalCondition: &runpb.Condition{State: runpb.Condition_CONDITION_SUCCEEDED},
+	}
+	live, err := c.liveServiceFromService(context.Background(), svc, "sha256:"+hex64)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if live.ImageDigest != "sha256:"+hex64 {
+		t.Fatalf("got digest %q", live.ImageDigest)
+	}
+	if !live.HasRevisionForDesiredDigest || !live.LatestRevisionReady || live.LatestRevisionCreating {
+		t.Fatalf("unexpected live state: %+v", live)
+	}
+	if live.TrafficLatestRevisionPercent == nil || *live.TrafficLatestRevisionPercent != 100 {
+		t.Fatalf("expected traffic percent 100, got %+v", live.TrafficLatestRevisionPercent)
+	}
+}
+
+func TestLiveServiceFromService_DigestMismatchIsNotHasRevisionForDesiredDigest(t *testing.T) {
+	c := &GCPAdminClient{}
+	svc := &runpb.Service{
+		Template: &runpb.RevisionTemplate{
+			Containers: []*runpb.Container{{Image: "us-docker.pkg.dev/proj/repo/svc@sha256:" + hex64}},
+		},
+	}
+	live, err := c.liveServiceFromService(context.Background(), svc, "sha256:0000000000000000000000000000000000000000000000000000000000000000")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if live.HasRevisionForDesiredDigest {
+		t.Fatal("expected HasRevisionForDesiredDigest=false on a digest mismatch")
+	}
+}
+
+func TestLiveServiceFromWorkerPool_DigestPinnedImageNeedsNoRegistryClient(t *testing.T) {
+	c := &GCPAdminClient{}
+	wp := &runpb.WorkerPool{
+		Template: &runpb.WorkerPoolRevisionTemplate{
+			Containers: []*runpb.Container{{Image: "us-docker.pkg.dev/proj/repo/svc@sha256:" + hex64}},
+		},
+		TerminalCondition: &runpb.Condition{State: runpb.Condition_CONDITION_SUCCEEDED},
+	}
+	live, err := c.liveServiceFromWorkerPool(context.Background(), wp, "sha256:"+hex64)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !live.HasRevisionForDesiredDigest || !live.LatestRevisionReady {
+		t.Fatalf("unexpected live state: %+v", live)
+	}
+	if live.TrafficLatestRevisionPercent != nil {
+		t.Fatalf("expected no traffic concept for workerPool, got %+v", live.TrafficLatestRevisionPercent)
 	}
 }

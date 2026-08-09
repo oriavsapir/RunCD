@@ -224,6 +224,53 @@ func TestRun_ErrorDuringRenewalSignalsLeadershipLoss(t *testing.T) {
 	}
 }
 
+// TestRun_CancelWhileLeaderReportsLeadershipLossBeforeReturning
+// regression-tests a split-brain bug symmetric to
+// TestRun_ErrorDuringRenewalSignalsLeadershipLoss: cancelling ctx while this
+// replica IS leader used to return ctx.Err() without ever calling
+// leading(false), breaking the invariant cmd/controller's runLeaderElection
+// explicitly documents and relies on ("lease.Run itself already reports
+// leading(false) before returning an error").
+func TestRun_CancelWhileLeaderReportsLeadershipLossBeforeReturning(t *testing.T) {
+	db := testutil.NewPostgres(t)
+	l := New(db, "replica-a")
+	l.ttl = 100 * time.Millisecond
+
+	ctx, cancel := context.WithCancel(context.Background())
+
+	events := make(chan bool, 4)
+	done := make(chan error, 1)
+	go func() {
+		done <- l.runWithInterval(ctx, 20*time.Millisecond, func(leading bool) {
+			events <- leading
+		})
+	}()
+
+	select {
+	case leading := <-events:
+		if !leading {
+			t.Fatal("expected first event to be becoming leader")
+		}
+	case <-time.After(time.Second):
+		t.Fatal("timed out waiting for initial leadership event")
+	}
+
+	cancel()
+
+	select {
+	case leading := <-events:
+		if leading {
+			t.Fatal("expected a leadership-loss event on context cancellation while leading")
+		}
+	case <-time.After(time.Second):
+		t.Fatal("timed out waiting for the leadership-loss event after ctx cancellation")
+	}
+
+	if err := <-done; err == nil {
+		t.Fatal("expected Run to return context.Canceled")
+	}
+}
+
 func TestRun_LosesLeadershipIfRenewalStops(t *testing.T) {
 	db := testutil.NewPostgres(t)
 	a := New(db, "replica-a")

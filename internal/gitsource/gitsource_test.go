@@ -14,11 +14,12 @@ import (
 type countingFetcher struct {
 	calls atomic.Int64
 	data  []byte
+	err   error
 }
 
 func (f *countingFetcher) GetFile(_ context.Context, _, _, _ string) ([]byte, error) {
 	f.calls.Add(1)
-	return f.data, nil
+	return f.data, f.err
 }
 
 type refCapturingFetcher struct {
@@ -144,5 +145,32 @@ func TestGet_RefetchesAfterCacheExpires(t *testing.T) {
 
 	if got := fetcher.calls.Load(); got != 2 {
 		t.Fatalf("expected the cache to expire and refetch, got %d calls", got)
+	}
+}
+
+// TestGet_FetchErrorIsNotCached ensures a failed fetch doesn't populate the
+// cache — otherwise a transient GitHub API error would wedge every unit
+// sharing this manifest onto that error (or, worse, onto a zero-value nil
+// manifest) until the TTL happens to expire.
+func TestGet_FetchErrorIsNotCached(t *testing.T) {
+	fetcher := &countingFetcher{err: fmt.Errorf("boom")}
+	src := &Source{Client: fetcher}
+	unit := expander.SyncUnit{App: "widget-api", Project: "p1", SourceRepo: "org/deployment", SourcePath: "services/widget-api/app.yaml"}
+
+	if _, err := src.Get(context.Background(), unit); err == nil {
+		t.Fatal("expected the fetch error to surface")
+	}
+
+	fetcher.err = nil
+	fetcher.data = []byte("manifest content")
+	data, err := src.Get(context.Background(), unit)
+	if err != nil {
+		t.Fatalf("Get after transient error cleared: %v", err)
+	}
+	if string(data) != "manifest content" {
+		t.Fatalf("expected the retry to actually fetch fresh content, got %q", data)
+	}
+	if got := fetcher.calls.Load(); got != 2 {
+		t.Fatalf("expected the failed first attempt to not be cached (2 real fetches total), got %d", got)
 	}
 }

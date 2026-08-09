@@ -66,14 +66,16 @@ export function groupEnvironments(units: Unit[]): Map<string, EnvSummary> {
 function ErrorWithRetry({
   message,
   onRetry,
+  disabled,
 }: {
   message: string;
   onRetry: () => void;
+  disabled?: boolean;
 }) {
   return (
     <div className="flex items-center justify-between gap-3">
       <p className="text-destructive text-sm">{message}</p>
-      <Button variant="outline" size="sm" onClick={onRetry}>
+      <Button variant="outline" size="sm" disabled={disabled} onClick={onRetry}>
         Retry
       </Button>
     </div>
@@ -239,7 +241,11 @@ export default function SettingsPage() {
           {configError ? (
             <ErrorWithRetry
               message={configError}
-              onRetry={() => setRefreshKey((k) => k + 1)}
+              disabled={refreshing}
+              onRetry={() => {
+                setRefreshing(true);
+                setRefreshKey((k) => k + 1);
+              }}
             />
           ) : !config ? (
             <Skeleton className="h-32 w-full" />
@@ -366,7 +372,11 @@ export default function SettingsPage() {
           {unitsError ? (
             <ErrorWithRetry
               message={unitsError}
-              onRetry={() => setRefreshKey((k) => k + 1)}
+              disabled={refreshing}
+              onRetry={() => {
+                setRefreshing(true);
+                setRefreshKey((k) => k + 1);
+              }}
             />
           ) : !units ? (
             <Skeleton className="h-24 w-full" />
@@ -421,7 +431,11 @@ export default function SettingsPage() {
           {rolesError ? (
             <ErrorWithRetry
               message={rolesError}
-              onRetry={() => setRefreshKey((k) => k + 1)}
+              disabled={refreshing}
+              onRetry={() => {
+                setRefreshing(true);
+                setRefreshKey((k) => k + 1);
+              }}
             />
           ) : !roles ? (
             <Skeleton className="h-24 w-full" />

@@ -71,6 +71,13 @@ func serviceYAML() []byte {
 
 type fakeCloudRun struct {
 	services map[string]*cloudrun.LiveService
+	// deployErrFor, keyed "project/name" like services, makes DeployService
+	// fail for just that unit — used to reach the "deploy actually attempted
+	// and failed" branch distinct from a blocked-before-deploy outcome (bad
+	// manifest, failed precondition), without also failing GetService's
+	// fetch (which would short-circuit to a fetch failure before deploy is
+	// ever attempted) or affecting any other unit sharing this fake.
+	deployErrFor map[string]error
 }
 
 func (f *fakeCloudRun) GetService(_ context.Context, project, _, name, _ string) (*cloudrun.LiveService, error) {
@@ -85,6 +92,9 @@ func (f *fakeCloudRun) GetJob(context.Context, string, string, string, string) (
 }
 func (f *fakeCloudRun) DeployService(_ context.Context, project, _, name string, desired cloudrun.ServiceState) error {
 	key := project + "/" + name
+	if err, ok := f.deployErrFor[key]; ok {
+		return err
+	}
 	if _, ok := f.services[key]; !ok {
 		return cloudrun.ErrNotProvisioned
 	}
@@ -374,6 +384,45 @@ func TestHandleSync_BusinessLevelErrorNotLeakedInSuccessfulResponse(t *testing.T
 	}
 	if parsed.Status != "Invalid" {
 		t.Fatalf("expected Status=Invalid, got %+v", parsed)
+	}
+}
+
+// TestHandleSync_DeployFailureReturns422 checks the branch distinct from a
+// blocked-before-deploy outcome: a deploy that was actually attempted
+// against Cloud Run and failed must surface as 422 (unlike a failed
+// precondition, which still reads as a business-level 200/Invalid) — a
+// caller gating on exit code/2xx (the CLI, CI) must not read this as
+// success. Also checks the raw deploy error text never reaches the
+// response body, same posture as the other leak tests in this file.
+func TestHandleSync_DeployFailureReturns422(t *testing.T) {
+	h, cr := newTestHandler(t)
+	cr.deployErrFor = map[string]error{
+		"example-prod-eu/widget-api": errors.New("simulated cloud run deploy failure: quota exceeded"),
+	}
+
+	srv := httptest.NewServer(NewMux(h))
+	defer srv.Close()
+
+	resp := postSync(t, srv.URL+"/api/sync/example-prod-eu/widget-api", "admin-token")
+	defer func() { _ = resp.Body.Close() }()
+	if resp.StatusCode != http.StatusUnprocessableEntity {
+		t.Fatalf("expected 422, got %d", resp.StatusCode)
+	}
+
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		t.Fatalf("read body: %v", err)
+	}
+	if strings.Contains(string(body), "quota exceeded") {
+		t.Fatalf("response body leaked raw deploy error detail: %s", body)
+	}
+
+	var parsed syncResponse
+	if err := json.Unmarshal(body, &parsed); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if parsed.Status == "Synced" {
+		t.Fatalf("expected a failed deploy to not report Synced, got %+v", parsed)
 	}
 }
 
@@ -852,6 +901,48 @@ func TestHandleOrphans_VacuousScopeForbidden(t *testing.T) {
 	}
 }
 
+// TestHandleOrphans_FolderScopeNarrowsScanToResolvedMembership checks the
+// folder-scope path end-to-end through orphans specifically (not just
+// handleSync): HasAnyGrant recognizes "folder:999" as a real grant even
+// before any membership is resolved (isRecognizedScope only checks
+// well-formedness), but the pre-scan narrowing in handleOrphans must still
+// keep the scan empty until SetFolderMembership actually resolves
+// example-prod-eu into that folder — only then does the leftover orphan in
+// that project become visible to this caller.
+func TestHandleOrphans_FolderScopeNarrowsScanToResolvedMembership(t *testing.T) {
+	h, cr := newTestHandler(t)
+	cr.services["example-prod-eu/leftover-app"] = &cloudrun.LiveService{
+		ServiceState: cloudrun.ServiceState{ImageDigest: validDigest},
+	}
+	srv := httptest.NewServer(NewMux(h))
+	defer srv.Close()
+
+	before := getWithBearer(t, srv.URL+"/api/orphans", "folder-scoped-token")
+	defer func() { _ = before.Body.Close() }()
+	if before.StatusCode != http.StatusOK {
+		t.Fatalf("expected 200 (grant recognized), got %d", before.StatusCode)
+	}
+	var beforeOrphans []orphanView
+	if err := json.NewDecoder(before.Body).Decode(&beforeOrphans); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if len(beforeOrphans) != 0 {
+		t.Fatalf("expected no orphans visible before the folder is resolved, got %+v", beforeOrphans)
+	}
+
+	h.RBAC.SetFolderMembership(map[string][]string{"999": {"example-prod-eu"}})
+
+	after := getWithBearer(t, srv.URL+"/api/orphans", "folder-scoped-token")
+	defer func() { _ = after.Body.Close() }()
+	var afterOrphans []orphanView
+	if err := json.NewDecoder(after.Body).Decode(&afterOrphans); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if len(afterOrphans) != 1 || afterOrphans[0].App != "leftover-app" {
+		t.Fatalf("expected leftover-app visible once example-prod-eu resolves as a folder member, got %+v", afterOrphans)
+	}
+}
+
 func TestHandleOrphans_RequiresAuth(t *testing.T) {
 	h, _ := newTestHandler(t)
 	srv := httptest.NewServer(NewMux(h))
@@ -1037,5 +1128,161 @@ func TestHandleUnitHistory_ReturnsSyncEventAfterSync(t *testing.T) {
 	}
 	if events[0].Trigger != "manual" || events[0].Actor != "admin@company.com" || events[0].Result != "succeeded" {
 		t.Fatalf("unexpected sync event: %+v", events[0])
+	}
+}
+
+// TestHandleUnitHistory_InvalidLimitRejected checks the limit query param's
+// validation: zero, negative, and non-numeric values must all 400 rather
+// than falling through to a query with a nonsensical LIMIT.
+func TestHandleUnitHistory_InvalidLimitRejected(t *testing.T) {
+	h, _ := newTestHandler(t)
+	srv := httptest.NewServer(NewMux(h))
+	defer srv.Close()
+
+	for _, limit := range []string{"0", "-5", "abc"} {
+		resp := getWithBearer(t, srv.URL+"/api/units/example-prod-eu/widget-api/history?limit="+limit, "admin-token")
+		func() {
+			defer func() { _ = resp.Body.Close() }()
+			if resp.StatusCode != http.StatusBadRequest {
+				t.Fatalf("limit=%q: expected 400, got %d", limit, resp.StatusCode)
+			}
+		}()
+	}
+}
+
+// failingStatusDB implements statusDB but fails every query — used to reach
+// the 500 paths in handleListUnits/handleUnitDetail/handleUnitHistory
+// (and filterOutOfSync's best-effort fallback) that a healthy Postgres
+// fixture can't exercise. Wraps the real *sql.DB rather than faking rows
+// outright, matching failingDB's existing pattern in this file for the
+// write side.
+type failingStatusDB struct {
+	real *sql.DB
+	// lastArgs captures the args passed to the most recent QueryContext
+	// call, letting a test assert what value the handler actually sent to
+	// the DB (e.g. that a limit was clamped) without needing a real query
+	// to succeed.
+	lastArgs []any
+}
+
+func (f *failingStatusDB) QueryContext(ctx context.Context, _ string, args ...any) (*sql.Rows, error) {
+	f.lastArgs = args
+	return f.real.QueryContext(ctx, "SELECT 1 FROM __simulated_read_failure__")
+}
+
+func (f *failingStatusDB) QueryRowContext(ctx context.Context, _ string, args ...any) *sql.Row {
+	f.lastArgs = args
+	return f.real.QueryRowContext(ctx, "SELECT 1 FROM __simulated_read_failure__")
+}
+
+func TestHandleListUnits_ListApplicationsErrorReturns500(t *testing.T) {
+	h, _ := newTestHandler(t)
+	db := h.Status.(*PostgresStatusStore).DB.(*sql.DB)
+	h.Status = &PostgresStatusStore{DB: &failingStatusDB{real: db}}
+
+	srv := httptest.NewServer(NewMux(h))
+	defer srv.Close()
+
+	resp := getWithBearer(t, srv.URL+"/api/units", "admin-token")
+	defer func() { _ = resp.Body.Close() }()
+	if resp.StatusCode != http.StatusInternalServerError {
+		t.Fatalf("expected 500, got %d", resp.StatusCode)
+	}
+}
+
+func TestHandleUnitDetail_GetApplicationErrorReturns500(t *testing.T) {
+	h, _ := newTestHandler(t)
+	db := h.Status.(*PostgresStatusStore).DB.(*sql.DB)
+	h.Status = &PostgresStatusStore{DB: &failingStatusDB{real: db}}
+
+	srv := httptest.NewServer(NewMux(h))
+	defer srv.Close()
+
+	resp := getWithBearer(t, srv.URL+"/api/units/example-prod-eu/widget-api", "admin-token")
+	defer func() { _ = resp.Body.Close() }()
+	if resp.StatusCode != http.StatusInternalServerError {
+		t.Fatalf("expected 500, got %d", resp.StatusCode)
+	}
+}
+
+func TestHandleUnitHistory_SyncHistoryErrorReturns500(t *testing.T) {
+	h, _ := newTestHandler(t)
+	db := h.Status.(*PostgresStatusStore).DB.(*sql.DB)
+	failing := &failingStatusDB{real: db}
+	h.Status = &PostgresStatusStore{DB: failing}
+
+	srv := httptest.NewServer(NewMux(h))
+	defer srv.Close()
+
+	resp := getWithBearer(t, srv.URL+"/api/units/example-prod-eu/widget-api/history", "admin-token")
+	defer func() { _ = resp.Body.Close() }()
+	if resp.StatusCode != http.StatusInternalServerError {
+		t.Fatalf("expected 500, got %d", resp.StatusCode)
+	}
+}
+
+// TestHandleUnitHistory_LimitClampedToMax checks ?limit=99999 is clamped to
+// maxHistoryLimit before ever reaching the query, not passed through
+// verbatim — sync_events is append-only and never pruned (§5.2), so an
+// unbounded LIMIT would defeat the whole point of defaultHistoryLimit/
+// maxHistoryLimit existing.
+func TestHandleUnitHistory_LimitClampedToMax(t *testing.T) {
+	h, _ := newTestHandler(t)
+	db := h.Status.(*PostgresStatusStore).DB.(*sql.DB)
+	failing := &failingStatusDB{real: db}
+	h.Status = &PostgresStatusStore{DB: failing}
+
+	srv := httptest.NewServer(NewMux(h))
+	defer srv.Close()
+
+	resp := getWithBearer(t, srv.URL+"/api/units/example-prod-eu/widget-api/history?limit=99999", "admin-token")
+	defer func() { _ = resp.Body.Close() }()
+	if resp.StatusCode != http.StatusInternalServerError {
+		t.Fatalf("expected 500 (query fails, but only after the limit is computed), got %d", resp.StatusCode)
+	}
+	if len(failing.lastArgs) != 3 {
+		t.Fatalf("expected 3 query args (app, project, limit), got %+v", failing.lastArgs)
+	}
+	if got := failing.lastArgs[2]; got != maxHistoryLimit {
+		t.Fatalf("expected limit clamped to %d, got %v", maxHistoryLimit, got)
+	}
+}
+
+// unitLookupOnly implements UnitLookup but deliberately not UnitLister —
+// exercising handleListUnits/handleSyncBatch's "unit listing not supported"
+// 501 branch, which StaticUnits (used everywhere else in this file) always
+// satisfies and so never reaches.
+type unitLookupOnly struct{ unit expander.SyncUnit }
+
+func (u unitLookupOnly) Find(app, project string) (expander.SyncUnit, bool) {
+	if u.unit.App == app && u.unit.Project == project {
+		return u.unit, true
+	}
+	return expander.SyncUnit{}, false
+}
+
+func TestHandleListUnits_UnsupportedListingReturns501(t *testing.T) {
+	h, _ := newTestHandler(t)
+	h.Units = unitLookupOnly{unit: expander.SyncUnit{App: "widget-api", Project: "example-prod-eu", Env: "prd"}}
+	srv := httptest.NewServer(NewMux(h))
+	defer srv.Close()
+
+	resp := getWithBearer(t, srv.URL+"/api/units", "admin-token")
+	defer func() { _ = resp.Body.Close() }()
+	if resp.StatusCode != http.StatusNotImplemented {
+		t.Fatalf("expected 501, got %d", resp.StatusCode)
+	}
+}
+
+func TestHandleOrphans_UnsupportedListingReturns501(t *testing.T) {
+	h, _ := newTestHandler(t)
+	h.Units = unitLookupOnly{unit: expander.SyncUnit{App: "widget-api", Project: "example-prod-eu", Env: "prd"}}
+	srv := httptest.NewServer(NewMux(h))
+	defer srv.Close()
+
+	resp := getWithBearer(t, srv.URL+"/api/orphans", "admin-token")
+	defer func() { _ = resp.Body.Close() }()
+	if resp.StatusCode != http.StatusNotImplemented {
+		t.Fatalf("expected 501, got %d", resp.StatusCode)
 	}
 }
