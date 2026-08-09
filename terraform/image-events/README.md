@@ -77,6 +77,8 @@ visible sooner.
 | `cloud_run_service_name` | Name of the already-deployed controller Cloud Run service. | `string` | `"runcd"` |
 | `trigger_name` | Name for the Eventarc trigger resource. | `string` | `"runcd-image-events"` |
 | `service_account_id` | Account ID (local part) for the trigger's dedicated service account. | `string` | `"runcd-image-events"` |
+| `manage_audit_config` | Manage the `DATA_WRITE` audit log config for `artifactregistry.googleapis.com` in this project. Set `false` if that config is already managed elsewhere — this resource is authoritative for whatever it's scoped to and will otherwise fight over/overwrite an existing config. | `bool` | `true` |
+| `enable_apis` | Enable `eventarc.googleapis.com` in `project_id`. Turn off if API enablement is centrally managed elsewhere. | `bool` | `true` |
 
 ## Outputs
 

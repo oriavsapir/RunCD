@@ -26,7 +26,15 @@ data "google_cloud_run_v2_service" "target" {
   name     = var.cloud_run_service_name
 }
 
-# A dedicated identity, not the shared controller-sa module's SA — this one
+resource "google_project_service" "eventarc_api" {
+  count = var.enable_apis ? 1 : 0
+
+  project            = var.project_id
+  service            = "eventarc.googleapis.com"
+  disable_on_destroy = false
+}
+
+# A dedicated identity, not the controller module's SA — this one
 # only ever needs to invoke the controller's HTTP endpoint and receive
 # Eventarc events, nothing the controller SA's own broader deploy grants
 # (roles/run.developer across every target project) should be conflated
@@ -35,6 +43,8 @@ resource "google_service_account" "image_events" {
   project      = var.project_id
   account_id   = var.service_account_id
   display_name = "runcd image-events Eventarc trigger"
+
+  depends_on = [google_project_service.eventarc_api]
 }
 
 # Required for any Eventarc trigger's own service account, regardless of
@@ -77,15 +87,14 @@ data "google_project" "this" {
   project_id = var.project_id
 }
 
-# Docker-PutManifest is a Data Access ("Data Write") audit log entry, and
-# Data Access logs are OFF by default for every service except some
-# BigQuery ones — without this, the trigger below is created and looks
-# healthy, but Artifact Registry never actually emits the log entries it's
-# listening for, so it silently never fires. Scoped to just this one
-# service, not "allServices" — this resource is authoritative for whatever
-# it's scoped to, so keeping it per-service means it can't clobber some
-# unrelated service's own audit config.
+# Docker-PutManifest is a Data Access log entry, off by default — without
+# this the trigger looks healthy but never fires. Scoped to just this one
+# service, not "allServices". Gated on manage_audit_config since this
+# resource is authoritative for whatever it's scoped to — set false if this
+# audit config is already managed elsewhere.
 resource "google_project_iam_audit_config" "artifact_registry_data_write" {
+  count = var.manage_audit_config ? 1 : 0
+
   project = var.project_id
   service = "artifactregistry.googleapis.com"
   audit_log_config {
@@ -132,5 +141,6 @@ resource "google_eventarc_trigger" "image_push" {
     google_cloud_run_v2_service_iam_member.run_invoker,
     google_project_iam_member.pubsub_token_creator,
     google_project_iam_audit_config.artifact_registry_data_write,
+    google_project_service.eventarc_api,
   ]
 }

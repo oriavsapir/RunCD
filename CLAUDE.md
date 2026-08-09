@@ -76,7 +76,7 @@ CSS v4, shadcn/ui + lucide-react. Calls the Go API same-origin
 (`credentials: "include"`), relying on both sitting behind the same
 IAP-protected perimeter — no auth code of its own in the frontend.
 
-`terraform/controller-sa/` — Terraform module provisioning the shared
+`terraform/controller/` — Terraform module provisioning the shared
 controller service account (§5.5). Not invoked directly — see its
 `examples/minimal/`, which is what CI actually validates.
 

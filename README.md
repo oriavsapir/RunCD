@@ -159,10 +159,11 @@ for the full command list.
   Postgres.
 - **Dashboard:** Next.js (App Router), TypeScript, Tailwind CSS v4,
   [shadcn/ui](https://ui.shadcn.com) + [lucide-react](https://lucide.dev).
-- **Infra:** Terraform modules for the shared controller service account
-  (`terraform/controller-sa`) and the optional image-events Eventarc add-on
-  (`terraform/image-events`), Docker (distroless, non-root), GitHub
-  Actions CI.
+- **Infra:** Terraform modules — `terraform/controller` (the controller's
+  IAM identity/grants, plus optionally the Cloud Run services themselves)
+  and the optional image-events Eventarc add-on (`terraform/image-events`),
+  applied in that order — see [`terraform/README.md`](terraform/README.md).
+  Docker (distroless, non-root), GitHub Actions CI.
 
 ## Project layout
 

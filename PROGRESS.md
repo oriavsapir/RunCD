@@ -29,7 +29,7 @@ half-wired.
   - Test: `go test ./internal/manifest/... -v` — 10 table-style cases.
 
 - [x] **Terraform module shape for the controller SA** (§5.5) —
-  `terraform/controller-sa/` — a proper reusable module: `main.tf`,
+  `terraform/controller/` — a proper reusable module: `main.tf`,
   `variables.tf`, `outputs.tf`, `versions.tf` (split out separately, per
   convention), `README.md` (usage/inputs/outputs), and
   `examples/minimal/` — the module itself carries no `.terraform.lock.hcl`
@@ -39,7 +39,7 @@ half-wired.
   `actAs` grant. **Not wired to a real project** — the example uses
   placeholder project IDs, nothing points at `example-sandbox` or any real
   management project yet.
-  - Test: `cd terraform/controller-sa/examples/minimal && terraform init
+  - Test: `cd terraform/controller/examples/minimal && terraform init
     -backend=false && terraform validate` (this is what CI runs — module
     shape only, doesn't touch real GCP).
 
@@ -1264,7 +1264,7 @@ source before fixing.
     membership is resolved and permitted after — the exact hot-reload
     sequencing `main.go` performs).
 
-- [x] **Terraform** (`terraform/controller-sa/`) — new `target_folders`
+- [x] **Terraform** (`terraform/controller/`) — new `target_folders`
   variable: grants `roles/resourcemanager.folderViewer` on the folder
   itself (needed for `internal/folders`' runtime resolution to work at
   all) and resolves the folder's *current* direct child projects at
@@ -2116,8 +2116,9 @@ Dashboard, same pass:
   latest` — not pinned, config in `.golangci.yml`), `vulncheck`
   (`govulncheck`), `nilaway`, `test` (`go test -race -shuffle=on`, runs the
   real-Postgres suite — GitHub-hosted runners have Docker preinstalled),
-  `terraform` (fmt/init/validate against both `controller-sa/` and
-  `image-events/` examples), `docker` (build-only, no push), `web`
+  `terraform` (fmt/init/validate against `controller/`'s minimal and
+  complete examples plus the sibling `image-events/` module's own example,
+  and native `terraform test` against both), `docker` (build-only, no push), `web`
   (`npm ci && npm run lint && npm test && npm run build` in `web/`).
 
 - [x] **`.golangci.yml`** — defaults (errcheck, govet, ineffassign,
@@ -2251,3 +2252,80 @@ mocks-all-the-way-down:
   `precondition`) is pure-function unit tests, no external dependencies.
 
 Run everything: `go build ./... && go vet ./... && gofmt -l . && golangci-lint run ./... && go test ./... -race`
+
+## Terraform: `controller-sa` → `controller`, real customer-import IAM gaps closed
+
+An audit of "can a customer just `terraform apply` this and be done" found
+the module's IAM set was incomplete for real use, and its name/layout
+undersold and misdescribed its scope. Both addressed:
+
+- [x] **Renamed** `terraform/controller-sa` → `terraform/controller`
+  (every path reference across `README.md`, `CLAUDE.md`, this file, and
+  `.github/workflows/ci.yml` updated). `image-events` was briefly nested
+  under it as `modules/image-events`, then reverted back to a sibling
+  directory (see `terraform/README.md`) — nesting implied a parent/child
+  relationship that isn't true; the real relationship is an apply-order
+  dependency between two independently-lifecycled root modules.
+- [x] **Missing IAM closed**: `roles/artifactregistry.reader` (backs
+  `internal/registry`, used by both `imageupdater` and `cloudrun`'s live
+  tag-resolution path — not add-on-only, previously granted nowhere),
+  granted on a new `artifact_registry_project_ids` variable (default:
+  `management_project_id`) rather than `target_projects` — a shared
+  registry backing many deploy targets is the common shape, confirmed
+  against this project's own `us-central1-docker.pkg.dev/h7-shared-resources/runcd/...`
+  layout. Cloud SQL IAM database auth (`cloudsql.client`/
+  `cloudsql.instanceUser` + a `google_sql_user` with
+  `type = "CLOUD_IAM_SERVICE_ACCOUNT"`, gated on a new
+  `cloudsql_instance_name` variable). `google_project_service` API
+  enablement (`run`/`artifactregistry` on target projects,
+  `iam`/`cloudresourcemanager`/conditionally `secretmanager`/`sqladmin` on
+  the management project) — a fresh customer project previously failed
+  `apply` with `SERVICE_DISABLED` on first use. A `dashboard_invoker_members`
+  variable granting `run.invoker` scoped to just the controller service, for
+  the dashboard's server-to-server proxy when there's no IAP in front of it.
+- [x] **`enable_pubsub_preconditions` default flipped `true` → `false`** —
+  this grant is project-wide `pubsub.viewer`, not scoped to a specific
+  topic/subscription a manifest actually declares; a customer importing
+  with defaults shouldn't inherit fleet-wide Pub/Sub read for a feature
+  they may not use.
+- [x] **`deploy_controller`/`deploy_dashboard`** (both default `false`) —
+  the module can now optionally create the actual `google_cloud_run_v2_service`
+  resources for the controller and dashboard, not just their IAM identity,
+  for anyone who wants Terraform to own the whole thing rather than a
+  separate `gcloud run deploy`/CI step. The container image is excluded
+  from drift detection (`lifecycle.ignore_changes`) since CI redeploying a
+  new tag is the expected ongoing path — without it, the next `apply`
+  would silently revert the running service back to the initial image.
+  `deploy_dashboard` creates its own dedicated service account (distinct
+  from the controller's broader-scoped one) and automatically wires it
+  into the controller's `run.invoker` grant.
+  - **Bug caught by the native test suite below, fixed before merge**: the
+    first version of that auto-wiring built the invoker grant's `for_each`
+    over a `set(string)` containing `google_service_account.dashboard[0].email`
+    (only known after apply) — Terraform rejects an unknown value inside a
+    `for_each` set outright, which would have broken every from-scratch
+    `apply` with `deploy_dashboard = true`. Fixed by switching to a
+    `map(string)` keyed by statically-known labels (`for_each` only
+    requires *keys* to be known at plan; values may be computed).
+- [x] **Native `terraform test` suites** (`controller/tests/`,
+  1.6+ with `mock_provider "google"`, 1.7+ — zero-cost, no real GCP
+  credentials) covering every opt-in toggle's on/off behavior, the
+  Artifact Registry default-vs-override scoping, the Cloud SQL user's
+  name-derivation edge case (email suffix stripping leaves `.iam`, not the
+  whole domain — confirmed the *test's* first assertion was wrong here, not
+  the code), and every `expect_failures` variable-validation path
+  (malformed project/folder/secret IDs, missing required companion
+  variables). Wired into CI (`terraform test` alongside the existing
+  `fmt`/`validate` steps) for both `controller` and `image-events`.
+- [x] **`examples/complete`** added alongside the existing `examples/minimal`
+  — exercises every variable the minimal example leaves at its default,
+  including both deploy toggles, so `terraform validate` actually parses
+  those paths instead of only ever seeing the two variables `examples/minimal`
+  sets (per this file's own note, above, that CI never had before).
+- [x] **`image-events`**: added the same variable-validation treatment
+  (`project_id`/`region`/`trigger_name`/`service_account_id` format checks)
+  plus a `manage_audit_config` opt-out — the module's `DATA_WRITE` audit
+  config resource is authoritative for whatever it's scoped to, so applying
+  it against a project that already manages that same audit config
+  elsewhere silently overwrites it; `manage_audit_config = false` lets a
+  caller own that resource themselves instead.

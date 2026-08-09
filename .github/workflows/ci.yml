@@ -184,16 +184,31 @@ jobs:
           terraform_wrapper: false
       - name: fmt (whole terraform/ tree)
         run: terraform fmt -recursive -check -diff terraform/
-      - name: validate controller-sa via its example
-        working-directory: terraform/controller-sa/examples/minimal
+      - name: validate controller via its minimal example
+        working-directory: terraform/controller/examples/minimal
         run: |
           terraform init -backend=false
           terraform validate
+      - name: validate controller via its complete example
+        working-directory: terraform/controller/examples/complete
+        run: |
+          terraform init -backend=false
+          terraform validate
+      - name: controller native tests (mocked provider)
+        working-directory: terraform/controller
+        run: |
+          terraform init -backend=false
+          terraform test
       - name: validate image-events via its example
         working-directory: terraform/image-events/examples/minimal
         run: |
           terraform init -backend=false
           terraform validate
+      - name: image-events native tests (mocked provider)
+        working-directory: terraform/image-events
+        run: |
+          terraform init -backend=false
+          terraform test
 
   docker:
     needs: changes

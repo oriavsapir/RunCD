@@ -1,7 +1,7 @@
 # Minimal usage example — also what CI actually `init`/`validate`s, since a
 # reusable module isn't run directly; this is its root caller.
 
-module "controller_sa" {
+module "controller" {
   source = "../.."
 
   management_project_id = "example-mgmt-project"
@@ -9,5 +9,5 @@ module "controller_sa" {
 }
 
 output "controller_service_account_email" {
-  value = module.controller_sa.service_account_email
+  value = module.controller.service_account_email
 }
